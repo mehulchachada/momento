@@ -332,6 +332,30 @@ class DaemonContractTest(_DaemonCase):
         r = self.check({"cmd": "configure", "changes": {"quality": "high"}}, ok=True)  # shrinking goes through
         self.assertEqual(r["state"], "recording")
 
+    def test_low_storage(self):
+        """storage.low (additive): a full span doesn't fit, in any state; ok/no_storage unchanged."""
+        from momento import storage
+
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["storage"]["low"], r["storage"]["disk"], r["storage"]["label"]),
+                         (False, "buffer", "1080p High"))
+        self.free = self.need() - 1
+        for msg in ({"cmd": "status"}, {"cmd": "pause"}, {"cmd": "status"}, {"cmd": "stop"}, {"cmd": "status"}):
+            r = self.check(msg, ok=True)
+        self.assertEqual(r["state"], "stopped")
+        self.assertTrue(r["storage"]["low"])
+        self.assertEqual((r["storage"]["needed"], r["storage"]["available"]), (self.need(), self.need() - 1))
+        # keep_history on the same disk: the saved hour is part of the need
+        self.free = self.need() + 1
+        with mock.patch.object(storage, "same_disk", return_value=True):
+            r = self.check({"cmd": "configure", "changes": {"keep_history": "on"}}, ok=True)
+        self.assertEqual((r["storage"]["ok"], r["storage"]["low"], r["storage"]["history"]), (True, True, True))
+        self.assertEqual(r["storage"]["needed"], self.need() + storage.buffer_bytes(self.d.cfg))
+        # the configure refusal carries the same fields
+        with mock.patch.object(storage, "same_disk", return_value=True):
+            r = self.check({"cmd": "configure", "changes": {"resolution": "1440p"}}, ok=False, code="no_storage")
+        self.assertTrue(r["storage"]["low"])
+
     def test_window_mode(self):
         from momento import config
 
@@ -551,6 +575,12 @@ class ValidatorTest(unittest.TestCase):
                   "storage": {"ok": True, "free": 1, "required": 1, "reclaimable": 0, "path": "/b"}}
         self.assertEqual(validate_reply("status", status), [])
         self.assertTrue(validate_reply("status", {**status, "storage": {**status["storage"], "free": "1"}}))
+        # low storage (additive: optional)
+        low = {**status["storage"], "low": True, "needed": 2, "available": 1, "history": False, "disk": "buffer",
+               "label": "1080p High"}
+        self.assertEqual(validate_reply("status", {**status, "storage": low}), [])
+        self.assertTrue(validate_reply("status", {**status, "storage": {**low, "low": 1}}))
+        self.assertTrue(validate_reply("status", {**status, "storage": {**low, "needed": 2.5}}))
         # window mode (additive: target is optional, no_window a new state)
         self.assertEqual(validate_reply("status", {**status, "target": "window", "state": "no_window",
                                                    "error": "The game window closed"}), [])

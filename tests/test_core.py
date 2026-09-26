@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from datetime import datetime
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -578,6 +579,40 @@ class CLITest(unittest.TestCase):
         self.assertEqual(line, "3.1 GB free, needs 7.2 GB \u2014 not enough")
         line = cli.storage_line({"ok": True, "free": 3e9, "required": 7e9, "reclaimable": 5e9})
         self.assertEqual(line, "3.0 GB free + 5.0 GB buffer, needs 7.0 GB \u2014 ok")
+        # a newer daemon: "needs" is the full span (with Keep history's hour); "low" when it won't fit
+        sto = {"ok": True, "free": 9e9, "required": 7e9, "reclaimable": 0, "low": True, "needed": 14e9,
+               "available": 9e9, "history": True, "disk": "buffer", "label": "1080p High"}
+        self.assertEqual(cli.storage_line(sto), "9.0 GB free, needs 14.0 GB \u2014 low")
+        self.assertEqual(cli.low_storage_line({"state": "recording", "max_seconds": 3600, "storage": sto}),
+                         "Low storage: 60 min at 1080p High with Keep history needs 14.0 GB, 9.0 GB free. "
+                         "Free up space.")
+        self.assertIsNone(cli.low_storage_line({"state": "no_storage", "storage": sto}))  # the state says it
+        self.assertIsNone(cli.low_storage_line({"state": "recording", "storage": {**sto, "low": False}}))
+        self.assertIsNone(cli.low_storage_line({"state": "recording", "storage": {"ok": True}}))
+
+    def test_status_shows_low_storage(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        sto = {"ok": False, "free": 5_100_000_000, "required": 8_200_000_000, "reclaimable": 0, "path": "/b",
+               "low": True, "needed": 8_200_000_000, "available": 5_100_000_000, "history": False,
+               "disk": "buffer", "label": "1080p High"}
+        reply = {"ok": True, "state": "paused", "recording": False, "buffered": 12, "max_seconds": 3600,
+                 "resolution": "1080p", "quality": "high", "fps": 60, "bitrate_kbps": 15000,
+                 "output_dir": "/v", "storage": sto}
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", return_value=reply), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["status"]), 0)
+        self.assertIn("  warning: Low storage: 60 min at 1080p High needs 8.2 GB, 5.1 GB free. Free up space.",
+                      out.getvalue())
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", return_value={**reply, "storage": {**sto, "low": False}}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["status"]), 0)
+        self.assertNotIn("warning", out.getvalue())
 
 
 SINKS_JSON = json.dumps([
@@ -790,7 +825,12 @@ class DaemonControlTest(unittest.TestCase):
         fb.start()
         self.addCleanup(fb.stop)
         self.notes = []
-        nt = mock.patch.object(daemon, "notify", side_effect=lambda bus, summary, body="", icon="": self.notes.append(summary))
+        self.bodies = []
+
+        def note(bus, summary, body="", icon=""):
+            self.notes.append(summary)
+            self.bodies.append((body, icon))
+        nt = mock.patch.object(daemon, "notify", side_effect=note)
         nt.start()
         self.addCleanup(nt.stop)
         cfg = config.load(self.path)
@@ -889,7 +929,9 @@ class DaemonControlTest(unittest.TestCase):
         self.assertIn("Not enough free space: needs", st["error"])
         self.assertEqual(st["storage"]["required"], need)
         self.assertFalse(st["storage"]["ok"])
-        self.assertEqual(set(st["storage"]), {"ok", "free", "required", "reclaimable", "path"})
+        self.assertEqual(set(st["storage"]), {"ok", "free", "required", "reclaimable", "path",
+                                              "low", "needed", "available", "history", "disk", "label"})
+        self.assertTrue(st["storage"]["low"])
         self.assertEqual(len(self.notes), 1)
         # resume while blocked: refused with a code, no second notification
         r = self.call({"cmd": "resume"})
@@ -924,15 +966,16 @@ class DaemonControlTest(unittest.TestCase):
         self.free = storage.LOW_WATER
         self.d._storage_tick()
         self.assertEqual(rec.stopped, 0)
+        self.assertEqual(self.notes, ["Momento: low storage"])  # still recording: a heads-up
         self.free = storage.LOW_WATER - 1
         self.d._storage_tick()
         self.assertEqual(rec.stopped, 1)
         st = self.d.status()
         self.assertEqual(st["state"], "no_storage")
         self.assertIn("Disk almost full", st["error"])
-        self.assertEqual(len(self.notes), 1)
+        self.assertEqual(self.notes, ["Momento: low storage", "Momento: not enough disk space"])
         self.d._storage_tick()
-        self.assertEqual(len(self.notes), 1)  # notified once
+        self.assertEqual(len(self.notes), 2)  # notified once
         # A restart would delete the kept footage, so buffer bytes don't count here.
         buf = Path(self.d.cfg["buffer"]["dir"])
         buf.mkdir(parents=True, exist_ok=True)
@@ -949,7 +992,155 @@ class DaemonControlTest(unittest.TestCase):
         self.call({"cmd": "pause"})
         self.free = 0
         self.d._storage_tick()
+        self.d._storage_tick()
         self.assertEqual(self.d.status()["state"], "paused")
+        self.assertEqual(self.notes, ["Momento: low storage"])  # capture untouched; warned once
+
+    # --- low storage: a full span doesn't fit ------------------------------------------
+
+    def _full(self, **buffer):
+        """Bytes needed for a full span at the running settings (+ buffer overrides)."""
+        from momento import storage
+
+        return storage.check({**self.d.cfg, "buffer": {**self.d.cfg["buffer"], **buffer}})["needed"]
+
+    def test_low_storage_notified_once_then_rearmed(self):
+        from momento import storage
+
+        rec = self.d.recorder
+        need = self._need()
+        self.assertEqual(self._full(), need)          # without Keep history: buffer + reserve
+        self.free = need + (10 << 30)
+        self.d._storage_tick()
+        self.assertEqual(self.notes, [])
+        self.assertFalse(self.d.status()["storage"]["low"])
+        self.free = need - (1 << 30)                  # a restart wouldn't fit; capture keeps going
+        self.d._storage_tick()
+        self.assertEqual(self.notes, ["Momento: low storage"])
+        self.assertEqual(self.bodies, [(f"60 min at 1080p High needs {storage.human(need)}, "
+                                        f"{storage.human(need - (1 << 30))} free. Free up space.", "dialog-warning")])
+        st = self.d.status()
+        self.assertEqual((st["state"], st["storage"]["low"], st["storage"]["ok"]), ("recording", True, False))
+        self.assertEqual((st["storage"]["needed"], st["storage"]["available"]), (need, need - (1 << 30)))
+        for _ in range(3):
+            self.d._storage_tick()                    # every 30 s: no repeat
+        self.assertEqual(rec.stopped, 0)
+        # back above the line, but inside the hysteresis: the bar clears, the warning stays spent
+        self.free = need + (512 << 20)
+        self.d._storage_tick()
+        self.assertFalse(self.d.status()["storage"]["low"])
+        self.free = need - 1
+        self.d._storage_tick()
+        self.assertEqual(len(self.notes), 1)          # no flapping around the line
+        # clearly recovered: re-armed, so the next drop warns again
+        self.free = need + storage.REARM_MARGIN
+        self.d._storage_tick()
+        self.assertEqual(len(self.notes), 1)
+        self.free = need - 1
+        self.d._storage_tick()
+        self.assertEqual(self.notes, ["Momento: low storage"] * 2)
+
+    def test_low_storage_counts_keep_history(self):
+        from momento import storage
+
+        buf = storage.buffer_bytes(self.d.cfg)
+        need = self._need()
+        # room for the buffer, not for the buffer + the hour Keep history saves
+        self.free = need + buf // 2
+        with mock.patch.object(storage, "same_disk", return_value=True):
+            self.assertEqual(self._full(keep_history=True), need + buf)
+            r = self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["state"], "recording")
+            self.assertEqual(self.notes, ["Momento: low storage"])
+            sto = r["storage"]
+            self.assertEqual((sto["ok"], sto["low"], sto["history"]), (True, True, True))
+            self.assertEqual(sto["needed"], need + buf)
+            self.assertIn("with Keep history", storage.low_message(sto, 3600))
+            # turning it off drops the need below what is free: re-armed at once
+            self.call({"cmd": "configure", "changes": {"keep_history": "off"}})
+            self.assertFalse(self.d.status()["storage"]["low"])
+            self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+        self.assertEqual(self.notes, ["Momento: low storage"] * 2)
+
+    def test_low_storage_on_the_clips_disk(self):
+        from momento import storage
+
+        out = self.d.cfg["output"]["dir"]
+        buf = storage.buffer_bytes(self.d.cfg)
+        self.out_free = buf + storage.RESERVE - 1
+        free = mock.patch.object(storage, "free_bytes",
+                                 side_effect=lambda path: self.out_free if str(path) == out else 10**13)
+        with free, mock.patch.object(storage, "same_disk", return_value=False):
+            self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+            self.assertEqual(self.notes, ["Momento: low storage"])
+            self.assertTrue(self.bodies[0][0].startswith("Keep history needs "))
+            sto = self.d.status()["storage"]
+            self.assertEqual((sto["disk"], sto["low"], sto["ok"]), ("output", True, True))
+            self.out_free = buf + storage.RESERVE + (512 << 20)     # inside the hysteresis
+            self.d._storage_tick()
+            self.out_free = buf + storage.RESERVE - 1
+            self.d._storage_tick()
+            self.assertEqual(len(self.notes), 1)
+            self.out_free = buf + storage.RESERVE + storage.REARM_MARGIN
+            self.d._storage_tick()
+            self.out_free = buf + storage.RESERVE - 1
+            self.d._storage_tick()
+        self.assertEqual(self.notes, ["Momento: low storage"] * 2)
+
+    def test_settings_change_raising_the_need_warns(self):
+        from momento import storage
+
+        # Keep history on and room for 1080p High (buffer + hour), not for 1080p High 120 fps
+        self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+        with mock.patch.object(storage, "same_disk", return_value=True):
+            self.free = self._full() + (1 << 30)
+            self.d._storage_tick()
+            self.assertEqual(self.notes, [])
+            r = self.call({"cmd": "configure", "changes": {"fps": 120}})
+            self.assertEqual((r["ok"], r["restarted"]), (True, True))   # a restart still fits
+            self.assertEqual(self.d.status()["state"], "recording")
+            self.assertEqual(self.notes, ["Momento: low storage"])
+            self.assertEqual(r["storage"]["label"], "1080p High 120 fps")
+            self.assertTrue(r["storage"]["low"])
+            self.d._storage_tick()
+        self.assertEqual(self.notes, ["Momento: low storage"])
+
+    def test_blocked_start_is_not_notified_twice(self):
+        self.d.recorder.stop()
+        rec = FakeRecorder(self.d.cfg, self.d.ring, self.d._on_state)
+        self.d.recorder = rec
+        self.free = self._need() - 1
+        self.call({"cmd": "reload"})
+        self.assertEqual(self.d.status()["state"], "no_storage")
+        self.d._storage_tick()
+        self.assertEqual(self.notes, ["Momento: not enough disk space"])
+
+    def test_low_storage_at_daemon_start(self):
+        from gi.repository import GLib
+
+        from momento import daemon, ipc, storage
+
+        def boot(free, keep_history):
+            self.notes.clear()
+            self.free = free
+            cfg = {**self.d.cfg, "buffer": {**self.d.cfg["buffer"], "keep_history": keep_history}}
+            d = daemon.Daemon(cfg, loop=None)
+            with mock.patch.object(ipc, "Server"), mock.patch.object(GLib, "timeout_add_seconds", return_value=0), \
+                    mock.patch.object(daemon.Daemon, "start_bar"), \
+                    mock.patch.object(daemon.Daemon, "_sync_controller"), \
+                    mock.patch.object(storage, "same_disk", return_value=True):
+                d.start()
+            return d
+
+        need = self._need()
+        d = boot(need + (1 << 30), keep_history=True)     # starts, but the saved hour won't fit
+        self.assertEqual(d.status()["state"], "recording")
+        self.assertEqual(self.notes, ["Momento: low storage"])
+        d = boot(need - 1, keep_history=False)            # blocked: only today's notification
+        self.assertEqual(d.status()["state"], "no_storage")
+        self.assertEqual(self.notes, ["Momento: not enough disk space"])
+        d = boot(need + (1 << 30), keep_history=False)    # fits: nothing to say
         self.assertEqual(self.notes, [])
 
     def test_save_refused_without_space(self):
@@ -1066,6 +1257,74 @@ class StorageTest(unittest.TestCase):
         self.assertLess(req["required"]["720p/standard/60"], req["required"]["2160p/ultra/120"])
         self.assertEqual(len(req["required"]), 30)
         self.assertEqual(cfg["capture"]["resolution"], "1080p")  # not mutated
+
+    def test_full_span_need(self):
+        from unittest import mock
+
+        from momento import storage
+
+        for fps in (60, 120):
+            cfg = self.cfg(resolution="1080p", quality="high", fps=fps)
+            need = storage.required_bytes(cfg)
+            with mock.patch.object(storage, "free_bytes", return_value=need - 1):
+                chk = storage.check(cfg)
+            self.assertEqual((chk["ok"], chk["low"], chk["needed"], chk["available"]), (False, True, need, need - 1))
+            self.assertEqual((chk["history"], chk["disk"]), (False, "buffer"))
+            with mock.patch.object(storage, "free_bytes", return_value=need):
+                self.assertFalse(storage.check(cfg)["low"])
+        self.assertEqual(storage.check(self.cfg(fps=120))["label"], "1080p High 120 fps")
+        # 120 fps: 1.5x the video bits, rounded to whole Mbps (15 -> 22 Mbps at 1080p High)
+        self.assertEqual(storage.buffer_bytes(self.cfg(fps=120)), int((22_000 + 160) * 1000 / 8 * 3600 * 1.05))
+        # the buffer length and an explicit bitrate count too
+        cfg = self.cfg(bitrate_kbps=50_000)
+        cfg["buffer"]["max_seconds"] = 1800
+        self.assertEqual(storage.check(cfg)["needed"], int((50_000 + 160) * 1000 / 8 * 1800 * 1.05) + (1 << 30))
+
+    def test_full_span_need_with_keep_history(self):
+        from unittest import mock
+
+        from momento import storage
+
+        cfg = self.cfg(fps=120)
+        cfg["buffer"]["keep_history"] = True
+        buf, need = storage.buffer_bytes(cfg), storage.required_bytes(cfg)
+        self.assertEqual(storage.history_bytes(cfg), buf)
+        # same disk: buffer + the saved hour + reserve
+        with mock.patch.object(storage, "same_disk", return_value=True), \
+                mock.patch.object(storage, "free_bytes", return_value=need + buf - 1):
+            chk = storage.check(cfg)
+        self.assertEqual((chk["ok"], chk["low"], chk["history"], chk["needed"]), (True, True, True, need + buf))
+        with mock.patch.object(storage, "same_disk", return_value=True), \
+                mock.patch.object(storage, "free_bytes", return_value=need + buf):
+            self.assertFalse(storage.check(cfg)["low"])
+        # the clips on another disk: the hour is checked there
+        out = cfg["output"]["dir"]
+        free = {cfg["buffer"]["dir"]: 10**13, out: buf}
+        with mock.patch.object(storage, "same_disk", return_value=False), \
+                mock.patch.object(storage, "free_bytes", side_effect=lambda p: free[str(p)]):
+            chk = storage.check(cfg)
+            self.assertEqual((chk["ok"], chk["low"], chk["disk"], chk["history"]), (True, True, "output", True))
+            self.assertEqual((chk["needed"], chk["available"]), (buf + (1 << 30), buf))
+            self.assertTrue(storage.low_message(chk, 3600).startswith("Low storage: Keep history needs "))
+            free[out] = 10**13
+            chk = storage.check(cfg)
+            self.assertEqual((chk["low"], chk["history"], chk["needed"]), (False, False, need))
+        # off: nothing extra
+        cfg["buffer"]["keep_history"] = False
+        self.assertEqual(storage.history_bytes(cfg), 0)
+
+    def test_low_message(self):
+        from momento import storage
+
+        chk = {"ok": True, "low": True, "needed": 8_200_000_000, "available": 5_100_000_000,
+               "history": False, "disk": "buffer", "label": "1080p High"}
+        self.assertEqual(storage.low_message(chk, 3600),
+                         "Low storage: 60 min at 1080p High needs 8.2 GB, 5.1 GB free. Free up space.")
+        self.assertEqual(storage.low_message({**chk, "history": True, "needed": 15_400_000_000}, 1800),
+                         "Low storage: 30 min at 1080p High with Keep history needs 15.4 GB, 5.1 GB free. "
+                         "Free up space.")
+        self.assertEqual(storage.span(90), "1m30s")
+        self.assertEqual(storage.span(3600), "60 min")
 
     def test_free_bytes_uses_existing_parent(self):
         from momento import storage

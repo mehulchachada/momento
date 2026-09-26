@@ -90,6 +90,14 @@ TIGHT_STORAGE = {**OK_STORAGE, "free": 11.3e9, "reclaimable": 0}
 
 LOW_ERROR = "Not enough free space: needs 7.2 GB, 3.1 GB free"
 LOW = {"ok": False, "free": 3.1e9, "reclaimable": 0, "required": 7.2e9, "path": "/home/user/.cache/momento"}
+# A daemon with the low-storage rule: a full 60 min at 1080p High doesn't fit (still recording).
+SHORT_SPAN = {"ok": False, "free": 5_100_000_000, "reclaimable": 0, "required": 8_200_000_000,
+              "path": "/home/user/.cache/momento", "low": True, "needed": 8_200_000_000,
+              "available": 5_100_000_000, "history": False, "disk": "buffer", "label": "1080p High"}
+SHORT_SPAN_MSG = "Low storage: 60 min at 1080p High needs 8.2 GB, 5.1 GB free. Free up space."
+# Keep history: the buffer fits, the hour it saves to Videos doesn't (yellow).
+SHORT_HISTORY = {**SHORT_SPAN, "ok": True, "free": 11_300_000_000, "needed": 15_400_000_000,
+                 "available": 11_300_000_000, "history": True}
 
 
 class FakeDaemon:
@@ -717,6 +725,59 @@ class OverlayOffscreen(unittest.TestCase):
         bar.apply_status(daemon.request({"cmd": "status"}))
         self.assertTrue(bar.options[0].isEnabled())
         self.assertEqual((bar.name.text(), bar.time.text()), ("Low storage", "2:00"))
+
+    def test_low_storage_warning_in_every_view(self):
+        daemon = FakeDaemon(True, storage=SHORT_SPAN)
+        bar = self.make(daemon)
+        self.assertEqual(bar.view, "rec")                     # recording goes on
+        self.assertFalse(bar.hintbar.isHidden())
+        self.assertIn(SHORT_SPAN_MSG, bar.hintbar.text())
+        self.assertIn(overlay.RED, bar.hintbar.text())        # a restart wouldn't fit either
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2 + overlay.HINT_H + 1)
+        self.assertEqual(bar.storage_hint.level, "short")
+        self.assertTrue(all(o.isEnabled() for o in bar.options[:5]))  # saving works as usual
+        self.shot(bar, "warning-recording", "storage")
+        daemon.paused = True                                  # paused: the warning replaces the paused hint
+        bar.apply_status(daemon.request({"cmd": "status"}))
+        self.assertEqual(bar.view, "paused")
+        self.assertIn(SHORT_SPAN_MSG, bar.hintbar.text())
+        self.assertNotIn(overlay.PAUSED_HINT, bar.hintbar.text())
+        daemon.paused, daemon.stopped = False, True
+        bar.apply_status(daemon.request({"cmd": "status"}))
+        self.assertEqual(bar.view, "stopped")
+        self.assertIn(SHORT_SPAN_MSG, bar.hintbar.text())
+        pump(self.app, 0.1)                                   # let the layout settle for the picture
+        self.shot(bar, "warning-stopped", "storage")
+        # space freed: the strip goes away
+        daemon.storage = OK_STORAGE
+        bar.apply_status(daemon.request({"cmd": "status"}))
+        self.assertTrue(bar.hintbar.isHidden())
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
+
+    def test_low_storage_warning_keep_history(self):
+        bar = self.make(FakeDaemon(True, storage=SHORT_HISTORY, extra={"keep_history": True}))
+        self.assertEqual(bar.view, "rec")
+        text = bar.hintbar.text()
+        self.assertIn("Low storage: 60 min at 1080p High with Keep history needs 15.4 GB, 11.3 GB free. "
+                      "Free up space.", text)
+        self.assertIn(overlay.YELLOW, text)                   # a restart still fits: a heads-up
+        self.assertEqual(bar.storage_hint.level, "tight")
+        self.shot(bar, "warning-keep-history", "storage")
+        # an error or refusal shown later is red again
+        bar.show_storage_warning("Not enough free space")
+        self.assertIn(overlay.RED, bar.hintbar.text())
+
+    def test_no_warning_when_the_span_fits(self):
+        bar = self.make(FakeDaemon(True, storage={**SHORT_SPAN, "ok": True, "low": False, "free": 742e9,
+                                                  "available": 742e9}))
+        self.assertTrue(bar.hintbar.isHidden())
+        # blocked: the daemon's own message wins over the low-storage line
+        daemon = FakeDaemon(True, storage=SHORT_SPAN, extra={"state": "no_storage", "recording": False,
+                                                             "error": LOW_ERROR})
+        bar = self.make(daemon)
+        self.assertEqual(bar.view, "lowstorage")
+        self.assertIn("needs 7.2 GB, 3.1 GB free. Free up space", bar.hintbar.text())
+        self.assertNotIn("60 min", bar.hintbar.text())
 
     def test_paused_resume_blocked_by_storage(self):
         daemon = FakeDaemon(True, paused=True, extra={"storage": LOW})
