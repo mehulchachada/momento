@@ -2,7 +2,7 @@
 
     python3 -m unittest tests.test_overlay_offscreen
 
-Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3}-*.png
+Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3,v4}-*.png
 (override with $MOMENTO_SHOT_DIR). Each is the bar composited over a plain backdrop that
 stands in for the game.
 """
@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QEvent, QPoint, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPixmap  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from momento import config, ipc, overlay, quality, settings  # noqa: E402
@@ -66,19 +67,25 @@ def settings_reply(devices=DEVICES, free=None, **values):
     return data
 
 
+OK_STORAGE = {"ok": True, "free": 742e9, "reclaimable": 2.1e9, "required": 7.9e9,
+              "path": "/home/user/.cache/momento"}
+TIGHT_STORAGE = {**OK_STORAGE, "free": 11.3e9, "reclaimable": 0}
+
 LOW_ERROR = "Not enough free space: needs 7.2 GB, 3.1 GB free"
 LOW = {"ok": False, "free": 3.1e9, "reclaimable": 0, "required": 7.2e9, "path": "/home/user/.cache/momento"}
 
 
 class FakeDaemon:
     def __init__(self, running=True, fail=False, devices=DEVICES, paused=False, extra=None, free=None,
-                 resume_reply=None, values=None, configure_reply=None):
+                 resume_reply=None, values=None, configure_reply=None, storage=OK_STORAGE):
         self.running, self.fail, self.devices, self.paused = running, fail, devices, paused
         self.extra = dict(extra or {})   # merged into every status reply
         self.free = free                 # settings: free bytes for the storage check
         self.resume_reply = resume_reply
         self.values = dict(values or {})  # settings: current config values
         self.configure_reply = configure_reply
+        self.storage = storage           # status: the storage block (None = an older daemon)
+        self.stopped = False
         self.saves = []
         self.configures = []
         self.controls = []
@@ -88,7 +95,11 @@ class FakeDaemon:
             raise ipc.DaemonNotRunning("no socket")
         if msg["cmd"] == "status":
             st = dict(STATUS)
-            if self.paused:
+            if self.storage:
+                st["storage"] = dict(self.storage)
+            if self.stopped:
+                st.update(state="stopped", recording=False, buffered=0)
+            elif self.paused:
                 st.update(state="paused", recording=False)
             st.update(self.extra)
             return st
@@ -100,6 +111,12 @@ class FakeDaemon:
             if self.configure_reply:
                 return self.configure_reply
             return {"ok": True, "changed": msg["changes"], "restarted": True, "paused": False}
+        if msg["cmd"] == "stop":
+            # the service keeps running; recording stops and the history is cleared
+            self.controls.append("stop")
+            self.stopped, self.paused = True, False
+            self.extra.pop("buffered", None)
+            return {"ok": True, "state": "stopped", "buffer_cleared": True}
         if msg["cmd"] in ("pause", "resume", "quit"):
             self.controls.append(msg["cmd"])
             if msg["cmd"] == "resume" and self.resume_reply:
@@ -107,7 +124,7 @@ class FakeDaemon:
             if msg["cmd"] == "pause":
                 self.paused = True
             elif msg["cmd"] == "resume":
-                self.paused = False
+                self.paused = self.stopped = False
             elif msg["cmd"] == "quit":
                 self.running = False
             return {"ok": True, "state": "paused" if self.paused else "starting"}
@@ -157,6 +174,7 @@ class OverlayOffscreen(unittest.TestCase):
         return bar
 
     def shot(self, bar, name, prefix="overlay"):
+        bar.settle()  # finish pill transitions so the picture shows the end state
         img = bar.grab()
         canvas = QPixmap(img.width() + 80, img.height() + 60)
         canvas.fill(QColor("#4a5563"))
@@ -201,9 +219,18 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.options[4].hasFocus())
         self.key(Qt.Key_Left)
         self.key(Qt.Key_Right)
-        self.assertEqual((bar.view, bar.name.text()), ("rec", "Replay"))
+        # recording: just the logo, the red dot and the time -- no "Replay" label
+        self.assertEqual((bar.view, bar.name.text()), ("rec", ""))
+        self.assertTrue(bar.name.isHidden())
+        self.assertIn(overlay.RED, bar.dot.styleSheet())
+        self.assertTrue(bar.logo.isVisible())
+        self.assertLess(bar.logo.mapTo(bar, bar.logo.rect().topLeft()).x(),
+                        bar.dot.mapTo(bar, bar.dot.rect().topLeft()).x())
+        self.assertEqual(bar.logo.width(), overlay.LOGO_SIZE)
+        self.assertEqual((bar.storage_hint.level, bar.storage_hint.label), ("ok", "742 GB"))
         self.shot(bar, "normal")
         self.shot(bar, "clip", "v3")
+        self.shot(bar, "clip-recording-green", "v4")
 
         h = bar.size()
         self.key(Qt.Key_Return)  # saves 5m
@@ -234,6 +261,7 @@ class OverlayOffscreen(unittest.TestCase):
     def assert_off(self, bar):
         self.assertEqual(bar.stack.currentIndex(), 0)          # the same clip bar, not a line page
         self.assertEqual((bar.view, bar.name.text(), bar.time.text()), ("off", "Off", "—"))
+        self.assertTrue(all(o.visual_state == "disabled" for o in bar.options))
         self.assertTrue(all(not o.isEnabled() for o in bar.options))
         play = bar.controls[0]["pause"]
         self.assertEqual(play.kind, "start")
@@ -256,6 +284,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(daemon.saves, [])
         self.shot(bar, "off")
         self.shot(bar, "off", "v3")
+        self.shot(bar, "daemon-off", "v4")
         self.assertEqual(bar.width(), self.make(FakeDaemon(True)).width())  # same bar, same size
 
     # ---------------------------------------------------------------- gear / settings
@@ -447,6 +476,7 @@ class OverlayOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         self.shot(bar, "paused", "controls")
         self.shot(bar, "paused", "v3")
+        self.shot(bar, "paused", "v4")
         self.key(Qt.Key_P)
         self.wait_for(lambda: not bar.paused and not bar.control_busy)
         self.assertEqual(daemon.controls, ["pause", "resume"])
@@ -469,7 +499,9 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Return)
         self.assertEqual(bar.mode, "confirm")
         self.assertTrue(bar.stop_no.hasFocus())   # safe default
-        self.assertIn("Stop Momento?", bar.confirm.text())
+        self.assertIn("Stop recording?", bar.confirm.text())
+        self.assertIn("The replay history is cleared.", bar.confirm.text())
+        self.assertEqual((bar.stop_yes.text(), bar.stop_no.text()), ("Stop", "Cancel"))
         self.shot(bar, "stop-confirm", "controls")
         self.key(Qt.Key_Return)                   # Cancel
         self.assertEqual(bar.mode, "clip")
@@ -480,13 +512,46 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.stop_yes.hasFocus())
         pump(self.app, 0.05)
         self.shot(bar, "stop-confirm-focus", "controls")
+        self.shot(bar, "stop-confirm", "v4")
         self.key(Qt.Key_Return)
+        self.wait_for(lambda: daemon.controls == ["stop"] and not bar.control_busy)
+        self.assertNotIn("quit", daemon.controls)
+        self.assertTrue(daemon.running)           # the service (and the hotkey) stay up
+        self.assert_off(bar)
+        self.assertTrue(bar.running and bar.stopped)
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())
+        bar.refresh_async()                       # the daemon itself now reports "stopped"
+        self.wait_for(lambda: not bar.status_inflight)
+        self.assertEqual(bar.last_status["state"], "stopped")
+        self.assert_off(bar)
+        self.assertEqual(bar.storage_hint.level, "ok")   # still reachable: free space is known
+        self.shot(bar, "off-start", "controls")
+        self.shot(bar, "stopped-off", "v4")
+        # play resumes the running service instead of starting a new one
+        orig = overlay.start_daemon
+        overlay.start_daemon = lambda: self.fail("must not start a second daemon")
+        self.addCleanup(setattr, overlay, "start_daemon", orig)
+        self.key(Qt.Key_P)
+        self.wait_for(lambda: daemon.controls == ["stop", "resume"] and not bar.control_busy)
+        self.wait_for(lambda: bar.view == "rec")
+        self.assertFalse(bar.stopped)
+
+    def test_stop_older_daemon_falls_back_to_quit(self):
+        daemon = FakeDaemon(True)
+        orig_request = daemon.request
+
+        def old(msg, **kw):
+            if msg["cmd"] == "stop":
+                return {"ok": False, "error": "unknown command 'stop'"}
+            return orig_request(msg, **kw)
+        daemon.request = old
+        bar = self.make(daemon)
+        bar.ask_stop()
+        bar.confirm_stop()
         self.wait_for(lambda: daemon.controls == ["quit"] and not bar.control_busy)
         bar.refresh_async()
-        self.wait_for(lambda: bar.view == "off")
+        self.wait_for(lambda: bar.view == "off" and not bar.running)
         self.assert_off(bar)
-        self.assertTrue(bar.controls[0]["pause"].hasFocus())
-        self.shot(bar, "off-start", "controls")
 
     def test_start_from_off(self):
         daemon = FakeDaemon(False)
@@ -565,6 +630,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(daemon.controls, [])
         self.assertFalse(bar.hintbar.isHidden())
         self.shot(bar, "lowstorage-bar", "v3")
+        self.assertEqual(bar.storage_hint.level, "short")
+        self.shot(bar, "lowstorage-red", "v4")
         # footage already buffered stays saveable
         daemon.extra["buffered"] = 120.0
         bar.apply_status(daemon.request({"cmd": "status"}))
@@ -582,7 +649,9 @@ class OverlayOffscreen(unittest.TestCase):
 
     def test_resume_reply_no_storage(self):
         err = "1440p Ultra needs 18.9 GB free, 9.4 GB available"
-        daemon = FakeDaemon(True, paused=True, resume_reply={"ok": False, "code": "no_storage", "error": err})
+        # status without a storage block (an older daemon): the refusal's own warning must stay
+        daemon = FakeDaemon(True, paused=True, storage=None,
+                            resume_reply={"ok": False, "code": "no_storage", "error": err})
         bar = self.make(daemon)
         self.key(Qt.Key_P)
         self.wait_for(lambda: daemon.controls == ["resume"] and not bar.control_busy)
@@ -649,6 +718,116 @@ class OverlayOffscreen(unittest.TestCase):
         self.wait_for(lambda: bar.mode == "clip", timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
         self.assertEqual(bar.view, "lowstorage")
         self.assertIn("needs 10.8 GB", bar.hintbar.text())
+
+    # ---------------------------------------------------------------- pills / focus / hints
+
+    def test_mouse_click_leaves_no_focus_highlight(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        pause = bar.controls[0]["pause"]
+        one = bar.options[2]
+        self.assertEqual(one.visual_state, "focus")          # opened by the hotkey: focus shown
+        self.assertEqual(pause.visual_state, "rest")
+        self.app.sendEvent(pause, QEvent(QEvent.Enter))
+        self.assertEqual(pause.visual_state, "hover")
+        self.assertTrue(pause.active)
+        QTest.mouseClick(pause, Qt.LeftButton)
+        self.wait_for(lambda: bar.paused and not bar.control_busy)
+        self.assertFalse(pause.hasFocus())                   # a click does not take focus
+        self.assertFalse(bar.focus_visible)
+        self.app.sendEvent(pause, QEvent(QEvent.Leave))
+        self.assertEqual(pause.visual_state, "rest")         # the highlight goes with the mouse
+        self.assertFalse(pause.active)
+        pump(self.app, (overlay.ANIM_MS + 120) / 1000)
+        fill, text, ring = pause.current()
+        self.assertEqual(fill.name(), overlay.PILL_REST.lower())
+        self.assertEqual(ring, 0.0)
+        self.assertFalse(any(b.active for b in bar.pills()))  # nothing else lit either
+        self.assertEqual(daemon.controls, ["pause"])
+        # the keyboard brings focus back, on the widget that has it
+        self.key(Qt.Key_Right)
+        self.assertTrue(bar.focus_visible)
+        self.assertEqual(bar.options[3].visual_state, "focus")
+        self.assertEqual(one.visual_state, "rest")
+        pump(self.app, (overlay.ANIM_MS + 120) / 1000)
+        fill, text, ring = bar.options[3].current()
+        self.assertEqual((fill.name(), text.name(), ring), (overlay.PILL_ON.lower(), "#111111", 1.0))
+
+    def test_keyboard_focus_on_a_pill(self):
+        bar = self.make(FakeDaemon(True))
+        self.key(Qt.Key_Right)
+        self.key(Qt.Key_Right)                               # 5m
+        states = [o.visual_state for o in bar.options]
+        self.assertEqual(states[4], "focus")
+        self.assertEqual(states.count("focus"), 1)
+        for o in bar.options:
+            r = o.pill_rect()
+            self.assertEqual(r.height(), overlay.PILL_H)
+            self.assertAlmostEqual(r.center().y(), o.height() / 2)
+        for b in bar.controls[0].values():                   # icon buttons are circles
+            r = b.pill_rect()
+            self.assertEqual((r.width(), r.height()), (overlay.PILL_H, overlay.PILL_H))
+        self.shot(bar, "keyboard-focus-pill", "v4")
+        self.key(Qt.Key_Tab)
+        self.key(Qt.Key_Tab)
+        self.key(Qt.Key_Tab)
+        self.key(Qt.Key_Tab)                                 # 60m -> gear
+        self.assertEqual(bar.gear.visual_state, "focus")
+        self.assertEqual(bar.options[4].visual_state, "rest")
+
+    def test_settings_selected_and_focused_pills(self):
+        bar = self.make(FakeDaemon(True, free=9.4e9))
+        self.open_settings(bar)
+        res, fps, qual = bar.row("resolution"), bar.row("fps"), bar.row("quality")
+        self.assertEqual(res.buttons[1].visual_state, "focus")      # 1080p: selected + focused
+        self.assertEqual(qual.buttons[qual.idx].visual_state, "selected")
+        self.assertEqual(fps.buttons[fps.idx].visual_state, "selected")
+        self.assertEqual(res.buttons[0].visual_state, "rest")
+        self.assertTrue(res.buttons[2].property("nofit"))            # still marked
+        self.key(Qt.Key_Down)                                        # frame rate row
+        self.assertEqual(res.buttons[1].visual_state, "selected")
+        self.assertEqual(fps.buttons[fps.idx].visual_state, "focus")
+        self.assertEqual(bar.apply_btn.pill_rect().height(), overlay.PILL_H)
+        self.shot(bar, "settings-selected-focused", "v4")
+        # a click on a value selects it and hides the keyboard ring
+        QTest.mouseClick(qual.buttons[0], Qt.LeftButton)
+        self.assertEqual(qual.value, "standard")
+        self.assertFalse(bar.focus_visible)
+        self.app.sendEvent(qual.buttons[0], QEvent(QEvent.Leave))
+        self.assertEqual(qual.buttons[0].visual_state, "selected")
+        self.assertEqual(fps.buttons[fps.idx].visual_state, "selected")
+
+    def test_storage_hint_levels(self):
+        cases = [(OK_STORAGE, "ok", overlay.GREEN, "742 GB"),
+                 (TIGHT_STORAGE, "tight", overlay.YELLOW, "11.3 GB"),
+                 ({**LOW, "ok": False}, "short", overlay.RED, "3.1 GB")]
+        widths = set()
+        for sto, level, color, label in cases:
+            bar = self.make(FakeDaemon(True, storage=sto))
+            self.assertFalse(bar.storage_hint.isHidden())
+            self.assertEqual((bar.storage_hint.level, bar.storage_hint.color, bar.storage_hint.label),
+                             (level, color, label))
+            widths.add(bar.width())
+            xs = tuple(o.mapTo(bar, o.rect().topLeft()).x() for o in bar.options)
+            widths.add(xs)
+            if level == "tight":
+                self.shot(bar, "storage-yellow", "v4")
+            if level == "short":
+                self.shot(bar, "storage-red", "v4")
+        self.assertEqual(len(widths), 2)                     # same width, same pill positions
+        self.assertEqual(overlay._storage_level({"free": 9e9, "reclaimable": 0, "required": 5e9}), "tight")
+        self.assertEqual(overlay._storage_level({"free": 3e9, "reclaimable": 2.5e9, "required": 5e9}), "tight")
+        self.assertEqual(overlay._storage_level({"free": 3e9, "reclaimable": 0, "required": 5e9}), "short")
+        self.assertEqual(overlay._free_label(9.4e9), "9.4 GB")
+        self.assertEqual(overlay._free_label(1.25e12), "1.2 TB")
+
+    def test_storage_hint_hidden_without_info(self):
+        bar = self.make(FakeDaemon(True, storage=None))       # an older daemon
+        self.assertTrue(bar.storage_hint.isHidden())
+        self.assertIsNone(bar.storage_hint.level)
+        off = self.make(FakeDaemon(False))                   # daemon not running
+        self.assertTrue(off.storage_hint.isHidden())
+        self.assertEqual(bar.width(), off.width())
 
 
 if __name__ == "__main__":
