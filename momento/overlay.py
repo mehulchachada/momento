@@ -22,6 +22,11 @@ Audio, Controller, Misc) over a few segmented rows; one Apply sends the
 changes of every tab through the daemon's ``configure`` IPC, or straight to
 the config file when the daemon is off.
 
+Left of the free space sits the gallery button (key G): saved clips and
+screenshots, browsed and played in the bar, which grows upward again. That
+part lives in ``momento.gallery`` and is imported on the first open only, so a
+resident bar that never shows it never loads QtMultimedia.
+
 Window mode (settings: Record -> Window): while stopped (the picked window
 closed, or nothing picked yet) the bar says "Press play to pick a window";
 play sends ``resume`` and the daemon opens the window picker itself. The bar
@@ -95,6 +100,10 @@ SEG_SPACING = 0          # pills carry their own gap (PILL_INSET)
 ARROW_W = PILL_H + 2 * PILL_INSET
 CYCLE_OVER = 4           # more devices than this -> ‹ current › instead of a row of names
 SETTINGS_IDLE_MS = 30_000
+GALLERY_IDLE_MS = 60_000   # the gallery hides after this long without input (never while a clip plays)
+GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
+GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
+GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
 START_TIMEOUT_S = 10
 START_POLL_S = 0.5
 LOGO_SIZE = 18
@@ -453,6 +462,51 @@ def _apply_layer_shell(widget) -> bool:
     return True
 
 
+def _apply_layer_shell_full(widget, screen=None) -> bool:
+    """The gallery's full screen view: an Overlay-layer surface anchored to every
+    edge of ``screen`` (the bar's), over panels too, taking the keyboard.
+
+    Same rules as ``_apply_layer_shell``: after winId(), before the first show().
+    """
+    import shiboken6
+
+    found = _layer_window(widget)
+    if found is None:
+        return False
+    lib, lsw = found
+    this = ctypes.c_void_p(lsw)
+
+    def call(sym, value, argtype=ctypes.c_int):
+        fn = getattr(lib, sym)
+        fn.restype = None
+        fn.argtypes = [ctypes.c_void_p, argtype]
+        fn(this, value)
+
+    call("_ZN12LayerShellQt6Window8setLayerENS0_5LayerE", 3)                        # Overlay
+    call("_ZN12LayerShellQt6Window10setAnchorsE6QFlagsINS0_6AnchorEE", 15)          # every edge
+    call(KEYBOARD_SYM, 1)                                                           # Exclusive
+    try:
+        call("_ZN12LayerShellQt6Window16setExclusiveZoneEi", -1)                    # over panels too
+    except AttributeError:
+        pass
+    if screen is not None:
+        try:
+            call("_ZN12LayerShellQt6Window22setScreenConfigurationENS0_19ScreenConfigurationE", 0)  # from QWindow
+        except AttributeError:
+            pass
+        try:
+            call("_ZN12LayerShellQt6Window9setScreenEP7QScreen",
+                 shiboken6.getCppPointer(screen)[0], ctypes.c_void_p)
+        except (AttributeError, TypeError):
+            pass
+    try:
+        from PySide6.QtCore import QObject
+        shiboken6.wrapInstance(lsw, QObject).setProperty("scope", "momento-gallery")
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -651,6 +705,31 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
             a = math.radians(deg)
             c, s_ = math.cos(a), math.sin(a)
             p.drawLine(P(x + 5.2 * c, y + 5.2 * s_), P(x + 7.4 * c, y + 7.4 * s_))
+    elif kind == "gallery":
+        # a media library: a photo (a mountain and a sun in a frame) on a stack
+        # of them; the back frame shows only where the front one leaves room
+        from PySide6.QtGui import QPainterPathStroker
+
+        front = QRectF(x - 7.5, y - 3.5, 12.5, 10.0)
+        back = QPainterPath()
+        back.addRoundedRect(front.translated(2.8, -3.0), 2.2, 2.2)
+        st = QPainterPathStroker()
+        st.setWidth(width - 0.1)
+        st.setJoinStyle(Qt.RoundJoin)
+        gap = QPainterPath()
+        gap.addRoundedRect(front.adjusted(-2.0, -2.0, 2.0, 2.0), 3.6, 3.6)
+        p.drawRoundedRect(front, 2.2, 2.2)
+        frame = QPainterPath()
+        frame.addRoundedRect(front, 2.2, 2.2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawPath(st.createStroke(back).subtracted(gap))
+        p.setClipPath(frame)
+        left, bottom = front.left(), front.bottom()
+        p.drawPolygon(QPolygonF([P(left, bottom), P(left + 4.2, bottom - 5.0), P(left + 7.0, bottom - 2.4),
+                                 P(left + 8.6, bottom - 3.9), P(front.right(), bottom - 0.4),
+                                 P(front.right(), bottom)]))
+        p.drawEllipse(P(front.right() - 3.3, front.top() + 3.2), 1.35, 1.35)
     elif kind == "lock":
         p.drawRoundedRect(QRectF(x - 5.5, y - 1.5, 11, 8.5), 2, 2)
         shackle = QPainterPath(P(x - 3.3, y - 1.5))
@@ -963,7 +1042,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         TIPS = {"gear": "Settings (S)", "pause": "Pause recording (P)", "play": "Resume recording (P)",
                 "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a window (P)",
-                "shot": "Take a screenshot"}
+                "shot": "Take a screenshot", "gallery": "Gallery (G)"}
 
         def __init__(self, kind):
             super().__init__("")
@@ -1003,6 +1082,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 p.drawRoundedRect(QRectF(x - 5.5, y - 5.5, 11, 11), 1.5, 1.5)
             elif self.kind == "shot":
                 p.drawPath(_camera_path(x, y))
+            elif self.kind == "gallery":
+                _draw_line_glyph(p, "gallery", x, y, color.name())
 
     class SegButton(Pill):
         def __init__(self, text="", tip=None):
@@ -1275,7 +1356,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.resume_picks = False  # play from stopped in window mode: the picker opens
             self.status_inflight = False
             self.last_status = None
-            self.mode = "clip"        # clip | settings | confirm
+            self.mode = "clip"        # clip | settings | confirm | gallery
             self.control_busy = False  # pause / resume / start / stop in flight
             self.stopping = False
             self.loading_settings = False
@@ -1301,6 +1382,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.applied = None       # settings: the changes the last Apply sent
             self.pads = None          # game controllers while the bar is on screen
             self.pads_handle = None
+            self.gallery = None       # momento.gallery.Gallery, built on the first open
+            self.gallery_hint = None  # "No clips or screenshots yet" in the strip above the bar
             self.bridge = Bridge()
             self.bridge.status.connect(self._sig_status)
             self.bridge.saved.connect(self._sig_saved)
@@ -1345,6 +1428,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.panel_lay.setSpacing(0)
             self.panel.hide()
             outer.addWidget(self.panel)
+            # the gallery (momento/gallery.py) builds its panel in here on its first open
+            self.gallery_host = QWidget()
+            gl = QVBoxLayout(self.gallery_host)
+            gl.setContentsMargins(0, 0, 0, 0)
+            gl.setSpacing(0)
+            self.gallery_host.hide()
+            outer.addWidget(self.gallery_host)
             self.sep = QFrame()
             self.sep.setFixedHeight(1)
             self.sep.setStyleSheet(f"background: {BORDER}; margin: 0 12px;")
@@ -1390,6 +1480,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.time.setFont(ui_font(tabular=True))
             hrow.addWidget(self.time)
             hrow.addStretch(1)
+            # the gallery: saved clips and screenshots, played right here (key G)
+            self.gallery_btn = IconButton("gallery")
+            self.gallery_btn.clicked.connect(self.open_gallery)
+            hrow.addWidget(self.gallery_btn)
+            hrow.addSpacing(4)
             self.storage_hint = StorageHint()
             hrow.addWidget(self.storage_hint)
             nfm, tfm = self.name.fontMetrics(), QFontMetrics(ui_font(tabular=True))
@@ -1403,7 +1498,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                            for n, t in (("Starting", "00:00"), ("Off", "—"), ("Error", "00:00"),
                                         ("Low storage", "00:00"))])
             self.stopped_w = block + 16 - 8   # the stopped sentence's room (the name's margin aside)
-            head.setFixedWidth(LOGO_SIZE + 12 + 16 + block + 12 + self.storage_hint.width())
+            head.setFixedWidth(LOGO_SIZE + 12 + 16 + block + 12 + ICON_W + 4 + self.storage_hint.width())
             row.addWidget(head)
             row.addSpacing(10)
             row.addWidget(divider())
@@ -1471,6 +1566,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             crow.addSpacing(8)
             self.stack.addWidget(conf)
 
+            # page 4: the gallery's footer (built by the gallery on its first open)
+            self.gallery_foot = QWidget()
+            gfl = QVBoxLayout(self.gallery_foot)
+            gfl.setContentsMargins(0, 0, 0, 0)
+            gfl.setSpacing(0)
+            self.stack.addWidget(self.gallery_foot)
+
             # Width is fixed to the picker so the bar never jumps between states;
             # only the height changes (upward) for the hint line and settings.
             self.bar_w = picker.sizeHint().width() + 2
@@ -1491,6 +1593,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.ticker = QTimer(self)
             self.ticker.setInterval(TICK_MS)
             self.ticker.timeout.connect(self.on_tick)
+            self.pad_renew = QTimer(self)       # the gallery keeps a grabbed controller
+            self.pad_renew.setInterval(GALLERY_RENEW_MS)
+            self.pad_renew.timeout.connect(self.renew_pads)
 
         # Results from worker threads, dropped when they belong to an earlier open.
         def _sig_status(self, gen, st):
@@ -1552,7 +1657,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             top = 0
             hint = None
             if self.mode == "clip" and not self.done and not self.saving:
-                if self.warn:
+                if self.gallery_hint:
+                    hint = _esc(self.gallery_hint)
+                elif self.warn:
                     fm = self.hintbar.fontMetrics()
                     text = fm.elidedText(self.warn, Qt.ElideRight, self.bar_w - 2 - 34)
                     color = YELLOW if self.warn == self.soft_warn else RED
@@ -1572,6 +1679,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 top += ph
             else:
                 self.panel.hide()
+            if self.mode == "gallery" and self.gallery is not None:
+                gh = self.gallery.panel_height()
+                self.gallery_host.setFixedHeight(gh)
+                self.gallery_host.show()
+                top += gh
+            else:
+                self.gallery_host.hide()
             self.sep.setHidden(top == 0)
             h = BAR_HEIGHT + 2 + top + (1 if top else 0)
             if h == self.height():
@@ -1814,6 +1928,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def hideEvent(self, ev):
             self.ticker.stop()
+            self.close_gallery()      # a hidden bar never plays anything
             self.pads_close()         # a hidden bar holds no controller (and no fds)
             super().hideEvent(ev)
 
@@ -2577,9 +2692,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_pad_action(self, action, repeat=False):
             if not self.isVisible():
                 return
-            if not self.saving and not self.done:
-                self.idle.start()     # like a key press: restart the auto-hide
+            self.touch_idle()         # like a key press: restart the auto-hide
             self.set_focus_visible(True)
+            if self.mode == "gallery" and self.gallery is not None:
+                self.gallery.pad(action)
+                return
             if action in ("prev_section", "next_section"):
                 self.pad_section(-1 if action == "prev_section" else 1)
                 return
@@ -2598,15 +2715,22 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             elif self.mode == "confirm":
                 self.confirm_key(Qt.Key_Left)
             elif not (self.saving or self.done or self.control_busy):
+                # groups, left to right: the gallery button, the clip lengths, the buttons
                 items = self.focusables()
+                gal = [w for w in items if w is self.gallery_btn]
                 opts = [w for w in items if w in self.options]
-                rest = [w for w in items if w not in self.options]
-                if d < 0 and opts:
-                    if QApplication.focusWidget() in opts:
-                        opts[0].setFocus(Qt.TabFocusReason)
-                    else:
+                rest = [w for w in items if w not in self.options and w is not self.gallery_btn]
+                cur = QApplication.focusWidget()
+                if d < 0:
+                    if opts and cur not in opts and cur not in gal:
                         self.focus_default()
-                elif d > 0 and rest:
+                    elif opts and cur in opts and cur is not opts[0]:
+                        opts[0].setFocus(Qt.TabFocusReason)
+                    elif gal:
+                        gal[0].setFocus(Qt.TabFocusReason)
+                elif cur in gal and opts:
+                    self.focus_default()
+                elif rest:
                     rest[0].setFocus(Qt.TabFocusReason)
 
         def on_pad_chord(self):
@@ -2620,6 +2744,78 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             if hub.is_grabbed(hub.last_chord_key) or not self.running:
                 self.close_bar()
+
+        # ---------------- gallery
+        def open_gallery(self):
+            """The gallery button / G: list the clips folder (in a worker), then open the gallery
+            above the bar, or say there is nothing yet."""
+            if self.mode != "clip" or self.saving or self.done or self.control_busy:
+                return
+            if self.gallery is None:
+                import types
+
+                from . import gallery as gallery_mod   # QtMultimedia only from here on
+
+                kit = types.SimpleNamespace(
+                    Pill=Pill, TextButton=TextButton, IconButton=IconButton, TabButton=TabButton,
+                    ui_font=ui_font, draw_line_glyph=_draw_line_glyph, divider=divider,
+                    layer_full=_apply_layer_shell_full, set_keyboard=_set_keyboard_interactivity)
+                self.gallery = gallery_mod.Gallery(self, kit)
+            self.gallery.open()
+
+        def gallery_empty(self):
+            """Nothing saved yet: one line above the bar, for a moment."""
+            self.gallery_hint = GALLERY_EMPTY
+            self.relayout()
+            self.gallery_btn.setFocus(Qt.OtherFocusReason)
+
+            def clear():
+                self.gallery_hint = None
+                self.relayout()
+            self.after(GALLERY_HINT_MS, clear)
+
+        def enter_gallery(self):
+            """Called by the gallery once it has something to show."""
+            self.mode = "gallery"
+            self.gallery_hint = None
+            self.stack.setCurrentIndex(4)
+            self.relayout()
+            self.idle.setInterval(GALLERY_IDLE_MS)
+            self.touch_idle()
+            self.pad_renew.start()
+
+        def leave_gallery(self):
+            """Back from the gallery to the clip view, on the gallery button."""
+            self.pad_renew.stop()
+            self.mode = "clip"
+            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.back_to_clip()
+            if self.stack.currentIndex() == 0:
+                self.gallery_btn.setFocus(Qt.OtherFocusReason)
+            if self.isVisible():
+                self.idle.start()
+
+        def close_gallery(self):
+            """Tear the gallery down (player, audio, full screen) without moving focus."""
+            self.pad_renew.stop()
+            if self.gallery is not None:
+                self.gallery.close()
+            if self.mode == "gallery":
+                self.mode = "clip"
+                self.idle.setInterval(IDLE_CLOSE_MS)
+
+        def renew_pads(self):
+            if self.pads is not None and self.mode == "gallery":
+                self.pads.renew()
+
+        def touch_idle(self):
+            """Input: restart the auto-hide. Never while a gallery clip plays."""
+            if self.saving or self.done or not self.isVisible():
+                return
+            if self.mode == "gallery" and self.gallery is not None and self.gallery.playing():
+                self.idle.stop()
+                return
+            self.idle.start()
 
         # ---------------- input
         def on_idle(self):
@@ -2660,6 +2856,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def reset(self):
             """Put the bar back in the state a freshly started one opens in."""
             self.gen += 1                       # replies to the previous open are dropped
+            self.close_gallery()
+            self.gallery_hint = None
             self.idle.stop()
             self.poll.stop()
             self.ticker.stop()
@@ -2733,6 +2931,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def dismiss(self):
             """Hide the resident bar. It lets go of the keyboard and stops polling."""
             self.gen += 1
+            self.close_gallery()                # before the hide: nothing plays once it is gone
             self.idle.stop()
             self.poll.stop()
             self.ticker.stop()
@@ -2747,7 +2946,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if page not in (0, 1):
                 return []
             c = self.controls[page]
-            items = (self.options if page == 0 else []) + [c[k] for k in self.CONTROL_ORDER]
+            items = ([self.gallery_btn] + self.options if page == 0 else []) + [c[k] for k in self.CONTROL_ORDER]
             return [w for w in items if not w.isHidden() and w.isEnabled()]
 
         def move_focus(self, step):
@@ -2769,6 +2968,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return self.settings_key(k)
             if self.mode == "confirm":
                 return self.confirm_key(k)
+            if self.mode == "gallery" and self.gallery is not None:
+                return self.gallery.key(k)
             if k in (Qt.Key_Escape, Qt.Key_Backspace, Qt.Key_Back):
                 self.request_close()
                 return True
@@ -2791,6 +2992,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.choose(self.options[idx])
             elif k == Qt.Key_S:
                 self.open_settings()
+            elif k == Qt.Key_G:
+                self.open_gallery()
             elif k == Qt.Key_P:
                 self.toggle_pause()
             else:
@@ -2798,7 +3001,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             return True
 
         def pills(self):
-            return [b for b in self.findChildren(QPushButton) if isinstance(b, Pill)]
+            own = [b for b in self.findChildren(QPushButton) if isinstance(b, Pill)]
+            return own + (self.gallery.window_pills() if self.gallery is not None else [])
 
         def set_focus_visible(self, on):
             """Keyboard focus is drawn only while the keyboard (or a controller) is in use;
@@ -2817,8 +3021,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def eventFilter(self, obj, ev):
             t = ev.type()
             if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
-                if not self.saving and not self.done:
-                    self.idle.start()  # restart the idle auto-close
+                self.touch_idle()      # restart the idle auto-close
             if t in (QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
                 self.set_focus_visible(False)
             if t == QEvent.KeyPress and self.isVisible():

@@ -242,7 +242,8 @@ class OverlayOffscreen(unittest.TestCase):
     def test_bar_geometry(self):
         bar = self.make(FakeDaemon(True))
         self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
-        self.assertLess(bar.width(), 1000)
+        # 996 px before the gallery button (+40 for it, +4 gap): still a slim bar up to 1040
+        self.assertLess(bar.width(), 1050)
         for o in bar.options:
             self.assertGreaterEqual(o.width(), overlay.OPTION_MIN_WIDTH)
 
@@ -343,8 +344,12 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.controls[0]["pause"].hasFocus())
         self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
         self.key(Qt.Key_3)  # ignored while off
-        self.key(Qt.Key_Left)  # the disabled lengths are skipped
+        self.key(Qt.Key_Left)  # the disabled lengths are skipped: the gallery button
+        self.assertTrue(bar.gallery_btn.hasFocus())
+        self.key(Qt.Key_Left)  # wraps to the gear
         self.assertTrue(bar.gear.hasFocus())
+        self.key(Qt.Key_Right)
+        self.assertTrue(bar.gallery_btn.hasFocus())
         self.key(Qt.Key_Right)
         self.assertTrue(bar.controls[0]["pause"].hasFocus())
         self.assertEqual(daemon.saves, [])
@@ -371,8 +376,12 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.controls[0]["shot"].hasFocus())
         self.key(Qt.Key_Tab)
         self.assertTrue(bar.gear.hasFocus())
-        self.key(Qt.Key_Tab)  # wraps to 15s
+        self.key(Qt.Key_Tab)  # wraps to the gallery button, left of the lengths
+        self.assertTrue(bar.gallery_btn.hasFocus())
+        self.key(Qt.Key_Tab)
         self.assertTrue(bar.options[0].hasFocus())
+        self.key(Qt.Key_Left)
+        self.assertTrue(bar.gallery_btn.hasFocus())
         self.key(Qt.Key_Left)
         self.assertTrue(bar.gear.hasFocus())
         self.shot(bar, "clip-gear-focus", "settings")
@@ -1311,7 +1320,7 @@ class OverlayOffscreen(unittest.TestCase):
             if shot:
                 self.shot(bar, shot, "v7")
         self.assertEqual(len(widths), 1)            # the label never moves the clip lengths
-        self.assertLess(bar.width(), 1000)          # still a slim, inline bar
+        self.assertLess(bar.width(), 1050)          # still a slim, inline bar (1040 with the gallery button)
         # a long title is elided; markup in a title is shown as text
         title = "The Elder Scrolls V: Skyrim Special Edition — Anniversary Upgrade"
         bar = self.make(FakeDaemon(True, extra={"target": "window", "target_name": title}))
