@@ -1194,6 +1194,24 @@ class DaemonBufferTest(unittest.TestCase):
     tearDown = DaemonControlTest.tearDown
     call = DaemonControlTest.call
 
+    def test_save_until_ends_clip_earlier(self):
+        import time as _t
+        buf = self.fill()  # three 10 s segments ending at 1030.0 (wall clock)
+        self.assertTrue(buf.exists())
+        now = _t.time()
+        captured = {}
+        orig = self.d._export
+        self.d._export = lambda seconds, t_req, when, reply: (captured.update(t=t_req), reply({"ok": True}))
+        try:
+            self.call({"cmd": "save", "seconds": 5, "until": now - 2.0})
+            self.assertAlmostEqual(captured["t"], now - 2.0, places=3)
+            self.call({"cmd": "save", "seconds": 5, "until": now - 7200})  # too old: ignored
+            self.assertGreater(captured["t"], now - 1)
+            self.call({"cmd": "save", "seconds": 5, "until": True})  # not a number: ignored
+            self.assertGreater(captured["t"], now - 1)
+        finally:
+            self.d._export = orig
+
     def test_stop_keeps_service_running(self):
         buf = self.fill()
         r = self.call({"cmd": "stop"})

@@ -988,6 +988,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class Bar(QWidget):
         def __init__(self):
             super().__init__()
+            self.shown_at = None  # wall-clock time the bar last appeared
             self.saving = False
             self.done = False
             self.online = None
@@ -1421,6 +1422,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.setFocus(Qt.OtherFocusReason)
 
         # ---------------- save
+        def showEvent(self, ev):
+            self.shown_at = time.time()
+            super().showEvent(ev)
+
         def choose(self, opt):
             if (self.saving or self.done or not self.online or not opt.isEnabled()
                     or self.mode != "clip" or self.control_busy):
@@ -1433,10 +1438,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.relayout()
             secs = opt.seconds
             gen = self.gen
+            until = self.shown_at
 
             def work():
                 try:
-                    r = ipc.request({"cmd": "save", "seconds": secs}, timeout=120)
+                    msg = {"cmd": "save", "seconds": secs}
+                    if not CAPTURE_EXCLUDED and until is not None:
+                        # The bar shows up in the recording on this desktop: end the
+                        # clip at the moment it was opened so it isn't in the clip.
+                        msg["until"] = until
+                    r = ipc.request(msg, timeout=120)
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
                 self.bridge.saved.emit(gen, r)
@@ -2135,7 +2146,84 @@ def _init_app(argv):
     app.setStyle("Fusion")
     app.setApplicationName("Momento")
     app.setDesktopFileName("io.github.mehulchachada.Momento")
+    try:
+        _exclude_from_capture()
+    except Exception as e:  # noqa: BLE001 - never block the bar on this
+        log.debug("capture exclusion unavailable: %s", e)
     return app, use_layer_shell
+
+
+# Set once the compositor has agreed to leave the bar out of screen recordings.
+CAPTURE_EXCLUDED = False
+
+_KWIN_SCRIPT = """\
+// Momento: keep the clip bar out of screen recordings (KWin "exclude from capture").
+function mark(w) {
+  if (w && w.pid === %(pid)d && String(w.resourceClass).indexOf("python") === 0) {
+    w.excludeFromCapture = true;
+  }
+}
+workspace.stackingOrder.forEach(mark);
+workspace.windowAdded.connect(mark);
+"""
+
+
+def _kwin_script_name(pid: int) -> str:
+    return f"momento-exclude-{pid}"
+
+
+def _exclude_from_capture() -> bool:
+    """Ask KWin to hide this process's windows from screen capture.
+
+    KDE Plasma 6 has a per-window "exclude from capture" switch that also keeps
+    a window out of full-monitor screencasts, which is what Momento records. The
+    bar is an unnamed layer surface, so a tiny KWin script matches it by our
+    PID. Returns False on other desktops (no KWin), where the bar falls back to
+    ending clips at the moment it was opened.
+    """
+    global CAPTURE_EXCLUDED
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or os.environ.get("MOMENTO_TEST_SANDBOX"):
+        return False  # tests and headless runs must not touch the desktop's KWin
+    try:
+        from PySide6.QtDBus import QDBusConnection, QDBusInterface
+    except ImportError:
+        return False
+    bus = QDBusConnection.sessionBus()
+    if not bus.isConnected():
+        return False
+    kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
+    if not kwin.isValid():
+        return False
+    pid = os.getpid()
+    path = RUNTIME_DIR / f"{_kwin_script_name(pid)}.js"
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(_KWIN_SCRIPT % {"pid": pid})
+    except OSError as e:
+        log.debug("cannot write the KWin script: %s", e)
+        return False
+    name = _kwin_script_name(pid)
+    kwin.call("unloadScript", name)
+    reply = kwin.call("loadScript", str(path), name)
+    args = reply.arguments() if reply is not None else []
+    if not args or not isinstance(args[0], int) or args[0] < 0:
+        log.debug("KWin refused the capture-exclusion script: %s", reply.errorMessage() if reply else "")
+        return False
+    kwin.call("start")
+    CAPTURE_EXCLUDED = True
+
+    def cleanup():
+        try:
+            kwin.call("unloadScript", name)
+            path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - best effort at exit
+            pass
+
+    import atexit
+
+    atexit.register(cleanup)
+    log.info("clip bar hidden from screen capture (KWin)")
+    return True
 
 
 def _create_bar(app, use_layer_shell: bool, resident: bool = False):
@@ -2434,6 +2522,12 @@ def run_resident(argv=None) -> int:
     try:
         return app.exec()
     finally:
+        # Detach the wakeup socket before it is closed, so a late signal during
+        # shutdown doesn't print "Bad file descriptor" into the journal.
+        try:
+            signal.set_wakeup_fd(-1)
+        except (ValueError, OSError):
+            pass
         server.close()
 
 

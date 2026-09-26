@@ -520,6 +520,11 @@ class Daemon:
             reply({"ok": False, "error": f"bad duration: {e}"})
             return
         t_req = time.time()
+        until = msg.get("until")
+        if isinstance(until, (int, float)) and not isinstance(until, bool) and t_req - 3600 < until < t_req:
+            # The clip bar asks to end the clip when it was opened, so the bar
+            # itself (visible on screen since then) isn't in the clip.
+            t_req = float(until)
         when = datetime.now()
         done = []
 

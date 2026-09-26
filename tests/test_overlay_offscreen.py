@@ -89,6 +89,7 @@ class FakeDaemon:
         self.storage = storage           # status: the storage block (None = an older daemon)
         self.stopped = False
         self.saves = []
+        self.save_msgs = []
         self.configures = []
         self.controls = []
 
@@ -132,6 +133,7 @@ class FakeDaemon:
             return {"ok": True, "state": "paused" if self.paused else "starting"}
         if msg["cmd"] == "save":
             self.saves.append(msg["seconds"])
+            self.save_msgs.append(dict(msg))
             time.sleep(0.2)
             if self.fail:
                 return {"ok": False, "error": "encoder stalled: no segments written"}
@@ -206,6 +208,34 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertLess(bar.width(), 1000)
         for o in bar.options:
             self.assertGreaterEqual(o.width(), overlay.OPTION_MIN_WIDTH)
+
+    def test_save_ends_clip_when_bar_opened_unless_excluded(self):
+        # Desktop can't hide the bar from capture: the clip ends when the bar appeared.
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.assertIsNotNone(bar.shown_at)
+        opened = bar.shown_at
+        old = overlay.CAPTURE_EXCLUDED
+        try:
+            overlay.CAPTURE_EXCLUDED = False
+            bar.choose(bar.options[1])
+            self.wait_for(lambda: daemon.save_msgs)
+            self.assertEqual(daemon.save_msgs[0].get("until"), opened)
+        finally:
+            overlay.CAPTURE_EXCLUDED = old
+        # KWin hides the bar: the clip ends "now", no until.
+        daemon2 = FakeDaemon(True)
+        bar2 = self.make(daemon2)
+        try:
+            overlay.CAPTURE_EXCLUDED = True
+            bar2.choose(bar2.options[1])
+            self.wait_for(lambda: daemon2.save_msgs)
+            self.assertNotIn("until", daemon2.save_msgs[0])
+        finally:
+            overlay.CAPTURE_EXCLUDED = old
+
+    def test_kwin_exclusion_skipped_in_tests(self):
+        self.assertFalse(overlay._exclude_from_capture())
 
     def test_normal_and_save(self):
         daemon = FakeDaemon(True)

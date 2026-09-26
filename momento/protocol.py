@@ -278,6 +278,10 @@ COMMANDS: dict[str, dict] = {
     "save": {
         "request": {
             "seconds": (("integer", "string"), True),  # 1..3600, or "15s" / "5m" / "1h"
+            # Wall-clock time (Unix seconds) the clip should end at instead of now;
+            # ignored unless it is within the last hour. The clip bar sends the
+            # moment it opened when the desktop can't hide it from capture.
+            "until": (("number",), False),
         },
         "reply": {
             "ok": (("boolean",), True),
