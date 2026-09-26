@@ -15,7 +15,9 @@
 #   "test"      a moving test pattern — for trying Momento without a game
 source = "auto"
 
-# Recording is always 60 fps.
+# Frames per second: 60 or 120. 120 only helps on a 120 Hz (or faster) screen
+# and uses about 1.5x the disk space. Change it with:  momento set fps 120
+fps = 60
 
 # Recording resolution:
 #   "720p" | "1080p" | "1440p" | "2160p"   scaled to this size; if your screen has
@@ -36,6 +38,7 @@ quality = "high"
 #     1440p         16       24     40
 #     2160p         30       45     70
 #     native     same as 1440p
+#   (at 120 fps the automatic bitrate is 1.5x these)
 # Set a number (e.g. 20000) to override. Disk used by a full 60-minute buffer
 # ~= Mbit/s * 0.45 GB (1080p high: ~6.8 GB).
 bitrate_kbps = 0
