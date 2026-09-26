@@ -1009,6 +1009,121 @@ class DaemonControlTest(unittest.TestCase):
         self.assertEqual(st["required"]["1080p/high/60"], storage.required_bytes(self.d.cfg))
 
 
+class SizedRecorder(FakeRecorder):
+    """A fake recorder that "negotiates" a picture size, as the real one learns it from the caps."""
+
+    size = (1920, 1080)
+
+    def start(self, interactive=False):
+        self.source_size = SizedRecorder.size
+        super().start(interactive)
+
+
+class DaemonResolutionCapTest(unittest.TestCase):
+    """The daemon caps the resolution by the recorded picture: status, settings, storage."""
+
+    setUp = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def use_sized(self, size):
+        SizedRecorder.size = size
+        sys.modules["momento.pipeline"].Recorder = SizedRecorder
+        self.d.recorder.stop()
+        self.d.recorder = SizedRecorder(self.d.cfg, self.d.ring, self.d._on_state)
+        self.d.recorder.start()
+
+    def need(self, source=None, **capture):
+        from momento import storage
+
+        return storage.required_bytes({**self.d.cfg, "capture": {**self.d.cfg["capture"], **capture}}, source)
+
+    def settings_reply(self):
+        from unittest import mock
+
+        from momento import settings
+
+        with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}):
+            return self.call({"cmd": "settings"})
+
+    def test_unknown_source_changes_nothing(self):
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]), (None, "1080p", 15000))
+        r = self.settings_reply()
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "1440p", "2160p", "native"])
+        self.assertIsNone(r["source_size"])
+
+    def test_4k_setting_on_a_1080p_screen(self):
+        from momento import config
+
+        self.use_sized((1920, 1080))
+        self.assertEqual(self.d.source_size, (1920, 1080))
+        # 4K would not fit on this disk, what is really recorded (1080p) does
+        self.free = self.need(resolution="1080p") + 10
+        self.assertGreater(self.need(resolution="2160p"), self.free)
+        r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["restarted"], r["state"]), (True, "recording"))
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")   # saved as asked
+        st = self.d.status()
+        self.assertEqual((st["resolution"], st["resolution_effective"], st["source_size"]),
+                         ("2160p", "native", [1920, 1080]))
+        self.assertEqual(st["bitrate_kbps"], 15000)
+        self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
+        self.assertTrue(st["storage"]["ok"])
+        r = self.settings_reply()
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
+        self.assertEqual((r["values"]["resolution"], r["resolution_effective"], r["source_size"]),
+                         ("2160p", "native", [1920, 1080]))
+        req = r["storage"]["required"]
+        self.assertEqual(req["2160p/high/60"], req["1080p/high/60"])
+        self.assertEqual(req["1440p/ultra/120"], req["1080p/ultra/120"])
+        self.assertLess(req["720p/high/60"], req["1080p/high/60"])
+        # a pause keeps what is known; so does a reload
+        self.call({"cmd": "pause"})
+        self.assertEqual(self.d.status()["source_size"], [1920, 1080])
+        self.call({"cmd": "reload"})
+        self.assertEqual(self.d.status()["resolution_effective"], "native")
+
+    def test_screen_change_is_followed(self):
+        self.use_sized((3840, 2160))
+        self.call({"cmd": "configure", "changes": {"resolution": "1440p"}})
+        st = self.d.status()
+        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1440p", 24000))
+        SizedRecorder.size = (1920, 1200)                 # another monitor on the next start
+        self.call({"cmd": "reload"})
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]),
+                         ([1920, 1200], "native", 24000))  # 1200 lines: the 1440p class
+
+    def test_new_window_forgets_the_size(self):
+        self.use_sized((1280, 720))
+        self.assertEqual(self.d.status()["resolution_effective"], "native")
+        SizedRecorder.size = None                         # the next picker is still open
+        self.call({"cmd": "configure", "changes": {"record": "window"}})
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"]), (None, "1080p"))
+        SizedRecorder.size = (1001, 701)
+        r = self.call({"cmd": "pick_window"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.d.status()["source_size"], [1001, 701])
+        SizedRecorder.size = None
+        self.call({"cmd": "stop"})
+        self.call({"cmd": "resume"})                      # play from stopped: a new window
+        self.assertIsNone(self.d.status()["source_size"])
+
+    def test_configure_refusal_counts_the_source(self):
+        self.use_sized((1920, 1080))
+        # 1440p Ultra records as 1080p Ultra here: refused only when that doesn't fit
+        self.free = self.need((1920, 1080), resolution="1440p", quality="ultra") - 1
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.assertEqual((r["ok"], r.get("code")), (False, "no_storage"))
+        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p", quality="ultra"))
+        self.free += 1
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.assertTrue(r["ok"], r)
+
+
 class StorageTest(unittest.TestCase):
     def cfg(self, **capture):
         from momento import config

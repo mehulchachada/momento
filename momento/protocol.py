@@ -89,6 +89,12 @@ Commands (fields are in ``COMMANDS``)
     ``target_name`` the picked window's title (null when unknown or full screen).
     ``stop_reason`` (``STOP_REASONS`` or null) says why it is ``stopped``;
     ``keep_history`` whether a stop keeps the replay.
+    ``source_size`` is the recorded picture's ``[width, height]`` in pixels (the
+    screen, or the picked window) as the last capture session negotiated it,
+    null until known (and after another window is picked or ``record``
+    changes). ``resolution_effective`` is what is really recorded: ``resolution``,
+    or ``"native"`` when that preset is taller than the source (see Resolution
+    cap below); ``bitrate_kbps`` is the bitrate of what is really recorded.
 ``save`` {seconds}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
@@ -148,6 +154,11 @@ Commands (fields are in ``COMMANDS``)
     ``controller_available`` is false when python-evdev is missing (the
     controller values are then saved but unused). ``tabs`` groups the keys for
     a UI: ``[[tab name, [keys...]], ...]`` (``settings.TABS``).
+    ``source_size`` (as in ``status``), ``resolution_allowed`` (the
+    ``choices.resolution`` worth offering for that source, in the same order;
+    all of them while it is unknown) and ``resolution_effective`` (what the
+    saved ``resolution`` would record at). The ``storage.required`` bytes count
+    what would really be recorded.
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
@@ -164,6 +175,17 @@ open bar reads the controllers itself and releases them when it hides.
     ones AND ``force`` is not true; so shrinking always works. With ``force``
     the reply is ok with ``restarted: false``, ``state: "no_storage"`` and a
     ``warning``.
+
+Resolution cap: a preset is allowed when its height is at most the source's
+height * (1 + ``RESOLUTION_TOLERANCE``); ``native`` always is. So a 1920x1080
+screen offers 720p, 1080p and native; 2560x1440 and 3440x1440 add 1440p;
+3840x2160 offers all; 1920x1200 stops at 1080p. A saved preset above the cap
+is kept in config.toml (``configure`` accepts it) but records at the source's
+own size, rounded down to even numbers, as ``native`` would, with the bitrate
+of the smallest preset at least as tall as the source (an explicit
+``bitrate`` still wins). A client that has no ``source_size`` yet MAY apply
+the rule to the largest screen it can see (in physical pixels), which is what
+the clip bar does to grey out choices.
 
 Storage math: full buffer = (video kbps + audio kbps, audio counted only when
 desktop sound or the mic is on) * 1000 / 8 * max_seconds * 1.05; required =
@@ -210,6 +232,9 @@ arbitrary string keys whose values have that type). A Field is
 from __future__ import annotations
 
 PROTOCOL_VERSION = 1
+# Resolution cap (see the docstring): a preset is offered when its height is at
+# most the recorded picture's height * (1 + this). Same as quality.SOURCE_TOLERANCE.
+RESOLUTION_TOLERANCE = 0.02
 MAX_REQUEST_BYTES = 1 << 20  # daemon socket; the clip-bar socket allows 64 KiB
 CLIP_BAR_MAX_REQUEST_BYTES = 1 << 16
 
@@ -345,6 +370,9 @@ COMMANDS: dict[str, dict] = {
             "stop_reason": (("string", "null"), False),  # STOP_REASONS while stopped, else null
             "keep_history": (("boolean",), False),       # a stop keeps the replay
             "resolution": (("string",), True),
+            # The reference daemon always sends these two (absent on older daemons):
+            "resolution_effective": (("string",), False),  # resolution, or "native" when above the source
+            "source_size": (("array", "null"), False),     # [width, height] of the recorded picture, or null
             "quality": (("string",), True),
             "bitrate_kbps": (("integer",), True),   # effective video bitrate
             "fps": (("integer",), True),
@@ -456,6 +484,9 @@ COMMANDS: dict[str, dict] = {
             "storage": ((STORAGE_REQUIREMENTS,), True),
             "controller_available": (("boolean",), False),  # python-evdev present
             "tabs": (("array",), False),          # [[tab name, [setting keys]], ...] for a settings UI
+            "source_size": (("array", "null"), False),      # as in status
+            "resolution_allowed": (("array",), False),      # choices.resolution that fit the source
+            "resolution_effective": (("string",), False),   # what the saved resolution records at
         },
         "error": {},
     },
@@ -563,6 +594,9 @@ def _check_enums(obj: dict) -> list[str]:
         problems.append(f"unknown error code {obj['code']!r}")
     if isinstance(obj.get("stop_reason"), str) and obj["stop_reason"] not in STOP_REASONS:
         problems.append(f"unknown stop_reason {obj['stop_reason']!r}")
+    size = obj.get("source_size")
+    if isinstance(size, list) and not (len(size) == 2 and all(_PY["integer"](v) and v > 0 for v in size)):
+        problems.append("source_size: expected [width, height] (positive integers) or null")
     return problems
 
 

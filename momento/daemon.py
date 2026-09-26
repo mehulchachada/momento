@@ -192,6 +192,13 @@ class Daemon:
         self.target_name: str | None = None
         self._name_token: str | None = None
         self._name_gen = 0
+        # The recorded picture's size (the screen, or the picked window) as the
+        # last session negotiated it; None until known. Caps the resolution: a
+        # preset taller than it records at this size (quality.fits_source), and
+        # the storage math counts what is really recorded. Kept across pauses,
+        # reloads and restarts of capture; forgotten when another window is
+        # picked or the Record setting changes.
+        self.source_size: tuple[int, int] | None = None
         # Disk-space guard: set while capture is blocked (state "no_storage").
         self.storage_error: str | None = None
         self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
@@ -442,6 +449,11 @@ class Daemon:
         was = self.state
         self.state = state
         self.error = detail if state == "error" else None
+        if state == "recording":
+            size = quality.source_size(getattr(self.recorder, "source_size", None))
+            if size is not None and size != self.source_size:
+                self.source_size = size
+                log.info("recording a %dx%d picture", *size)
         if state == "recording" and self._window_target():
             self._look_up_target_name()
         if state != "no_window":
@@ -507,10 +519,11 @@ class Daemon:
     name_lookup = None
 
     def _forget_target_name(self) -> None:
-        """A new window is being picked, or full screen is recorded: no name."""
+        """A new window is being picked, or full screen is recorded: no name (and no size yet)."""
         self.target_name = None
         self._name_token = None
         self._name_gen += 1
+        self.source_size = None
 
     def _look_up_target_name(self) -> None:
         """Once per portal session: the picked window's title, from its restore token."""
@@ -616,10 +629,13 @@ class Daemon:
     # --- disk space ---------------------------------------------------------------
 
     def storage_check(self, cfg: dict | None = None, reclaimable: int | None = None) -> dict:
-        """storage.check for ``cfg`` (default: the running one); our own buffer counts as reclaimable."""
+        """storage.check for ``cfg`` (default: the running one); our own buffer counts as reclaimable.
+
+        A resolution taller than the known source counts at the size really recorded.
+        """
         if reclaimable is None:
             reclaimable = storage.dir_bytes(self.buffer_dir)
-        return storage.check(cfg or self.cfg, reclaimable)
+        return storage.check(cfg or self.cfg, reclaimable, self.source_size)
 
     def _start_recorder(self, reclaimable: int | None = None, interactive: bool = False) -> bool:
         """Start capture if a full buffer fits on disk; otherwise enter "no_storage".
@@ -755,6 +771,7 @@ class Daemon:
         """Current settings + choices + audio devices (pactl runs off the main loop)."""
         fallback = self.cfg
         path = self._cfg_path()
+        source = self.source_size
 
         def work() -> None:
             try:
@@ -762,8 +779,8 @@ class Daemon:
                     cfg = config.load(path)  # what is saved, which the UI edits
                 except (OSError, ValueError):
                     cfg = fallback
-                result = settings.describe(cfg)
-                result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)))
+                result = settings.describe(cfg, source=source)
+                result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source)
             except Exception as e:  # noqa: BLE001
                 log.exception("settings failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -781,14 +798,17 @@ class Daemon:
             saved = config.load(self._cfg_path())
             new = settings.preview(saved, changes)
             quality.bitrate_kbps(new["capture"])
-            chk = storage.check(new, storage.dir_bytes(self.buffer_dir))
+            source = self.source_size
+            if config.capture_target(new["capture"]) != config.capture_target(saved["capture"]):
+                source = None  # another kind of picture: its size is not known yet
+            chk = storage.check(new, storage.dir_bytes(self.buffer_dir), source)
         except (OSError, ValueError) as e:
             reply({"ok": False, "error": str(e)})
             return
         # Refuse settings that need more room than there is. A change that doesn't
         # raise the requirement (a smaller size, another mic) always goes through.
         if (not chk["ok"] and not msg.get("force")
-                and storage.required_bytes(new) > storage.required_bytes(saved)):
+                and storage.required_bytes(new, source) > storage.required_bytes(saved, source)):
             reply({"ok": False, "code": "no_storage", "storage": chk,
                    "error": f"{storage.label(new)} needs {storage.human(chk['required'])} free, "
                             f"{storage.human(chk['free'] + chk['reclaimable'])} available"})
@@ -916,8 +936,13 @@ class Daemon:
             "stop_reason": self.stop_reason if self.stopped else None,
             "keep_history": self.keep_history(),
             "resolution": self.cfg["capture"]["resolution"],
+            # What is really recorded: the setting, or "native" when it is taller
+            # than the picture (source_size, null until known). Never upscaled.
+            "resolution_effective": quality.effective_resolution(self.cfg["capture"]["resolution"],
+                                                                 self.source_size),
+            "source_size": list(self.source_size) if self.source_size else None,
             "quality": self.cfg["capture"]["quality"],
-            "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"]),
+            "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"], self.source_size),
             "fps": quality.fps(self.cfg["capture"]),
             "storage": self._storage_status(),
         }
