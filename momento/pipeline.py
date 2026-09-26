@@ -21,7 +21,9 @@ Never upscaled: the captured picture's size (``source_size``, from the first
 caps on the source pad) caps the resolution. A preset taller than the source
 (``quality.fits_source``) records at the source's own size instead, as if
 ``native`` were set, with the bitrate of that size (``resolution_effective``
-says which was used). The config is left alone.
+says which was used). The config is left alone. Never taller than
+``quality.MAX_HEIGHT`` (1080) either: ``native`` scales a taller picture down
+to fit (``quality.native_size``, aspect kept).
 
 Everything here runs on the GLib main loop of the caller.
 """
@@ -170,8 +172,9 @@ class Recorder:
         self.encoder_name = ""
         self.buffer_dir = Path(cfg["buffer"]["dir"])
         self.fps = quality.fps(cfg["capture"])
-        self.size = quality.resolution(cfg["capture"])
-        self.size_name = str(cfg["capture"].get("resolution", quality.DEFAULT_RESOLUTION)).lower()
+        # The preset recorded (an older config's 1440p/2160p records at 1080p).
+        self.size_name = quality.configured(cfg["capture"])
+        self.size = quality.RESOLUTIONS[self.size_name]
         # The captured picture's size, from the first caps of the current (or last)
         # session, and the resolution actually recorded (the configured one, or
         # "native" when that is taller than the source). None until known.
@@ -198,6 +201,7 @@ class Recorder:
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
         self._size_caps: str | None = None      # caps of the "size" capsfilter, without width/height
         self._locked_size: tuple[int, int] | None = None
+        self._kbps = 0  # the encoder's bitrate as last set
         self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
 
     # --- public API -------------------------------------------------------------
@@ -474,7 +478,9 @@ class Recorder:
         size = f",width={self.size[0]},height={self.size[1]}" if self.size else ""
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
         # (A window that is resized mid-stream is scaled into the same frame.)
-        scale = "videoscale add-borders=true ! " if self.size or self._lock_size() else ""
+        # Always there: native may have to scale a picture taller than
+        # quality.MAX_HEIGHT down (_pin_size); at the same size it passes through.
+        scale = "videoscale add-borders=true ! "
         queue = "queue max-size-buffers={} max-size-bytes=0 max-size-time=0 leaky=downstream"
         # The output size lives in one named capsfilter ("size") so native window
         # capture can pin it to the first negotiated size (see _pin_size).
@@ -576,7 +582,8 @@ class Recorder:
                                              v.encoder))
 
         enc = pipeline.get_by_name("enc")
-        self._encoder_settings(enc, v.encoder, quality.bitrate_kbps(self.cfg["capture"]))
+        self._kbps = quality.bitrate_kbps(self.cfg["capture"])  # until the source's size is known
+        self._encoder_settings(enc, v.encoder, self._kbps)
 
         aenc = pipeline.get_by_name("aenc")
         if aenc is not None:
@@ -605,10 +612,11 @@ class Recorder:
 
         Runs before the caps event travels on, so the first negotiation already
         carries the pinned size; later resizes (a window) are scaled into it. The
-        output is pinned to the source's own size (even numbers) when the preset
-        is taller than the source (never upscale; the encoder gets the bitrate of
-        the size really recorded), and in window mode with ``native`` (the size
-        of a session never changes).
+        output is pinned to ``quality.native_size`` of the source (its own size in
+        even numbers, scaled down to at most ``quality.MAX_HEIGHT`` lines) when the
+        preset is taller than the source (never upscale), with ``native`` on a
+        taller source, and in window mode with ``native`` (the size of a session
+        never changes). The encoder gets the bitrate of the size really recorded.
         """
         capsfilter, enc, encoder = data
         event = info.get_event()
@@ -623,18 +631,24 @@ class Recorder:
             self._source_seen = True
             self.source_size = (w, h)
             capped = self.size is not None and not quality.fits_source(self.size_name, (w, h))
+            shrink = self.size is None and h > quality.MAX_HEIGHT  # native, taller than we record
             self.resolution_effective = "native" if capped else self.size_name
-            if capped or self._lock_size():
-                size = (max(2, w - w % 2), max(2, h - h % 2))  # H.264 wants even sizes
+            if capped or shrink or self._lock_size():
+                size = quality.native_size((w, h))  # even numbers (H.264), at most MAX_HEIGHT lines
                 self._locked_size = size
                 capsfilter.set_property("caps", Gst.Caps.from_string(
                     f"{self._size_caps},width={size[0]},height={size[1]}"))
+            # The bitrate of the size really recorded (native: the picture's own class).
+            kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h))
+            if enc is not None and kbps != self._kbps:
+                self._kbps = kbps
+                self._encoder_settings(enc, encoder, kbps)
             if capped:
-                kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h))
-                if enc is not None:
-                    self._encoder_settings(enc, encoder, kbps)
                 log.info("source is %dx%d, smaller than %s: recording at %dx%d, %d kbps (never upscaled)",
                          w, h, self.size_name, *self._locked_size, kbps)
+            elif shrink:
+                log.info("source is %dx%d, taller than %dp: recording at %dx%d, %d kbps",
+                         w, h, quality.MAX_HEIGHT, *self._locked_size, kbps)
             elif self._locked_size is not None:
                 log.info("window capture: output size locked to %dx%d for this session", *self._locked_size)
         elif self._locked_size is not None and (w, h) != self._locked_size:

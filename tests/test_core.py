@@ -479,14 +479,14 @@ class CLITest(unittest.TestCase):
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(cli.main(["--config", str(path), "set", "audio_source", "off"]), 0)
-                    self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "4k"]), 0)
+                    self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "hd"]), 0)
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(cli.main(["--config", str(path), "set", "quality", "insane"]), 1)
             finally:
                 ipc.request = orig
             cfg = config.load(path)
             self.assertFalse(cfg["audio"]["desktop"])
-            self.assertEqual(cfg["capture"]["resolution"], "2160p")
+            self.assertEqual(cfg["capture"]["resolution"], "720p")
             self.assertEqual(cfg["capture"]["quality"], "high")
 
     def test_set_storage(self):
@@ -508,12 +508,34 @@ class CLITest(unittest.TestCase):
             self.assertEqual(config.load(path)["capture"]["quality"], "ultra")
             # daemon refuses: fatal, message shown
             err = io.StringIO()
-            refusal = {"ok": False, "code": "no_storage", "error": "2160p Ultra needs 35.2 GB free, 9.4 GB available"}
+            refusal = {"ok": False, "code": "no_storage", "error": "1080p Ultra needs 35.2 GB free, 9.4 GB available"}
             with mock.patch.object(ipc, "request", return_value=refusal) as req, \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "4k"]), 1)
-            req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "2160p"}}, timeout=30)
+                self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "fhd"]), 1)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "1080p"}}, timeout=30)
             self.assertIn("35.2 GB", err.getvalue())
+
+    def test_set_resolution_above_1080p_is_refused(self):
+        """1440p and 4K are not offered yet: one friendly line, nothing sent or saved."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, config, ipc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            for value in ("4k", "4K", "2k", "1440p", "2160p", "uhd", "qhd"):
+                err, out = io.StringIO(), io.StringIO()
+                with mock.patch.object(ipc, "request") as req, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    self.assertEqual(cli.main(["--config", str(path), "set", "resolution", value]), 1, value)
+                req.assert_not_called()
+                self.assertEqual(err.getvalue(),
+                                 "1440p and 4K aren't available yet; Momento records up to 1080p for now.\n")
+                self.assertEqual(out.getvalue(), "")
+            self.assertFalse(path.exists())
+            self.assertEqual(config.load(path)["capture"]["resolution"], "1080p")
 
     def test_set_controller(self):
         import contextlib
@@ -656,9 +678,9 @@ SOURCES_JSON = json.dumps([
 
 class SettingsTest(unittest.TestCase):
     def setUp(self):
-        from momento import config, settings
+        from momento import config, quality, settings
 
-        self.config, self.settings = config, settings
+        self.config, self.settings, self.quality = config, settings, quality
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "config.toml"
         self.path.write_text("# Momento\n[capture]\n# pick one\nresolution = \"1080p\"\n\n[audio]\ndesktop = true\n")
@@ -667,10 +689,10 @@ class SettingsTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_validate_normalizes(self):
-        v = self.settings.validate({"resolution": "4K", "quality": "ULTRA", "bitrate": "0",
+        v = self.settings.validate({"resolution": "FHD", "quality": "ULTRA", "bitrate": "0",
                                     "audio_source": "@DEFAULT_MONITOR@", "mic": True,
                                     "mic_device": "@DEFAULT_SOURCE@"})
-        self.assertEqual(v, {"resolution": "2160p", "quality": "ultra", "bitrate": 0,
+        self.assertEqual(v, {"resolution": "1080p", "quality": "ultra", "bitrate": 0,
                              "audio_source": "default", "mic": "on", "mic_device": "default"})
         self.assertEqual(self.settings.validate({"audio_source": "Off", "mic": "no"}),
                          {"audio_source": "off", "mic": "off"})
@@ -685,23 +707,54 @@ class SettingsTest(unittest.TestCase):
             self.assertTrue(str(cm.exception).startswith(next(iter(bad))), cm.exception)
         with self.assertRaises(ValueError):
             self.settings.validate(["resolution"])
+        with self.assertRaises(ValueError) as cm:
+            self.settings.validate({"resolution": "999p"})
+        self.assertEqual(str(cm.exception), "resolution: choose one of: 720p, 1080p, native")
+
+    def test_validate_refuses_1440p_and_4k(self):
+        for value in ("1440p", "2160p", "4k", "4K", "2k", "UHD", "qhd", " 4k "):
+            with self.assertRaises(self.settings.Unavailable, msg=value) as cm:
+                self.settings.validate({"resolution": value, "quality": "ultra"})
+            self.assertEqual(str(cm.exception),
+                             "1440p and 4K aren't available yet; Momento records up to 1080p for now.")
+        before = self.path.read_text()
+        with self.assertRaises(ValueError):
+            self.settings.apply({"resolution": "4k", "mic": "on"}, self.path)
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_older_config_with_1440p_or_4k(self):
+        """A config saved with 1440p/2160p (or 2k/4k) records at 1080p; the file is left alone."""
+        for saved in ("1440p", "2160p", "4k", "2K"):
+            self.path.write_text(f'[capture]\nresolution = "{saved}"\n')
+            cfg = self.config.load(self.path)
+            self.assertEqual(self.settings.current(cfg)["resolution"], "1080p", saved)
+            d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []}, source=(3840, 2160))
+            self.assertEqual((d["values"]["resolution"], d["resolution_effective"]), ("1080p", "1080p"))
+            self.assertEqual(self.quality.resolution(cfg["capture"]), (1920, 1080))
+            self.assertEqual(self.quality.bitrate_kbps(cfg["capture"]), 15_000)
+            # another setting changed: the resolution line stays as it was
+            self.assertEqual(self.settings.apply({"mic": "on"}, self.path), {"mic": "on"})
+            self.assertIn(f'resolution = "{saved}"', self.path.read_text())
+            # choosing 1080p (what it records at) changes nothing but writes it down
+            self.assertEqual(self.settings.apply({"resolution": "1080p"}, self.path), {})
+            self.assertIn('resolution = "1080p"', self.path.read_text())
 
     def test_apply_writes_and_keeps_comments(self):
-        changed = self.settings.apply({"resolution": "1440p", "quality": "ultra",
+        changed = self.settings.apply({"resolution": "720p", "quality": "ultra",
                                        "audio_source": "ROG Ally.monitor", "mic": "on",
                                        "mic_device": "alsa_input.usb-Blue_Yeti.analog-stereo"}, self.path)
         self.assertEqual(set(changed), {"resolution", "quality", "audio_source", "mic", "mic_device"})
         text = self.path.read_text()
         self.assertIn("# pick one", text)
         cfg = self.config.load(self.path)
-        self.assertEqual(cfg["capture"]["resolution"], "1440p")
+        self.assertEqual(cfg["capture"]["resolution"], "720p")
         self.assertEqual(cfg["capture"]["quality"], "ultra")
         self.assertEqual(cfg["audio"]["desktop_device"], "ROG Ally.monitor")
         self.assertTrue(cfg["audio"]["microphone"])
         self.assertEqual(cfg["audio"]["microphone_device"], "alsa_input.usb-Blue_Yeti.analog-stereo")
         self.assertEqual(self.settings.current(cfg)["audio_source"], "ROG Ally.monitor")
         # same values again -> nothing changed
-        self.assertEqual(self.settings.apply({"resolution": "1440p", "mic": "on"}, self.path), {})
+        self.assertEqual(self.settings.apply({"resolution": "720p", "mic": "on"}, self.path), {})
         # off keeps the chosen device for later; default goes back to the placeholder
         self.settings.apply({"audio_source": "off", "mic_device": "default"}, self.path)
         cfg = self.config.load(self.path)
@@ -723,7 +776,7 @@ class SettingsTest(unittest.TestCase):
         d = self.settings.describe(self.config.load(self.path), devices={"outputs": [], "inputs": []})
         self.assertTrue(d["ok"])
         self.assertEqual(d["values"]["resolution"], "1080p")
-        self.assertIn("native", d["choices"]["resolution"])
+        self.assertEqual(d["choices"]["resolution"], ["720p", "1080p", "native"])
         self.assertEqual(d["fps"], 60)
         self.assertEqual(d["config"], str(self.path))
 
@@ -1186,16 +1239,16 @@ class DaemonControlTest(unittest.TestCase):
     def test_configure_refuses_what_does_not_fit(self):
         from momento import config, storage
 
-        self.free = self._need(resolution="1440p", quality="ultra") - 1
+        self.free = self._need(quality="ultra", fps=120) - 1
         before = self.path.read_text()
-        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        r = self.call({"cmd": "configure", "changes": {"quality": "ultra", "fps": 120}})
         self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
-        self.assertTrue(r["error"].startswith("1440p Ultra needs "), r["error"])
+        self.assertTrue(r["error"].startswith("1080p Ultra 120 fps needs "), r["error"])
         self.assertIn(" available", r["error"])
         self.assertEqual(self.path.read_text(), before)
         self.assertEqual(self.d.recorder.started, 1)
         # force writes anyway; the daemon then sits in no_storage
-        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}, "force": True})
+        r = self.call({"cmd": "configure", "changes": {"quality": "ultra", "fps": 120}, "force": True})
         self.assertTrue(r["ok"])
         self.assertEqual((r["restarted"], r["state"]), (False, "no_storage"))
         self.assertIn("warning", r)
@@ -1218,7 +1271,7 @@ class DaemonControlTest(unittest.TestCase):
         st = r["storage"]
         self.assertEqual(st["free"], self.free)
         self.assertEqual(st["current"], "1080p/high/60")
-        self.assertEqual(len(st["required"]), 5 * 3 * 2)
+        self.assertEqual(len(st["required"]), 3 * 3 * 2)       # 720p, 1080p, native
         self.assertEqual(st["required"]["1080p/high/60"], storage.required_bytes(self.d.cfg))
 
 
@@ -1263,51 +1316,84 @@ class DaemonResolutionCapTest(unittest.TestCase):
         st = self.d.status()
         self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]), (None, "1080p", 15000))
         r = self.settings_reply()
-        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "1440p", "2160p", "native"])
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
         self.assertIsNone(r["source_size"])
 
-    def test_4k_setting_on_a_1080p_screen(self):
+    def test_1080p_setting_on_a_720p_window(self):
         from momento import config
 
-        self.use_sized((1920, 1080))
-        self.assertEqual(self.d.source_size, (1920, 1080))
-        # 4K would not fit on this disk, what is really recorded (1080p) does
-        self.free = self.need(resolution="1080p") + 10
-        self.assertGreater(self.need(resolution="2160p"), self.free)
-        r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
+        self.call({"cmd": "configure", "changes": {"resolution": "720p"}})
+        self.use_sized((1280, 720))
+        self.assertEqual(self.d.source_size, (1280, 720))
+        # 1080p would not fit on this disk, what is really recorded (720p) does
+        self.free = self.need(resolution="720p") + 10
+        self.assertGreater(self.need(resolution="1080p"), self.free)
+        r = self.call({"cmd": "configure", "changes": {"resolution": "fhd"}})
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["restarted"], r["state"]), (True, "recording"))
-        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")   # saved as asked
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "1080p")   # saved as asked
         st = self.d.status()
         self.assertEqual((st["resolution"], st["resolution_effective"], st["source_size"]),
-                         ("2160p", "native", [1920, 1080]))
-        self.assertEqual(st["bitrate_kbps"], 15000)
-        self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
+                         ("1080p", "native", [1280, 720]))
+        self.assertEqual(st["bitrate_kbps"], 10000)
+        self.assertEqual(st["storage"]["required"], self.need(resolution="720p"))
         self.assertTrue(st["storage"]["ok"])
         r = self.settings_reply()
-        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
+        self.assertEqual(r["resolution_allowed"], ["720p", "native"])
         self.assertEqual((r["values"]["resolution"], r["resolution_effective"], r["source_size"]),
-                         ("2160p", "native", [1920, 1080]))
+                         ("1080p", "native", [1280, 720]))
         req = r["storage"]["required"]
-        self.assertEqual(req["2160p/high/60"], req["1080p/high/60"])
-        self.assertEqual(req["1440p/ultra/120"], req["1080p/ultra/120"])
-        self.assertLess(req["720p/high/60"], req["1080p/high/60"])
+        self.assertEqual(req["1080p/high/60"], req["720p/high/60"])
+        self.assertEqual(req["1080p/ultra/120"], req["720p/ultra/120"])
+        self.assertEqual(req["native/high/60"], req["720p/high/60"])
         # a pause keeps what is known; so does a reload
         self.call({"cmd": "pause"})
-        self.assertEqual(self.d.status()["source_size"], [1920, 1080])
+        self.assertEqual(self.d.status()["source_size"], [1280, 720])
         self.call({"cmd": "reload"})
         self.assertEqual(self.d.status()["resolution_effective"], "native")
 
+    def test_4k_screen_records_1080p(self):
+        """Native and an older config's 4K on a 4K screen: 1080 lines, and it costs 1080p."""
+        from momento import config
+
+        self.path.write_text(self.path.read_text().replace('resolution = "1080p"', 'resolution = "2160p"'))
+        self.use_sized((3840, 2160))
+        self.call({"cmd": "reload"})
+        st = self.d.status()
+        self.assertEqual((st["resolution"], st["resolution_effective"], st["bitrate_kbps"]),
+                         ("1080p", "1080p", 15000))
+        self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
+        self.assertEqual(st["storage"]["label"], "1080p High")
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")   # file left alone
+        r = self.settings_reply()
+        self.assertEqual(r["choices"]["resolution"], ["720p", "1080p", "native"])
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
+        self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("1080p", "1080p"))
+        self.assertEqual(r["storage"]["current"], "1080p/high/60")
+        self.assertEqual(r["storage"]["required"]["native/high/60"], r["storage"]["required"]["1080p/high/60"])
+        # 4K can't be chosen again
+        r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
+        self.assertEqual(r, {"ok": False,
+                             "error": "1440p and 4K aren't available yet; Momento records up to 1080p for now."})
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")
+        # native: the screen scaled down to 1080 lines, at 1080p's bitrate
+        r = self.call({"cmd": "configure", "changes": {"resolution": "native"}})
+        self.assertTrue(r["ok"], r)
+        st = self.d.status()
+        self.assertEqual((st["resolution"], st["resolution_effective"], st["bitrate_kbps"]),
+                         ("native", "native", 15000))
+        self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
+
     def test_screen_change_is_followed(self):
         self.use_sized((3840, 2160))
-        self.call({"cmd": "configure", "changes": {"resolution": "1440p"}})
+        self.call({"cmd": "configure", "changes": {"resolution": "1080p"}})
         st = self.d.status()
-        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1440p", 24000))
-        SizedRecorder.size = (1920, 1200)                 # another monitor on the next start
+        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1080p", 15000))
+        SizedRecorder.size = (1280, 720)                  # another monitor on the next start
         self.call({"cmd": "reload"})
         st = self.d.status()
         self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]),
-                         ([1920, 1200], "native", 24000))  # 1200 lines: the 1440p class
+                         ([1280, 720], "native", 10000))  # 720 lines: the 720p class
 
     def test_new_window_forgets_the_size(self):
         self.use_sized((1280, 720))
@@ -1326,37 +1412,35 @@ class DaemonResolutionCapTest(unittest.TestCase):
         self.assertIsNone(self.d.status()["source_size"])
 
     def test_low_storage_warning_counts_what_is_recorded(self):
-        from momento import config, storage
+        from momento import storage
 
-        self.use_sized((1920, 1080))
-        self.path.write_text(self.path.read_text().replace('resolution = "1080p"', 'resolution = "2160p"'))
-        self.call({"cmd": "reload"})
-        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")
-        self.free = self.need((1920, 1080)) + 10        # 4K wouldn't fit; the 1080p really recorded does
+        self.use_sized((1280, 720))
+        self.free = self.need((1280, 720)) + 10         # 1080p wouldn't fit; the 720p really recorded does
+        self.assertGreater(self.need(), self.free)
         st = self.d.status()["storage"]
-        self.assertEqual((st["ok"], st["low"], st["label"]), (True, False, "1080p High"))
-        self.assertEqual(st["needed"], self.need(resolution="1080p"))
-        self.free = self.need((1920, 1080)) - 10
+        self.assertEqual((st["ok"], st["low"], st["label"]), (True, False, "720p High"))
+        self.assertEqual(st["needed"], self.need(resolution="720p"))
+        self.free = self.need((1280, 720)) - 10
         st = self.d.status()["storage"]
         self.assertTrue(st["low"])
-        self.assertTrue(storage.low_message(st, 3600).startswith("Low storage: 60 min at 1080p High needs "))
+        self.assertTrue(storage.low_message(st, 3600).startswith("Low storage: 60 min at 720p High needs "))
         # Keep history counts the saved hour at the recorded size too
         self.d.cfg["buffer"]["keep_history"] = True
         self.d.cfg["output"]["dir"] = self._tmp.name      # clips on the buffer's disk
         self.free = 10**13
         st = self.d.status()["storage"]
-        self.assertEqual(st["needed"], self.need(resolution="1080p") + storage.buffer_bytes(
-            {**self.d.cfg, "capture": {**self.d.cfg["capture"], "resolution": "1080p"}}))
+        self.assertEqual(st["needed"], self.need(resolution="720p") + storage.buffer_bytes(
+            {**self.d.cfg, "capture": {**self.d.cfg["capture"], "resolution": "720p"}}))
 
     def test_configure_refusal_counts_the_source(self):
-        self.use_sized((1920, 1080))
-        # 1440p Ultra records as 1080p Ultra here: refused only when that doesn't fit
-        self.free = self.need((1920, 1080), resolution="1440p", quality="ultra") - 1
-        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.use_sized((1280, 720))
+        # 1080p Ultra records as 720p Ultra here: refused only when that doesn't fit
+        self.free = self.need((1280, 720), resolution="1080p", quality="ultra") - 1
+        r = self.call({"cmd": "configure", "changes": {"quality": "ultra"}})
         self.assertEqual((r["ok"], r.get("code")), (False, "no_storage"))
-        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p", quality="ultra"))
+        self.assertEqual(r["storage"]["required"], self.need(resolution="720p", quality="ultra"))
         self.free += 1
-        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        r = self.call({"cmd": "configure", "changes": {"quality": "ultra"}})
         self.assertTrue(r["ok"], r)
 
 
@@ -1394,7 +1478,8 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(storage.human(512 << 20), "536.9 MB")
         self.assertEqual(storage.human(1.5e12), "1.5 TB")
         self.assertEqual(storage.human(12), "12 B")
-        self.assertEqual(storage.label(self.cfg(resolution="1440p", quality="ultra")), "1440p Ultra")
+        self.assertEqual(storage.label(self.cfg(resolution="720p", quality="ultra")), "720p Ultra")
+        self.assertEqual(storage.label(self.cfg(resolution="2160p", quality="ultra")), "1080p Ultra")  # older config
         self.assertEqual(storage.label(self.cfg(fps=120)), "1080p High 120 fps")
         self.assertEqual(storage.label(self.cfg(bitrate_kbps=50000)), "1080p at 50 Mbps")
 
@@ -1414,8 +1499,10 @@ class StorageTest(unittest.TestCase):
             req = storage.requirements(cfg, reclaimable=7)
         self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/high/60"))
         self.assertEqual(req["required"]["1080p/high/60"], need)
-        self.assertLess(req["required"]["720p/standard/60"], req["required"]["2160p/ultra/120"])
-        self.assertEqual(len(req["required"]), 30)
+        self.assertLess(req["required"]["720p/standard/60"], req["required"]["1080p/ultra/120"])
+        self.assertEqual(sorted(req["required"]), sorted(f"{r}/{q}/{f}" for r in ("720p", "1080p", "native")
+                                                         for q in ("standard", "high", "ultra") for f in (60, 120)))
+        self.assertEqual(len(req["required"]), 18)        # 720p, 1080p, native x 3 x 2
         self.assertEqual(cfg["capture"]["resolution"], "1080p")  # not mutated
 
     def test_full_span_need(self):
@@ -1520,28 +1607,57 @@ def _index_lines(d: Path) -> list[dict]:
 
 
 class ResolutionCapTest(unittest.TestCase):
-    """Presets taller than the recorded picture are not offered and never upscaled."""
+    """Presets taller than the recorded picture are not offered and never upscaled;
+    nothing is recorded taller than 1080 lines (v1.0.0)."""
 
-    ALL = ["720p", "1080p", "1440p", "2160p", "native"]
+    ALL = ["720p", "1080p", "native"]
+
+    def test_offered_up_to_1080p(self):
+        from momento import quality
+
+        self.assertEqual(quality.MAX_HEIGHT, 1080)
+        self.assertEqual(list(quality.RESOLUTIONS), self.ALL)
+        self.assertEqual(quality.LATER, ("1440p", "2160p"))
+        self.assertEqual(quality.TALLEST, "1080p")
+        # kept for later: the presets and their bitrates are still known
+        self.assertEqual(quality.PRESETS["2160p"], (3840, 2160))
+        self.assertEqual(quality.later_message(),
+                         "1440p and 4K aren't available yet; Momento records up to 1080p for now.")
+
+    def test_raising_max_height_offers_1440p(self):
+        """One place to re-enable 1440p/4K: quality.MAX_HEIGHT (the lists derive from it)."""
+        from momento import quality
+
+        # a private copy of the module with MAX_HEIGHT = 1440 (the real one is untouched)
+        src = Path(quality.__file__).read_text()
+        self.assertEqual(src.count("\nMAX_HEIGHT = 1080\n"), 1)
+        ns: dict = {}
+        exec(compile(src.replace("\nMAX_HEIGHT = 1080\n", "\nMAX_HEIGHT = 1440\n"), quality.__file__, "exec"), ns)
+        self.assertEqual(list(ns["RESOLUTIONS"]), ["720p", "1080p", "1440p", "native"])
+        self.assertEqual((ns["LATER"], ns["TALLEST"]), (("2160p",), "1440p"))
+        self.assertEqual(ns["later_message"](), "4K isn't available yet; Momento records up to 1440p for now.")
+        self.assertEqual(ns["native_size"]((3840, 2160)), (2560, 1440))
+        self.assertEqual(quality.MAX_HEIGHT, 1080)
 
     def test_allowed_table(self):
         from momento import quality
 
         table = {
-            (1920, 1080): ["720p", "1080p", "native"],
-            (2560, 1440): ["720p", "1080p", "1440p", "native"],
-            (3440, 1440): ["720p", "1080p", "1440p", "native"],       # ultrawide: by height
-            (2560, 1080): ["720p", "1080p", "native"],                 # 21:9 1080p
+            (1920, 1080): self.ALL,
+            (2560, 1440): self.ALL,
+            (3440, 1440): self.ALL,
+            (2560, 1080): self.ALL,                                    # 21:9 1080p
             (3840, 2160): self.ALL,
             (5120, 2880): self.ALL,
-            (1920, 1200): ["720p", "1080p", "native"],                 # 16:10: not 1440p
+            (1920, 1200): self.ALL,                                    # 16:10
             (1280, 800): ["720p", "native"],                           # Steam Deck
             (1280, 720): ["720p", "native"],                           # a 720p window
             (1270, 710): ["720p", "native"],                           # within 2 % of 720
             (1001, 701): ["native"],                                   # 720 is more than 2 % taller
             (1000, 600): ["native"],                                   # a small window
-            (1920, 1070): ["720p", "1080p", "native"],                 # a window a bit short of 1080
-            (1080, 1920): ["720p", "1080p", "1440p", "native"],        # portrait
+            (1920, 1070): self.ALL,                                    # a window a bit short of 1080
+            (1920, 1050): ["720p", "native"],                          # 1080 is more than 2 % taller
+            (1080, 1920): self.ALL,                                    # portrait
         }
         for source, want in table.items():
             self.assertEqual(quality.allowed_resolutions(source), want, source)
@@ -1553,35 +1669,89 @@ class ResolutionCapTest(unittest.TestCase):
     def test_effective_and_rate_class(self):
         from momento import quality
 
-        self.assertEqual(quality.effective_resolution("2160p", (1920, 1080)), "native")
-        self.assertEqual(quality.effective_resolution("1440p", (1920, 1200)), "native")
         self.assertEqual(quality.effective_resolution("1080p", (1920, 1200)), "1080p")
-        self.assertEqual(quality.effective_resolution("1440p", (3440, 1440)), "1440p")
         self.assertEqual(quality.effective_resolution("native", (640, 480)), "native")
-        self.assertEqual(quality.effective_resolution("2160p", None), "2160p")      # unknown: as set
+        self.assertEqual(quality.effective_resolution("native", (3840, 2160)), "native")
+        self.assertEqual(quality.effective_resolution("1080p", None), "1080p")      # unknown: as set
         self.assertEqual(quality.effective_resolution("1080P", (1280, 720)), "native")
+        # an older config's 1440p / 4K records at 1080p (or the picture's size below that)
+        self.assertEqual(quality.effective_resolution("2160p", (3840, 2160)), "1080p")
+        self.assertEqual(quality.effective_resolution("4k", None), "1080p")
+        self.assertEqual(quality.effective_resolution("1440p", (1920, 1080)), "1080p")
+        self.assertEqual(quality.effective_resolution("2160p", (1280, 720)), "native")
         for source, cls in (((1920, 1080), "1080p"), ((1920, 1200), "1440p"), ((3440, 1440), "1440p"),
                             ((1280, 720), "720p"), ((1001, 701), "720p"), ((640, 480), "720p"),
-                            ((3840, 2160), "2160p"), ((5120, 2880), "native"), (None, "native")):
+                            ((3840, 2160), "2160p"), ((5120, 2880), "2160p"), (None, "1080p")):
             self.assertEqual(quality.rate_class(source), cls, source)
         self.assertEqual(quality.height_label((2560, 1440)), "1440p")
         self.assertIsNone(quality.height_label(None))
+
+    def test_preset_names(self):
+        from momento import quality
+
+        for name, want in (("720p", "720p"), ("1080P", "1080p"), ("native", "native"), ("fhd", "1080p"),
+                           ("1440p", "1080p"), ("2160p", "1080p"), ("4k", "1080p"), ("2K", "1080p"),
+                           ("uhd", "1080p"), ("qhd", "1080p")):
+            self.assertEqual(quality.preset(name), want, name)
+            self.assertEqual(quality.offered(name), want, name)
+        with self.assertRaises(ValueError):
+            quality.preset("999p")
+        self.assertEqual(quality.offered("999P"), "999p")
+        self.assertEqual(quality.resolution({"resolution": "2160p"}), (1920, 1080))
+        self.assertEqual(quality.resolution({"resolution": "native"}), None)
+        with self.assertRaises(ValueError):
+            quality.resolution({"resolution": "8k"})
+
+    def test_native_is_scaled_down_to_1080_lines(self):
+        from momento import quality
+
+        for source, want in (((3840, 2160), (1920, 1080)),         # 4K
+                             ((2560, 1440), (1920, 1080)),         # 1440p
+                             ((3440, 1440), (2580, 1080)),         # ultrawide: aspect kept
+                             ((5120, 1440), (3840, 1080)),         # 32:9
+                             ((1920, 1200), (1728, 1080)),         # 16:10, a bit taller
+                             ((2560, 1600), (1728, 1080)),
+                             ((1080, 1920), (608, 1080)),          # portrait
+                             ((1920, 1080), (1920, 1080)),         # as it is
+                             ((2560, 1080), (2560, 1080)),
+                             ((1280, 800), (1280, 800)),
+                             ((1271, 713), (1270, 712)),           # even numbers
+                             ((1, 1), (2, 2)),
+                             (None, None)):
+            got = quality.native_size(source)
+            self.assertEqual(got, want, source)
+            if got:
+                self.assertLessEqual(got[1], 1080)
+                self.assertEqual((got[0] % 2, got[1] % 2), (0, 0))
+        self.assertEqual(quality.recorded_size("native", (3840, 2160)), (1920, 1080))
+        self.assertEqual(quality.recorded_size("1080p", (3840, 2160)), (1920, 1080))
+        self.assertEqual(quality.recorded_size("720p", (3840, 2160)), (1280, 720))
+        self.assertEqual(quality.recorded_size("2160p", (3840, 2160)), (1920, 1080))   # older config
+        self.assertEqual(quality.recorded_size("1080p", (1271, 713)), (1270, 712))    # never upscaled
+        self.assertEqual(quality.recorded_size("1080p", None), (1920, 1080))
+        self.assertIsNone(quality.recorded_size("native", None))
 
     def test_bitrate_uses_what_is_recorded(self):
         from momento import quality
 
         def kbps(source=None, **cap):
-            return quality.bitrate_kbps({"resolution": "2160p", "quality": "high", "fps": 60, **cap}, source)
+            return quality.bitrate_kbps({"resolution": "1080p", "quality": "high", "fps": 60, **cap}, source)
 
-        self.assertEqual(kbps(), 45_000)                          # unknown source: as configured
-        self.assertEqual(kbps((3840, 2160)), 45_000)
-        self.assertEqual(kbps((1920, 1080)), 15_000)              # 4K on 1080p costs 1080p
-        self.assertEqual(kbps((2560, 1440)), 24_000)
-        self.assertEqual(kbps((1280, 720)), 10_000)
-        self.assertEqual(kbps((1920, 1080), fps=120), 22_000)     # round(15 x 1.5), like 1080p at 120
-        self.assertEqual(kbps((1920, 1080), bitrate_kbps=50_000), 50_000)   # explicit wins
+        self.assertEqual(kbps(), 15_000)                          # unknown source: as configured
+        self.assertEqual(kbps((3840, 2160)), 15_000)
+        self.assertEqual(kbps((1280, 720)), 10_000)               # 1080p on a 720p window costs 720p
+        self.assertEqual(kbps((1280, 720), fps=120), 15_000)      # 10 x 1.5, like 720p at 120
+        self.assertEqual(kbps((1280, 720), bitrate_kbps=50_000), 50_000)    # explicit wins
         self.assertEqual(kbps((1920, 1080), resolution="720p"), 10_000)     # fits: unchanged
-        self.assertEqual(kbps((1920, 1080), resolution="native"), 24_000)   # native as before
+        # native: the size really recorded, at most 1080 lines
+        for source, want in (((3840, 2160), 15_000), ((2560, 1440), 15_000), ((3440, 1440), 15_000),
+                             ((1920, 1080), 15_000), ((1280, 720), 10_000), ((1280, 800), 15_000),
+                             (None, 15_000)):
+            self.assertEqual(kbps(source, resolution="native"), want, source)
+        # an older config's 4K / 1440p: what 1080p costs
+        self.assertEqual(kbps(resolution="2160p"), 15_000)
+        self.assertEqual(kbps((3840, 2160), resolution="2160p", quality="ultra"), 25_000)
+        self.assertEqual(kbps((1280, 720), resolution="1440p"), 10_000)
 
     def test_storage_uses_what_is_recorded(self):
         from unittest import mock
@@ -1589,27 +1759,35 @@ class ResolutionCapTest(unittest.TestCase):
         from momento import config, storage
 
         cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
-        cfg["capture"].update(resolution="2160p", quality="high", fps=60)
-        p1080 = {**cfg, "capture": {**cfg["capture"], "resolution": "1080p"}}
-        on_1080 = storage.required_bytes(cfg, (1920, 1080))
-        self.assertEqual(on_1080, storage.required_bytes(p1080))
-        self.assertLess(on_1080, storage.required_bytes(cfg))
+        cfg["capture"].update(resolution="1080p", quality="high", fps=60)
+        p720 = {**cfg, "capture": {**cfg["capture"], "resolution": "720p"}}
+        on_720 = storage.required_bytes(cfg, (1280, 720))
+        self.assertEqual(on_720, storage.required_bytes(p720))
+        self.assertLess(on_720, storage.required_bytes(cfg))
         self.assertEqual(storage.required_bytes(cfg, (3840, 2160)), storage.required_bytes(cfg))
-        self.assertEqual(storage.buffer_bytes(cfg, (1920, 1080)), storage.buffer_bytes(p1080))
-        with mock.patch.object(storage, "free_bytes", return_value=on_1080):
-            self.assertTrue(storage.check(cfg, source=(1920, 1080))["ok"])
+        self.assertEqual(storage.buffer_bytes(cfg, (1280, 720)), storage.buffer_bytes(p720))
+        with mock.patch.object(storage, "free_bytes", return_value=on_720):
+            self.assertTrue(storage.check(cfg, source=(1280, 720))["ok"])
             self.assertFalse(storage.check(cfg)["ok"])
-            req = storage.requirements(cfg, source=(1920, 1080))
-        self.assertEqual(storage.label(cfg, (1920, 1080)), "1080p High")        # what is recorded
-        self.assertEqual(storage.label(cfg, (1920, 1200)), "1200p High")
-        self.assertEqual(storage.label(cfg, (3840, 2160)), "2160p High")
-        self.assertEqual(storage.label(cfg), "2160p High")
-        self.assertEqual(req["current"], "2160p/high/60")               # the saved setting, as is
-        self.assertEqual(req["required"]["2160p/high/60"], on_1080)
-        self.assertEqual(req["required"]["1440p/high/60"], on_1080)
-        self.assertEqual(req["required"]["1080p/high/60"], on_1080)
-        self.assertLess(req["required"]["720p/high/60"], on_1080)
-        self.assertEqual(cfg["capture"]["resolution"], "2160p")          # not mutated
+            req = storage.requirements(cfg, source=(1280, 720))
+        self.assertEqual(storage.label(cfg, (1280, 720)), "720p High")          # what is recorded
+        self.assertEqual(storage.label(cfg, (1280, 800)), "800p High")
+        self.assertEqual(storage.label(cfg, (3840, 2160)), "1080p High")
+        self.assertEqual(storage.label(cfg), "1080p High")
+        self.assertEqual(req["current"], "1080p/high/60")
+        self.assertEqual(req["required"]["1080p/high/60"], on_720)
+        self.assertEqual(req["required"]["720p/high/60"], on_720)
+        self.assertEqual(req["required"]["native/high/60"], on_720)
+        self.assertNotIn("2160p/high/60", req["required"])
+        # native on a 4K screen records (and costs) 1080p
+        native = {**cfg, "capture": {**cfg["capture"], "resolution": "native"}}
+        self.assertEqual(storage.required_bytes(native, (3840, 2160)), storage.required_bytes(cfg))
+        # an older config's 4K counts as the 1080p it records at; the config is not changed
+        old = {**cfg, "capture": {**cfg["capture"], "resolution": "2160p"}}
+        self.assertEqual(storage.required_bytes(old), storage.required_bytes(cfg))
+        self.assertEqual(storage.label(old), "1080p High")
+        self.assertEqual(storage.current_key(old), "1080p/high/60")
+        self.assertEqual(old["capture"]["resolution"], "2160p")          # not mutated
 
 
 class LiveBufferedTest(unittest.TestCase):
@@ -2519,7 +2697,58 @@ class RecorderWindowTest(unittest.TestCase):
         screen = self.recorder(target="screen", resolution="native")
         screen.start()
         self.assertFalse(screen._lock_size())
-        self.assertNotIn("videoscale", screen._video_chain(self.pipeline._Variant("x264enc", False)))
+        # native may scale a screen taller than 1080 lines down (at the same size it passes through)
+        self.assertIn("videoscale add-borders=true", screen._video_chain(self.pipeline._Variant("x264enc", False)))
+
+    def pin(self, rec, size):
+        """Feed a source's first caps to Recorder._pin_size, as the probe would (no pipeline).
+
+        Returns (the size the output is pinned to or None, the encoder bitrate set or None)."""
+        from unittest import mock
+
+        from momento import quality
+
+        Gst = self.pipeline.Gst
+        rec._video_chain(self.pipeline._Variant("x264enc", False))   # sets the size caps
+        rec._source_seen, rec._locked_size = False, None
+        rec._kbps = quality.bitrate_kbps(rec.cfg["capture"])          # as _build sets it
+        capsfilter, info = mock.Mock(), mock.Mock()
+        info.get_event.return_value = Gst.Event.new_caps(
+            Gst.Caps.from_string(f"video/x-raw,width={size[0]},height={size[1]}"))
+        with mock.patch.object(rec, "_encoder_settings") as settings:
+            self.assertEqual(rec._pin_size(None, info, (capsfilter, object(), "x264enc")), Gst.PadProbeReturn.OK)
+        if rec._locked_size is not None:
+            caps = capsfilter.set_property.call_args[0][1].get_structure(0)
+            self.assertEqual((caps.get_int("width")[1], caps.get_int("height")[1]), rec._locked_size)
+        else:
+            capsfilter.set_property.assert_not_called()
+        self.assertEqual(rec.source_size, tuple(size))
+        return rec._locked_size, (settings.call_args[0][2] if settings.called else None)
+
+    def test_native_never_records_taller_than_1080p(self):
+        rec = self.recorder(target="screen", resolution="native")
+        self.assertEqual(self.pin(rec, (3840, 2160)), ((1920, 1080), None))   # 1080p's bitrate already
+        self.assertEqual(rec.resolution_effective, "native")
+        self.assertEqual(self.pin(rec, (3440, 1440)), ((2580, 1080), None))   # ultrawide: aspect kept
+        self.assertEqual(self.pin(rec, (2560, 1440)), ((1920, 1080), None))
+        self.assertEqual(self.pin(rec, (1920, 1080)), (None, None))           # its own size, as it is
+        self.assertEqual(self.pin(rec, (1280, 720)), (None, 10_000))          # 720p's bitrate
+        win = self.recorder(target="window", resolution="native")
+        win.start(interactive=True)
+        self.assertEqual(self.pin(win, (3840, 2160)), ((1920, 1080), None))   # a 4K window
+        self.assertEqual(self.pin(win, (1271, 713)), ((1270, 712), 10_000))   # locked, even numbers
+
+    def test_presets_and_an_older_4k_config(self):
+        rec = self.recorder(target="screen", resolution="1080p")
+        self.assertEqual(self.pin(rec, (3840, 2160)), (None, None))           # scaled by the preset
+        self.assertEqual(rec.resolution_effective, "1080p")
+        self.assertEqual(self.pin(rec, (1271, 713)), ((1270, 712), 10_000))   # never upscaled
+        self.assertEqual(rec.resolution_effective, "native")
+        old = self.recorder(target="screen", resolution="2160p")              # records at 1080p
+        self.assertEqual((old.size_name, old.size), ("1080p", (1920, 1080)))
+        self.assertIn("width=1920,height=1080", old._video_chain(self.pipeline._Variant("x264enc", False)))
+        self.assertEqual(self.pin(old, (3840, 2160)), (None, None))
+        self.assertEqual(old.resolution_effective, "1080p")
 
 
 class _FakeMatch:
@@ -3024,16 +3253,16 @@ class CLIStatusTest(unittest.TestCase):
         self.assertIn("history: kept when recording stops", text)
 
     ST = {"ok": True, "state": "recording", "recording": True, "buffered": 60.0, "max_seconds": 3600,
-          "target": "screen", "resolution": "2160p", "fps": 60, "quality": "high", "bitrate_kbps": 15000,
-          "resolution_effective": "native", "source_size": [1920, 1080]}
+          "target": "screen", "resolution": "1080p", "fps": 60, "quality": "high", "bitrate_kbps": 10000,
+          "resolution_effective": "native", "source_size": [1280, 720]}
 
     def test_status_shows_the_resolution_really_recorded(self):
         _code, text = self.run_cli(["status"], [self.ST])
-        self.assertIn("video: 2160p, recording at 1080p (your screen's size), 60 fps, high (15 Mbps)", text)
-        win = {**self.ST, "target": "window", "source_size": [1280, 720], "bitrate_kbps": 10000}
+        self.assertIn("video: 1080p, recording at 720p (your screen's size), 60 fps, high (10 Mbps)", text)
+        win = {**self.ST, "target": "window", "source_size": [1001, 701]}
         _code, text = self.run_cli(["status"], [win])
-        self.assertIn("video: 2160p, recording at 1280\u00d7720 (the window's size), 60 fps", text)
-        for fits in ({**self.ST, "resolution": "1080p", "resolution_effective": "1080p"},
+        self.assertIn("video: 1080p, recording at 1001\u00d7701 (the window's size), 60 fps", text)
+        for fits in ({**self.ST, "resolution": "720p", "resolution_effective": "720p"},
                      {**self.ST, "resolution": "native"},
                      {k: v for k, v in self.ST.items() if k not in ("resolution_effective", "source_size")}):
             _code, text = self.run_cli(["status"], [fits])
@@ -3041,23 +3270,23 @@ class CLIStatusTest(unittest.TestCase):
             self.assertIn(f"video: {fits['resolution']} 60 fps", text)
 
     def test_set_resolution_above_the_screen_notes_it(self):
-        conf = {"ok": True, "changed": {"resolution": "2160p"}, "restarted": True, "paused": False,
+        conf = {"ok": True, "changed": {"resolution": "1080p"}, "restarted": True, "paused": False,
                 "state": "starting"}
-        code, text = self.run_cli(["set", "resolution", "4k"], [conf, self.ST])
+        code, text = self.run_cli(["set", "resolution", "fhd"], [conf, self.ST])
         self.assertEqual(code, 0)
-        self.assertEqual(text.splitlines(), ["resolution = 2160p", "Recording restarted with the new setting.",
-                                             "Your screen is 1080p, so this records at 1080p; "
+        self.assertEqual(text.splitlines(), ["resolution = 1080p", "Recording restarted with the new setting.",
+                                             "Your screen is 720p, so this records at 720p; "
                                              "a bigger size would only waste space."])
-        code, text = self.run_cli(["set", "resolution", "1080p"],
-                                  [{**conf, "changed": {"resolution": "1080p"}}, self.ST])
+        code, text = self.run_cli(["set", "resolution", "720p"],
+                                  [{**conf, "changed": {"resolution": "720p"}}, self.ST])
         self.assertNotIn("waste", text)
-        win = {**self.ST, "target": "window", "source_size": [1280, 720]}
-        _code, text = self.run_cli(["set", "resolution", "1440p"], [{**conf, "changed": {"resolution": "1440p"}}, win])
-        self.assertIn("The window is 1280\u00d7720, so this records at 1280\u00d7720;", text)
+        win = {**self.ST, "target": "window", "source_size": [1001, 701]}
+        _code, text = self.run_cli(["set", "resolution", "720p"], [{**conf, "changed": {"resolution": "720p"}}, win])
+        self.assertIn("The window is 1001\u00d7701, so this records at 1001\u00d7701;", text)
         # no size known yet (or no status): nothing to add
-        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, {**self.ST, "source_size": None}])
+        _code, text = self.run_cli(["set", "resolution", "1080p"], [conf, {**self.ST, "source_size": None}])
         self.assertNotIn("waste", text)
-        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, OSError("gone")])
+        _code, text = self.run_cli(["set", "resolution", "1080p"], [conf, OSError("gone")])
         self.assertNotIn("waste", text)
 
     def test_settings_show_the_resolution_really_recorded(self):
@@ -3067,16 +3296,18 @@ class CLIStatusTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "config.toml"
+            # an older config's 4K: shown (and recorded) as 1080p; the file is left alone
             path.write_text(f'[capture]\nresolution = "2160p"\ntarget = "screen"\n[buffer]\ndir = "{d}/buf"\n')
             with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
                     mock.patch.object(storage, "free_bytes", return_value=10**12):
                 _code, text = self.run_cli(["--config", str(path), "settings"], [self.ST])
-                self.assertIn("resolution: 2160p, records at 1080p (your screen's size)", text)
-                self.assertIn("bitrate: 15 Mbps (automatic)", text)
-                self.assertIn("disk use: about 7.2 GB for the full buffer", text)
+                self.assertIn("resolution: 1080p, records at 720p (your screen's size)", text)
+                self.assertIn("bitrate: 10 Mbps (automatic)", text)
+                self.assertIn("disk use: about 4.8 GB for the full buffer", text)
                 _code, text = self.run_cli(["--config", str(path), "settings"], [OSError("not running")])
-                self.assertIn("resolution: 2160p\n", text)
-                self.assertIn("bitrate: 45 Mbps (automatic)", text)
+                self.assertIn("resolution: 1080p\n", text)
+                self.assertIn("bitrate: 15 Mbps (automatic)", text)
+            self.assertIn('resolution = "2160p"', path.read_text())
 
     def test_stop_and_resume_messages(self):
         _code, text = self.run_cli(["stop"], [{"ok": True, "state": "stopped", "buffer_cleared": False}])

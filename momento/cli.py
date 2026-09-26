@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="show recorder status")
     sub.add_parser("settings", help="show video and audio settings (and audio devices)")
     keys = "; ".join(f"{k}: {h}" for k, h in settings.KEYS.items())
-    st = sub.add_parser("set", help="change a setting, e.g. `set resolution 1440p`",
+    st = sub.add_parser("set", help="change a setting, e.g. `set resolution 720p`",
                         description=f"Settings: {keys}.")
     st.add_argument("key", choices=list(settings.KEYS))
     st.add_argument("value")
@@ -323,6 +323,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "set":
         try:
             clean = settings.validate({args.key: args.value})
+        except settings.Unavailable as e:  # 1440p / 4K: a friendly sentence, not an error code
+            print(e, file=sys.stderr)
+            return 1
         except ValueError as e:
             print(f"momento: {e}", file=sys.stderr)
             return 1

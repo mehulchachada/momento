@@ -148,7 +148,7 @@ def combo_key(resolution: str, quality_name: str, fps: int) -> str:
 
 def current_key(cfg: dict) -> str:
     cap = cfg["capture"]
-    return combo_key(str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower(),
+    return combo_key(quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
                      str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
                      quality.fps(cap))
 
@@ -173,13 +173,14 @@ def requirements(cfg: dict, reclaimable: int = 0, source=None) -> dict:
 
 
 def label(cfg: dict, source=None) -> str:
-    """'1440p Ultra', '1080p High 120 fps', '1080p at 50 Mbps' (explicit bitrate).
+    """'1080p Ultra', '1080p High 120 fps', '1080p at 50 Mbps' (explicit bitrate).
 
     With a known ``source`` size, a resolution taller than it is named by what is
-    really recorded: 4K on a 1080p screen is '1080p High'.
+    really recorded: 1080p on a 1280x720 window is '720p High'. An older config's
+    1440p/2160p is named by what it records at ('1080p High').
     """
     cap = cfg["capture"]
-    text = str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower()
+    text = quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION))
     if quality.effective_resolution(text, source) != text:
         text = quality.height_label(source)
     explicit = int(cap.get("bitrate_kbps") or 0)

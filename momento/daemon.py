@@ -987,7 +987,8 @@ class Daemon:
             # by either, e.g. window mode waiting for the first play).
             "stop_reason": self.stop_reason if self.stopped else None,
             "keep_history": self.keep_history(),
-            "resolution": self.cfg["capture"]["resolution"],
+            # The setting; an older config's 1440p/2160p reads as what it records at (1080p).
+            "resolution": quality.offered(self.cfg["capture"]["resolution"]),
             # What is really recorded: the setting, or "native" when it is taller
             # than the picture (source_size, null until known). Never upscaled.
             "resolution_effective": quality.effective_resolution(self.cfg["capture"]["resolution"],

@@ -258,11 +258,12 @@ def check_capped(tmp_path: Path) -> list:
     """A preset taller than the source records at the source's own size (never upscaled),
     with the bitrate of that size; a preset that fits is left as it is."""
     out = []
-    # A 16:10 1920x1200 screen set to 4K: recorded at 1920x1200 with the 1440p class bitrate.
-    r = record_capped(tmp_path, "cap4k", (1920, 1200), resolution="2160p", target="screen")
-    assert (r["source"], r["effective"], r["locked"]) == ((1920, 1200), "native", (1920, 1200)), r
-    assert r["want_kbps"] == 24_000 and r["kbps"] == 24_000, r
-    assert {(s.width, s.height) for s in r["segments"]} == {(1920, 1200)}, r["segments"]
+    # A 16:10 1920x1200 screen at native: scaled down to 1080 lines (1728x1080, aspect kept),
+    # with the 1080p class bitrate (nothing is recorded taller than quality.MAX_HEIGHT).
+    r = record_capped(tmp_path, "capnative", (1920, 1200), resolution="native", target="screen")
+    assert (r["source"], r["effective"], r["locked"]) == ((1920, 1200), "native", (1728, 1080)), r
+    assert r["want_kbps"] == 15_000 and r["kbps"] == 15_000, r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1728, 1080)}, r["segments"]
     out.append(r)
     # A 1271x713 window at 1080p: its own size, rounded down to even numbers, 720p class bitrate.
     r = record_capped(tmp_path, "capwin", (1271, 713), resolution="1080p", target="window")
@@ -282,7 +283,7 @@ def check_capped(tmp_path: Path) -> list:
     assert {(s.width, s.height) for s in r["segments"]} == {(1280, 720)}, r["segments"]
     out.append(r)
     if shutil.which("ffprobe"):
-        for r, want in zip(out, ("1920,1200", "1270,712", "1270,712", "1280,720")):
+        for r, want in zip(out, ("1728,1080", "1270,712", "1270,712", "1280,720")):
             seg = r["segments"][-1]
             assert frame_sizes(seg.path) == {want}, (seg, frame_sizes(seg.path))
     return out

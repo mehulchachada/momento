@@ -31,13 +31,12 @@ target = "window"
 # and uses about 1.5x the disk space. Change it with:  momento set fps 120
 fps = 60
 
-# Recording resolution:
-#   "720p" | "1080p" | "1440p" | "2160p"   scaled to this size; if your screen has
-#                                          a different shape you get black bars,
-#                                          never a stretched picture
-#   "native"                               your screen's own size (window mode:
-#                                          the window's size when you picked it)
-# Change it from a terminal with:  momento set resolution 1440p
+# Recording resolution (up to 1080p for now; 1440p and 4K are coming later):
+#   "720p" | "1080p"   scaled to this size; if your screen has a different
+#                      shape you get black bars, never a stretched picture
+#   "native"           your screen's own size (window mode: the window's size
+#                      when you picked it), scaled down to 1080p if it is bigger
+# Change it from a terminal with:  momento set resolution 720p
 resolution = "1080p"
 
 # Picture quality: "standard" | "high" | "ultra"
@@ -48,9 +47,9 @@ quality = "high"
 #                standard   high   ultra      (Mbit/s)
 #     720p           6       10     15
 #     1080p         10       15     25
-#     1440p         16       24     40
-#     2160p         30       45     70
-#     native     same as 1440p
+#     native     as 720p or 1080p, by the size really recorded
+#   (1440p and 4K are not offered yet; a config that still says "1440p" or
+#   "2160p" records at 1080p)
 #   (at 120 fps the automatic bitrate is 1.5x these)
 # Set a number (e.g. 20000) to override. Disk used by a full 60-minute buffer
 # ~= Mbit/s * 0.45 GB (1080p high: ~6.8 GB).
