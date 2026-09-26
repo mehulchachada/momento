@@ -55,7 +55,7 @@ import threading
 import time
 from pathlib import Path
 
-from .config import OVERLAY_SOCKET, RUNTIME_DIR
+from .config import BAR_RECYCLE_EXIT, OVERLAY_SOCKET, RUNTIME_DIR
 from .durations import PRESETS, label as dur_label
 
 log = logging.getLogger(__name__)
@@ -1384,6 +1384,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.pads_handle = None
             self.gallery = None       # momento.gallery.Gallery, built on the first open
             self.gallery_hint = None  # "No clips or screenshots yet" in the strip above the bar
+            self.recycle = False      # the gallery was used: a resident bar exits once hidden
             self.bridge = Bridge()
             self.bridge.status.connect(self._sig_status)
             self.bridge.saved.connect(self._sig_saved)
@@ -2778,6 +2779,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Called by the gallery once it has something to show."""
             self.mode = "gallery"
             self.gallery_hint = None
+            self.recycle = True       # its video libraries stay loaded: start over once hidden
             self.stack.setCurrentIndex(4)
             self.relayout()
             self.idle.setInterval(GALLERY_IDLE_MS)
@@ -2940,6 +2942,20 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.layered:
                 _set_keyboard_interactivity(self, False)
             self.clear_rows()                   # rebuilt on the next open of the settings
+            if self.resident and self.recycle:
+                self.after(0, self.recycle_now)
+
+        def recycle_now(self):
+            """After the gallery: exit (BAR_RECYCLE_EXIT) so the daemon starts a fresh bar
+            at once, giving back the ~120 MB QtMultimedia and the decoders keep. Only a
+            hidden resident bar does this; ``after`` drops it if the bar was shown again."""
+            if not self.resident or not self.recycle or self.isVisible():
+                return
+            log.info("recycling the clip bar after the gallery")
+            self.request_exit(BAR_RECYCLE_EXIT)
+
+        def request_exit(self, code):
+            QApplication.instance().exit(code)
 
         def focusables(self):
             page = self.stack.currentIndex()

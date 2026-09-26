@@ -749,8 +749,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.shot(bar, "09-empty")
 
     def test_dismiss_tears_down_and_next_show_is_clip_view(self):
-        bar = self.bar()
-        bar.resident = True
+        bar = self.resident()
         g = self.open(bar)
         self.key(Qt.Key_M)
         player = self.player
@@ -773,6 +772,52 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(bar.gallery_host.isHidden())
         self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
         self.assertIsNone(g.player)
+        self.assertEqual(self.exits, [])            # shown again at once: no recycle
+
+    # ------------------------------------------------------------ recycle
+    def resident(self, folder=None):
+        bar = self.bar(folder)
+        bar.resident = True
+        self.exits = []
+        bar.request_exit = self.exits.append        # instead of ending the test's event loop
+        return bar
+
+    def test_recycle_after_gallery_once_hidden(self):
+        from momento import config
+
+        bar = self.resident()
+        self.open(bar)
+        self.key(Qt.Key_Escape)                                       # back to the clip view
+        pump(self.app, 0.05)
+        self.assertEqual(self.exits, [])                              # never while shown
+        bar.on_idle()                                                 # the idle hide
+        pump(self.app, 0.05)
+        self.assertEqual(self.exits, [config.BAR_RECYCLE_EXIT])
+
+    def test_no_recycle_without_gallery_or_when_shown_again(self):
+        bar = self.resident(self.empty)
+        self.key(Qt.Key_G)                                            # nothing saved: no gallery
+        self.wait_for(lambda: not bar.hintbar.isHidden())
+        bar.dismiss()
+        pump(self.app, 0.05)
+        self.assertEqual(self.exits, [])
+        bar.present()
+        self.addCleanup(setattr, bar, "recycle", False)
+        bar.recycle = True                                            # as after a gallery session
+        bar.dismiss()
+        bar.present()                                                 # the hotkey again, right away
+        pump(self.app, 0.05)
+        self.assertTrue(bar.isVisible())
+        self.assertEqual(self.exits, [])                              # shown: stays
+
+    def test_one_shot_bar_never_recycles(self):
+        bar = self.bar()
+        exits = []
+        bar.request_exit = exits.append
+        self.open(bar)
+        bar.dismiss()
+        pump(self.app, 0.05)
+        self.assertEqual(exits, [])
 
     def test_nothing_survives_close(self):
         """Player, sink, audio output, full screen view, pictures, listing and caches all go."""

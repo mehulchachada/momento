@@ -343,6 +343,11 @@ class Daemon:
         self.bar_proc = None
         if self._stopping or not self.keep_bar_loaded():
             return False
+        if code == config.BAR_RECYCLE_EXIT:
+            # Asked for (the bar gives back the gallery's memory): not a crash, no backoff.
+            log.info("clip bar recycled; starting a fresh one")
+            self.start_bar()
+            return False
         if time.monotonic() - self._bar_started >= BAR_STABLE_SECONDS:
             self._bar_backoff = BAR_BACKOFF_MIN
         log.warning("clip bar exited (code %s); restarting it in %gs", code, self._bar_backoff)
