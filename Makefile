@@ -1,25 +1,42 @@
-# Momento — convenience targets. Everything is user-level; nothing here needs root.
+# Momento — convenience targets. They all call install.sh, which installs
+# Momento for your user and only asks for sudo to add missing system packages.
 PYTHON ?= python3
 
-.PHONY: help install uninstall enable test lint run clean
+.PHONY: help install deps check enable update uninstall purge test lint run clean
 
 help:
-	@echo "make install    install for the current user (~/.local)"
-	@echo "make enable     install, then start now and at every login"
+	@echo "make install    install missing system packages (asks first), install for"
+	@echo "                your user (~/.local) and start the recorder"
+	@echo "make deps       only install the missing system packages (asks first)"
+	@echo "make check      show which dependencies are installed / missing"
+	@echo "make update     download the latest Momento from GitHub and reinstall"
 	@echo "make uninstall  remove (keeps settings, buffer and clips)"
+	@echo "make purge      remove, including settings and the replay buffer"
 	@echo "make test       run the test suite"
-	@echo "make lint       byte-compile the package to catch syntax errors"
+	@echo "make lint       byte-compile the package and shellcheck install.sh"
 	@echo "make run        run the recorder from the source tree (verbose)"
 	@echo "make clean      remove caches and build output"
 
 install:
 	./install.sh
 
-enable:
-	./install.sh --enable
+deps:
+	./install.sh --deps-only
+
+check:
+	./install.sh --check
+
+# Kept for old instructions: install already enables the service.
+enable: install
+
+update:
+	./install.sh --update
 
 uninstall:
 	./install.sh --uninstall
+
+purge:
+	./install.sh --purge
 
 test:
 	$(PYTHON) -m unittest discover -s tests
