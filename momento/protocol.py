@@ -261,6 +261,7 @@ COMMANDS: dict[str, dict] = {
             "state": (("string",), True),
             "recording": (("boolean",), True),
             "buffered": (("number",), True),        # seconds of footage on disk
+            "buffered_live": (("number",), False),  # display only: buffered + the piece being recorded
             "max_seconds": (("number",), True),     # buffer length, seconds
             "source": (("string", "null"), True),   # capture source in use, null before the first start
             "encoder": (("string", "null"), True),

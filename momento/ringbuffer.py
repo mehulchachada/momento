@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -293,10 +294,21 @@ class RingBuffer:
 
     # --- queries --------------------------------------------------------------
 
-    def buffered_seconds(self) -> float:
-        """Footage on disk (summed segment durations), capped at max_seconds."""
+    # A segment still being written counts towards the live total for at most this
+    # long, so a segment left open by a crash can't inflate the number forever.
+    LIVE_SEGMENT_CAP = 30.0
+
+    def buffered_seconds(self, live: bool = False, now: float | None = None) -> float:
+        """Footage on disk (summed segment durations), capped at max_seconds.
+
+        With ``live`` (set while recording), the segment currently being written
+        counts too, so the total ticks every second instead of every segment.
+        """
         with self._lock:
             total = sum(s.duration for s in self._segments if s.closed)
+            if live and self._segments and not self._segments[-1].closed:
+                now = time.time() if now is None else now
+                total += min(max(0.0, now - self._segments[-1].start), self.LIVE_SEGMENT_CAP)
         return min(total, self.max_seconds)
 
     def latest_end(self) -> float | None:

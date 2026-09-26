@@ -968,6 +968,22 @@ def _index_lines(d: Path) -> list[dict]:
     return [json.loads(line) for line in (d / "index.jsonl").read_text().splitlines()]
 
 
+class LiveBufferedTest(unittest.TestCase):
+    """The replay time ticks every second while recording, not every 10 s segment."""
+
+    def test_open_segment_counts_when_live(self):
+        from momento.ringbuffer import RingBuffer
+
+        ring = RingBuffer(3600)
+        ring.opened("/nonexistent/seg0.ts", 1000.0, session="s")
+        ring.closed("/nonexistent/seg0.ts", 1010.0)
+        ring.opened("/nonexistent/seg1.ts", 1010.0, session="s")
+        self.assertAlmostEqual(ring.buffered_seconds(), 10.0)                       # closed only
+        self.assertAlmostEqual(ring.buffered_seconds(live=True, now=1013.5), 13.5)  # + open part
+        # a segment left open by a crash never counts more than the cap
+        self.assertAlmostEqual(ring.buffered_seconds(live=True, now=5000.0), 10.0 + RingBuffer.LIVE_SEGMENT_CAP)
+
+
 class PersistentRingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="momento-ring-"))

@@ -492,6 +492,10 @@ class Daemon:
             "state": self._idle_state(),
             "recording": False if self.paused else bool(getattr(rec, "recording", False)),
             "buffered": round(self.ring.buffered_seconds(), 2),
+            # Display only: also counts the piece being recorded right now, so the
+            # bar's timer ticks every second. Saves still use "buffered".
+            "buffered_live": round(self.ring.buffered_seconds(
+                live=not self.paused and bool(getattr(rec, "recording", False))), 2),
             "max_seconds": self.ring.max_seconds,
             "source": getattr(rec, "source_name", None),
             "encoder": getattr(rec, "encoder_name", None),
