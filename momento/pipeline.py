@@ -267,19 +267,19 @@ class Recorder:
     # --- pipeline description -----------------------------------------------------
 
     def _video_source(self) -> str:
+        """The bare capture element; buffering is added by _video_chain."""
         cap = self.cfg["capture"]
         src = self.source_name
-        common = "queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 leaky=downstream"
         if src == "test":
-            return f"videotestsrc name=src is-live=true pattern=ball ! video/x-raw,width=1280,height=720 ! {common}"
+            return "videotestsrc name=src is-live=true pattern=ball ! video/x-raw,width=1280,height=720"
         if src == "x11":
-            return f"ximagesrc name=src use-damage=false show-pointer={'true' if cap.get('show_cursor') else 'false'} ! {common}"
+            return f"ximagesrc name=src use-damage=false show-pointer={'true' if cap.get('show_cursor') else 'false'}"
         if src == "gamescope":
-            return f"pipewiresrc name=src target-object=gamescope ! {common}"
+            return "pipewiresrc name=src target-object=gamescope min-buffers=4"
         if src == "portal":
             if self._pw_fd is None:
                 raise RuntimeError("portal source without PipeWire fd")
-            return f"pipewiresrc name=src fd={self._pw_fd} path={self._pw_node} ! {common}"
+            return f"pipewiresrc name=src fd={self._pw_fd} path={self._pw_node} min-buffers=4"
         raise RuntimeError(f"unknown capture source {src!r}")
 
     def _video_chain(self, v: _Variant) -> str:
@@ -287,17 +287,27 @@ class Recorder:
         size = f",width={self.size[0]},height={self.size[1]}" if self.size else ""
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
         scale = "videoscale add-borders=true ! " if self.size else ""
+        queue = "queue max-size-buffers={} max-size-bytes=0 max-size-time=0 leaky=downstream"
         if v.zero_copy:
-            # Frames stay in GPU memory (DMABuf from PipeWire) or get uploaded
-            # once; vapostproc does colour conversion and scaling on the GPU.
-            conv = f"videorate ! video/x-raw(ANY),framerate={fps} ! vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size}"
-        elif v.encoder in VA_ENCODERS:
-            conv = f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size}"
+            # Copy each frame into our own VA surface right away (GPU colour
+            # conversion + scaling) so the compositor gets its buffer back within
+            # a millisecond. KWin shares only 3-4 buffers; holding them in a
+            # queue/videorate made it skip every other frame (~30 fps real motion).
+            return (f"vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size} ! "
+                    f"{queue.format(8)} ! videorate ! video/x-raw(memory:VAMemory),framerate={fps} ! "
+                    f"{self._encoder_tail(v)}")
+        conv = f"{queue.format(3)} ! "
+        if v.encoder in VA_ENCODERS:
+            conv += f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size}"
         elif v.encoder in ("x264enc", "openh264enc"):
-            conv = f"videoconvert ! {scale}videorate ! video/x-raw,format=I420,framerate={fps}{size}"
+            conv += f"videoconvert ! {scale}videorate ! video/x-raw,format=I420,framerate={fps}{size}"
         else:
-            conv = f"videoconvert ! {scale}videorate ! video/x-raw,framerate={fps}{size}"
-        return f"{conv} ! {v.encoder} name=enc ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream ! queue ! mux.video"
+            conv += f"videoconvert ! {scale}videorate ! video/x-raw,framerate={fps}{size}"
+        return f"{conv} ! {self._encoder_tail(v)}"
+
+    @staticmethod
+    def _encoder_tail(v: _Variant) -> str:
+        return f"{v.encoder} name=enc ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream ! queue ! mux.video"
 
     def _audio_chain(self) -> str | None:
         a = self.cfg["audio"]
