@@ -1,4 +1,4 @@
-"""Command line: momento daemon | overlay | save 5m | status | settings | set KEY VALUE | quit."""
+"""Command line: momento daemon | overlay | save 5m | status | settings | set KEY VALUE | pause | resume | quit."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, config, durations, quality
+from . import __version__, config, durations, quality, settings
 
 
 def _duration(text: str) -> int:
@@ -15,30 +15,6 @@ def _duration(text: str) -> int:
         return durations.parse(text)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from e
-
-
-# `momento set KEY VALUE`: key -> (config section, config key, parser)
-def _choice(options):
-    def parse(text: str):
-        text = text.lower()
-        if text not in options:
-            raise ValueError(f"choose one of: {', '.join(options)}")
-        return text
-    return parse
-
-
-def _kbps(text: str) -> int:
-    value = int(text)
-    if value < 0 or 0 < value < 1000:
-        raise ValueError("bitrate is in kbps: 0 (automatic) or at least 1000")
-    return value
-
-
-SETTINGS = {
-    "resolution": ("capture", "resolution", _choice(list(quality.RESOLUTIONS))),
-    "quality": ("capture", "quality", _choice(list(quality.QUALITIES))),
-    "bitrate": ("capture", "bitrate_kbps", _kbps),
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,11 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("save", help="save the last N of footage")
     s.add_argument("duration", type=_duration, help=f"e.g. {presets}, or 90s / 2m")
     sub.add_parser("status", help="show recorder status")
-    sub.add_parser("settings", help="show video quality settings")
-    st = sub.add_parser("set", help="change a setting, e.g. `set resolution 1440p`")
-    st.add_argument("key", choices=sorted(SETTINGS))
+    sub.add_parser("settings", help="show video and audio settings (and audio devices)")
+    keys = "; ".join(f"{k}: {h}" for k, h in settings.KEYS.items())
+    st = sub.add_parser("set", help="change a setting, e.g. `set resolution 1440p`",
+                        description=f"Settings: {keys}.")
+    st.add_argument("key", choices=list(settings.KEYS))
     st.add_argument("value")
-    sub.add_parser("quit", help="stop the daemon")
+    sub.add_parser("pause", help="pause recording (what is buffered can still be saved)")
+    sub.add_parser("resume", help="resume recording (starts a fresh replay buffer)")
+    sub.add_parser("quit", aliases=["stop"], help="stop the daemon")
     return p
 
 
@@ -144,29 +124,46 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"momento: bad config {args.config}: {e}", file=sys.stderr)
             return 1
-        auto = "" if int(cfg["capture"].get("bitrate_kbps") or 0) else " (automatic)"
+        cur = settings.current(cfg)
+        auto = "" if cur["bitrate"] else " (automatic)"
+        devices = settings.list_audio_devices()
+        labels = {d["name"]: d["label"] for d in devices["outputs"] + devices["inputs"]}
+        sound = {"off": "off", "default": "default output (follows your speakers/headphones)"}.get(
+            cur["audio_source"], labels.get(cur["audio_source"], cur["audio_source"]))
+        mic = "off"
+        if cur["mic"] == "on":
+            mic = "on, " + ("default input" if cur["mic_device"] == "default"
+                            else labels.get(cur["mic_device"], cur["mic_device"]))
         rows = [
-            ("resolution", cfg["capture"]["resolution"]),
-            ("quality", cfg["capture"]["quality"]),
+            ("resolution", cur["resolution"]),
+            ("quality", cur["quality"]),
             ("frame rate", f"{quality.FPS} fps"),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
             ("disk use", f"about {quality.buffer_gb(kbps, cfg['buffer']['max_seconds']):.1f} GB for the full buffer"),
+            ("sound", sound),
+            ("mic", mic),
             ("clips", cfg["output"]["dir"]),
             ("config", cfg["_path"]),
         ]
         for key, value in rows:
             print(f"{key:>10}: {value}")
+        for title, kind in (("outputs (momento set audio_source NAME)", "outputs"),
+                            ("inputs (momento set mic_device NAME)", "inputs")):
+            if devices[kind]:
+                print(f"\n{title}:")
+                for d in devices[kind]:
+                    mark = "  (default)" if d["default"] else ""
+                    print(f"  {d['name']}  {d['label']}{mark}")
         return 0
 
     if args.command == "set":
-        section, key, parse = SETTINGS[args.key]
         try:
-            value = parse(args.value)
-            path = config.set_value(section, key, value, args.config)
-        except ValueError as e:
-            print(f"momento: {args.key}: {e}", file=sys.stderr)
+            clean = settings.validate({args.key: args.value})
+            settings.apply(clean, args.config)
+        except (OSError, ValueError) as e:
+            print(f"momento: {e}", file=sys.stderr)
             return 1
-        print(f"{args.key} = {value}  (saved to {path})")
+        print(f"{args.key} = {clean[args.key]}  (saved to {args.config})")
         from . import ipc
 
         try:
@@ -179,10 +176,26 @@ def main(argv: list[str] | None = None) -> int:
         if not r.get("ok"):
             print(f"momento: {r.get('error')}", file=sys.stderr)
             return 1
-        print("Recording restarted with the new setting.")
+        if r.get("paused"):
+            print("Saved. Recording is paused; the new setting applies when you resume.")
+        else:
+            print("Recording restarted with the new setting.")
         return 0
 
-    if args.command == "quit":
+    if args.command in ("pause", "resume"):
+        r = _request({"cmd": args.command}, timeout=30)
+        if r is None:
+            return 1
+        if not r.get("ok"):
+            print(f"momento: {r.get('error', args.command + ' failed')}", file=sys.stderr)
+            return 1
+        if args.command == "pause":
+            print("Paused. What was buffered can still be saved; `momento resume` starts a fresh replay.")
+        else:
+            print("Recording resumed (fresh replay buffer).")
+        return 0
+
+    if args.command in ("quit", "stop"):
         r = _request({"cmd": "quit"}, timeout=10)
         return 0 if r and r.get("ok") else 1
 

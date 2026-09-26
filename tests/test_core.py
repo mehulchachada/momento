@@ -409,6 +409,270 @@ class CLITest(unittest.TestCase):
 
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["save", "3h"])
+        for argv in (["set", "audio_source", "off"], ["set", "mic", "on"], ["set", "mic_device", "default"],
+                     ["pause"], ["resume"], ["stop"], ["quit"]):
+            self.assertEqual(cli.build_parser().parse_args(argv).command, argv[0])
+
+    def test_set_writes_config(self):
+        import contextlib
+        import io
+
+        from momento import cli, config, ipc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            orig = ipc.request
+
+            def not_running(*a, **k):
+                raise ipc.DaemonNotRunning("no")
+            ipc.request = not_running
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["--config", str(path), "set", "audio_source", "off"]), 0)
+                    self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "4k"]), 0)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(cli.main(["--config", str(path), "set", "quality", "insane"]), 1)
+            finally:
+                ipc.request = orig
+            cfg = config.load(path)
+            self.assertFalse(cfg["audio"]["desktop"])
+            self.assertEqual(cfg["capture"]["resolution"], "2160p")
+            self.assertEqual(cfg["capture"]["quality"], "high")
+
+
+SINKS_JSON = json.dumps([
+    {"index": 36, "name": "ROG Ally", "description": "ROG Ally", "monitor_source": "ROG Ally.monitor",
+     "properties": {"media.class": "Audio/Sink", "device.description": "ROG Ally"}},
+    {"index": 58, "name": "alsa_output.pci-0000_09_00.1.hdmi-stereo",
+     "description": "Radeon High Definition Audio Controller Digital Stereo (HDMI)",
+     "monitor_source": "alsa_output.pci-0000_09_00.1.hdmi-stereo.monitor", "properties": {}},
+])
+SOURCES_JSON = json.dumps([
+    {"index": 36, "name": "ROG Ally.monitor", "description": "Monitor of ROG Ally",
+     "monitor_source": "ROG Ally", "properties": {"device.class": "monitor", "media.class": "Audio/Sink"}},
+    {"index": 58, "name": "alsa_output.pci-0000_09_00.1.hdmi-stereo.monitor",
+     "description": "Monitor of Radeon HDMI", "properties": {}},
+    {"index": 70, "name": "alsa_input.usb-Blue_Yeti.analog-stereo", "description": "Yeti Stereo Microphone",
+     "properties": {"device.class": "sound", "media.class": "Audio/Source"}},
+])
+
+
+class SettingsTest(unittest.TestCase):
+    def setUp(self):
+        from momento import config, settings
+
+        self.config, self.settings = config, settings
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "config.toml"
+        self.path.write_text("# Momento\n[capture]\n# pick one\nresolution = \"1080p\"\n\n[audio]\ndesktop = true\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_validate_normalizes(self):
+        v = self.settings.validate({"resolution": "4K", "quality": "ULTRA", "bitrate": "0",
+                                    "audio_source": "@DEFAULT_MONITOR@", "mic": True,
+                                    "mic_device": "@DEFAULT_SOURCE@"})
+        self.assertEqual(v, {"resolution": "2160p", "quality": "ultra", "bitrate": 0,
+                             "audio_source": "default", "mic": "on", "mic_device": "default"})
+        self.assertEqual(self.settings.validate({"audio_source": "Off", "mic": "no"}),
+                         {"audio_source": "off", "mic": "off"})
+        self.assertEqual(self.settings.validate({"audio_source": "ROG Ally.monitor"}),
+                         {"audio_source": "ROG Ally.monitor"})
+
+    def test_validate_rejects(self):
+        for bad in ({"resolution": "999p"}, {"quality": "max"}, {"bitrate": 500}, {"bitrate": "fast"},
+                    {"mic": "maybe"}, {"audio_source": ""}, {"mic_device": "a\nb"}, {"volume": 3}):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                self.settings.validate(bad)
+            self.assertTrue(str(cm.exception).startswith(next(iter(bad))), cm.exception)
+        with self.assertRaises(ValueError):
+            self.settings.validate(["resolution"])
+
+    def test_apply_writes_and_keeps_comments(self):
+        changed = self.settings.apply({"resolution": "1440p", "quality": "ultra",
+                                       "audio_source": "ROG Ally.monitor", "mic": "on",
+                                       "mic_device": "alsa_input.usb-Blue_Yeti.analog-stereo"}, self.path)
+        self.assertEqual(set(changed), {"resolution", "quality", "audio_source", "mic", "mic_device"})
+        text = self.path.read_text()
+        self.assertIn("# pick one", text)
+        cfg = self.config.load(self.path)
+        self.assertEqual(cfg["capture"]["resolution"], "1440p")
+        self.assertEqual(cfg["capture"]["quality"], "ultra")
+        self.assertEqual(cfg["audio"]["desktop_device"], "ROG Ally.monitor")
+        self.assertTrue(cfg["audio"]["microphone"])
+        self.assertEqual(cfg["audio"]["microphone_device"], "alsa_input.usb-Blue_Yeti.analog-stereo")
+        self.assertEqual(self.settings.current(cfg)["audio_source"], "ROG Ally.monitor")
+        # same values again -> nothing changed
+        self.assertEqual(self.settings.apply({"resolution": "1440p", "mic": "on"}, self.path), {})
+        # off keeps the chosen device for later; default goes back to the placeholder
+        self.settings.apply({"audio_source": "off", "mic_device": "default"}, self.path)
+        cfg = self.config.load(self.path)
+        self.assertFalse(cfg["audio"]["desktop"])
+        self.assertEqual(cfg["audio"]["desktop_device"], "ROG Ally.monitor")
+        self.assertEqual(cfg["audio"]["microphone_device"], "@DEFAULT_SOURCE@")
+        cur = self.settings.current(cfg)
+        self.assertEqual((cur["audio_source"], cur["mic"], cur["mic_device"]), ("off", "on", "default"))
+        self.settings.apply({"audio_source": "default"}, self.path)
+        self.assertEqual(self.settings.current(self.config.load(self.path))["audio_source"], "default")
+
+    def test_apply_is_all_or_nothing(self):
+        before = self.path.read_text()
+        with self.assertRaises(ValueError):
+            self.settings.apply({"resolution": "720p", "quality": "bogus"}, self.path)
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_describe(self):
+        d = self.settings.describe(self.config.load(self.path), devices={"outputs": [], "inputs": []})
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["values"]["resolution"], "1080p")
+        self.assertIn("native", d["choices"]["resolution"])
+        self.assertEqual(d["fps"], 60)
+        self.assertEqual(d["config"], str(self.path))
+
+    def test_parse_devices(self):
+        d = self.settings.parse_devices(SINKS_JSON, SOURCES_JSON, "ROG Ally", "alsa_input.usb-Blue_Yeti.analog-stereo")
+        self.assertEqual(d["outputs"], [
+            {"name": "ROG Ally.monitor", "label": "ROG Ally", "default": True},
+            {"name": "alsa_output.pci-0000_09_00.1.hdmi-stereo.monitor",
+             "label": "Radeon High Definition Audio Controller Digital Stereo (HDMI)", "default": False},
+        ])
+        self.assertEqual(d["inputs"], [{"name": "alsa_input.usb-Blue_Yeti.analog-stereo",
+                                        "label": "Yeti Stereo Microphone", "default": True}])
+        self.assertEqual(self.settings.parse_devices("not json", None), {"outputs": [], "inputs": []})
+
+    def test_list_audio_devices(self):
+        import shutil as sh
+        from unittest import mock
+
+        outputs = {("-f", "json", "list", "sinks"): SINKS_JSON, ("-f", "json", "list", "sources"): SOURCES_JSON,
+                   ("get-default-sink",): "alsa_output.pci-0000_09_00.1.hdmi-stereo\n",
+                   ("get-default-source",): "alsa_input.usb-Blue_Yeti.analog-stereo\n"}
+
+        def run(argv, **_):
+            out = outputs.get(tuple(argv[1:]))
+            return subprocess.CompletedProcess(argv, 0 if out is not None else 1, out or "", "")
+
+        with mock.patch.object(sh, "which", return_value="/usr/bin/pactl"):
+            d = self.settings.list_audio_devices(run=run)
+        self.assertEqual([o["default"] for o in d["outputs"]], [False, True])
+        self.assertEqual(len(d["inputs"]), 1)
+        with mock.patch.object(sh, "which", return_value=None):
+            self.assertEqual(self.settings.list_audio_devices(run=run), {"outputs": [], "inputs": []})
+
+        def broken(argv, **_):
+            raise OSError("boom")
+        with mock.patch.object(sh, "which", return_value="/usr/bin/pactl"):
+            self.assertEqual(self.settings.list_audio_devices(run=broken), {"outputs": [], "inputs": []})
+
+
+class FakeRecorder:
+    instances = []
+
+    def __init__(self, cfg, ring, on_state, bus=None):
+        self.cfg, self.on_state = cfg, on_state
+        self.recording = False
+        self.started = self.stopped = 0
+        FakeRecorder.instances.append(self)
+
+    def start(self):
+        self.started += 1
+        self.recording = True
+        self.on_state("recording", None)
+
+    def stop(self):
+        self.stopped += 1
+        self.recording = False
+        self.on_state("stopped", None)
+
+
+class DaemonControlTest(unittest.TestCase):
+    """pause / resume / settings / configure against a fake Recorder (no GStreamer)."""
+
+    def setUp(self):
+        import types
+        from unittest import mock
+
+        from momento import config, daemon
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "config.toml"
+        self.path.write_text("[capture]\nresolution = \"1080p\"\n")
+        fake = types.ModuleType("momento.pipeline")
+        fake.Recorder = FakeRecorder
+        patcher = mock.patch.dict(sys.modules, {"momento.pipeline": fake})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        FakeRecorder.instances = []
+        cfg = config.load(self.path)
+        cfg["buffer"]["dir"] = str(Path(self._tmp.name) / "buffer")
+        self.d = daemon.Daemon(cfg, loop=None)
+        self.d.recorder = FakeRecorder(cfg, self.d.ring, self.d._on_state)
+        self.d.recorder.start()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def call(self, msg, timeout=5):
+        box = []
+        done = threading.Event()
+
+        def reply(r):
+            box.append(r)
+            done.set()
+        self.d.handle(msg, reply)
+        self.assertTrue(done.wait(timeout))
+        return box[0]
+
+    def test_pause_resume(self):
+        rec = self.d.recorder
+        self.assertEqual(self.d.status()["state"], "recording")
+        self.assertEqual(self.call({"cmd": "pause"}), {"ok": True, "state": "paused"})
+        st = self.d.status()
+        self.assertEqual((st["state"], st["recording"]), ("paused", False))
+        self.assertEqual(rec.stopped, 1)
+        self.assertEqual(self.call({"cmd": "pause"})["state"], "paused")  # idempotent
+        self.assertEqual(rec.stopped, 1)
+        r = self.call({"cmd": "resume"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(rec.started, 2)
+        self.assertEqual(self.d.status()["state"], "recording")
+        self.call({"cmd": "resume"})
+        self.assertEqual(rec.started, 2)
+
+    def test_settings_and_configure(self):
+        from momento import config, settings
+        from unittest import mock
+
+        with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}):
+            r = self.call({"cmd": "settings"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["values"]["resolution"], "1080p")
+        self.assertEqual(r["config"], str(self.path))
+
+        bad = self.call({"cmd": "configure", "changes": {"resolution": "999p"}})
+        self.assertFalse(bad["ok"])
+        self.assertIn("resolution", bad["error"])
+        self.assertFalse(self.call({"cmd": "configure", "changes": {}})["ok"])
+
+        r = self.call({"cmd": "configure", "changes": {"resolution": "720p", "mic": "on"}})
+        self.assertEqual((r["ok"], r["restarted"]), (True, True))
+        self.assertEqual(r["changed"], {"resolution": "720p", "mic": "on"})
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "720p")
+        self.assertEqual(self.d.cfg["capture"]["resolution"], "720p")
+        self.assertIs(self.d.recorder, FakeRecorder.instances[-1])
+        self.assertEqual(self.d.recorder.started, 1)
+
+        r = self.call({"cmd": "configure", "changes": {"resolution": "720p"}})
+        self.assertEqual((r["ok"], r["restarted"]), (True, False))  # nothing changed, no restart
+
+        self.call({"cmd": "pause"})
+        r = self.call({"cmd": "configure", "changes": {"quality": "ultra"}})
+        self.assertEqual((r["ok"], r["restarted"], r["paused"]), (True, False, True))
+        self.assertEqual(self.d.recorder.started, 0)  # stays paused
+        self.assertEqual(self.d.status()["state"], "paused")
+        self.call({"cmd": "resume"})
+        self.assertEqual(self.d.recorder.started, 1)
 
 
 if __name__ == "__main__":
