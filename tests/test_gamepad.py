@@ -268,6 +268,144 @@ class Mapping(Base):
         self.assertIn(BTN_TL, hub.pads[d.path].held)
 
 
+class Triggers(Base):
+    def names(self):
+        return [a for a, _ in self.actions]
+
+    def test_actions_are_listed(self):
+        self.assertIn("left_trigger", g.ACTIONS)
+        self.assertIn("right_trigger", g.ACTIONS)
+
+    def test_analog_hysteresis(self):
+        hub = self.hub()
+        d = self.dev()                                      # xpad-style: ABS_Z/RZ 0..255, no BTN_TL2
+        hub.add_device(d)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 140)             # 0.55: not yet
+        self.assertEqual(self.actions, [])
+        self.push(hub, d, EV_ABS, g.ABS_Z, 160)             # 0.63: pulled
+        self.assertEqual(self.actions, [("left_trigger", False)])
+        self.push(hub, d, EV_ABS, g.ABS_Z, 255)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 100)             # 0.39: still latched
+        self.push(hub, d, EV_ABS, g.ABS_Z, 200)
+        self.assertEqual(len(self.actions), 1)
+        self.at(hub, 105.0)                                 # no auto-repeat while held
+        self.assertEqual(len(self.actions), 1)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 70)              # 0.27: re-armed
+        self.push(hub, d, EV_ABS, g.ABS_Z, 180)
+        self.assertEqual(self.names(), ["left_trigger", "left_trigger"])
+        self.push(hub, d, EV_ABS, ABS_RZ, 255)
+        self.assertEqual(self.names()[-1], "right_trigger")
+        self.assertEqual(len(self.actions), 3)
+
+    def test_digital_trigger_buttons(self):
+        hub = self.hub()
+        d = self.dev(keys=FakeDevice.XBOX_KEYS + (g.BTN_TL2, g.BTN_TR2), axes={})
+        hub.add_device(d)
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 1)
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 2)             # kernel repeat: ignored
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 0)
+        self.push(hub, d, EV_KEY, g.BTN_TR2, 1)
+        self.push(hub, d, EV_KEY, g.BTN_TR2, 0)
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 1)
+        self.assertEqual(self.names(), ["left_trigger", "right_trigger", "left_trigger"])
+        self.assertIn(("tl2", True), self.buttons)          # raw button still reported
+
+    def test_dualsense_button_and_axis_fire_once(self):
+        hub = self.hub()
+        d = dualsense()
+        self.devs.append(d)
+        hub.add_device(d)
+        # hid-playstation: the button goes down early in the pull, the axis follows
+        d.push(EV_ABS, g.ABS_Z, 20, syn=False)
+        d.push(EV_KEY, g.BTN_TL2, 1)
+        hub.process(d.fileno())
+        for v in (120, 200, 255, 200):
+            self.push(hub, d, EV_ABS, g.ABS_Z, v)
+        self.assertEqual(self.names(), ["left_trigger"])
+        # axis below the re-arm point but the button still down: still one pull
+        self.push(hub, d, EV_ABS, g.ABS_Z, 40)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 200)
+        self.assertEqual(len(self.actions), 1)
+        # both let go: re-armed
+        d.push(EV_ABS, g.ABS_Z, 0, syn=False)
+        d.push(EV_KEY, g.BTN_TL2, 0)
+        hub.process(d.fileno())
+        d.push(EV_KEY, g.BTN_TL2, 1, syn=False)
+        d.push(EV_ABS, g.ABS_Z, 30)
+        hub.process(d.fileno())
+        self.assertEqual(self.names(), ["left_trigger", "left_trigger"])
+
+    def test_navigate_off_emits_nothing(self):
+        hub = self.hub(navigate=False)
+        d = dualsense()
+        self.devs.append(d)
+        hub.add_device(d)
+        self.assertEqual(d.mask, (EV_KEY,))
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 1)
+        self.push(hub, d, EV_ABS, ABS_RZ, 255)              # (masked out on a real device)
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.buttons, [])
+        # turning navigation on takes the pulled trigger as already fired
+        hub.set_navigate(True)
+        self.push(hub, d, EV_ABS, ABS_RZ, 250)
+        self.assertEqual(self.actions, [])
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 0)
+        self.push(hub, d, EV_ABS, ABS_RZ, 0)
+        self.push(hub, d, EV_ABS, ABS_RZ, 255)
+        self.assertEqual(self.names(), ["right_trigger"])
+
+    def test_pulled_when_opened_fires_nothing(self):
+        hub = self.hub()
+        d = dualsense()
+        self.devs.append(d)
+        d.held.add(g.BTN_TL2)
+        hub.add_device(d)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 255)
+        self.assertEqual(self.actions, [])
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 0)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 0)
+        self.push(hub, d, EV_KEY, g.BTN_TL2, 1)
+        self.assertEqual(self.names(), ["left_trigger"])
+
+    def test_centred_or_signed_axis_is_not_a_trigger(self):
+        hub = self.hub()
+        axes = {ABS_X: _AbsInfo(0), ABS_Y: _AbsInfo(0),
+                g.ABS_Z: _AbsInfo(128, 0, 255),               # generic HID: right stick X
+                ABS_RZ: _AbsInfo(0, -32768, 32767)}           # signed range
+        d = self.dev(axes=axes)
+        hub.add_device(d)
+        for v in (0, 255, 128):
+            self.push(hub, d, EV_ABS, g.ABS_Z, v)
+        self.push(hub, d, EV_ABS, ABS_RZ, 32767)
+        self.assertEqual(self.actions, [])
+
+    def test_mirrored_pads_fire_once(self):
+        hub = self.hub()
+        a, b = self.dev(path="/fake/real"), self.dev(path="/fake/steam")
+        hub.add_device(a)
+        hub.add_device(b)
+        self.push(hub, a, EV_ABS, g.ABS_Z, 255)
+        self.clock.t += 0.004
+        self.push(hub, b, EV_ABS, g.ABS_Z, 255)
+        self.assertEqual(self.names(), ["left_trigger"])
+        self.clock.t += 0.5
+        for dev in (a, b):
+            self.push(hub, dev, EV_ABS, g.ABS_Z, 0)
+        self.push(hub, b, EV_ABS, g.ABS_Z, 255)
+        self.assertEqual(self.names(), ["left_trigger", "left_trigger"])
+
+    def test_trigger_counts_as_activity_for_the_watchdog(self):
+        hub = self.hub(watchdog_s=10)
+        d = self.dev()
+        hub.add_device(d)
+        hub.grab()
+        self.at(hub, 108.0)
+        self.push(hub, d, EV_ABS, g.ABS_Z, 255)
+        self.at(hub, 115.0)
+        self.assertTrue(hub.grabbing)
+        self.assertEqual(self.lost, [])
+
+
 class Repeat(Base):
     def test_initial_delay_then_interval(self):
         hub = self.hub()
