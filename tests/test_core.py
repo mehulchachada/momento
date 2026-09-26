@@ -3063,6 +3063,117 @@ class PortalSizeHintTest(unittest.TestCase):
                 self.assertEqual(caps.to_string(), memory)
             pl.set_state(Gst.State.NULL)
 
+    def test_debug_stage_switch(self):
+        stage_env, alias = self.pipeline.STAGE_ENV, self.pipeline.CAPTURE_ONLY_ENV
+        with mock.patch.dict(os.environ):
+            os.environ.pop(stage_env, None)
+            os.environ.pop(alias, None)
+            self.assertIsNone(self.pipeline.debug_stage())
+            for stage in self.pipeline.STAGES:
+                os.environ[stage_env] = f" {stage.upper()} "
+                self.assertEqual(self.pipeline.debug_stage(), stage)
+            os.environ.pop(stage_env)
+            os.environ[alias] = "1"                                    # the old switch: capture
+            self.assertEqual(self.pipeline.debug_stage(), "capture")
+            os.environ[stage_env] = "encode"                           # the stage wins over the alias
+            self.assertEqual(self.pipeline.debug_stage(), "encode")
+            os.environ.pop(alias)
+            os.environ[stage_env] = "gpu"
+            with self.assertLogs("momento.pipeline", "WARNING") as logs:
+                self.assertIsNone(self.pipeline.debug_stage())         # unknown: a normal recording
+            self.assertIn("gpu", "\n".join(logs.output))
+
+    def _stage_pipeline(self, rec, variant, stage):
+        env = {self.pipeline.STAGE_ENV: stage} if stage else {}
+        with mock.patch.dict(os.environ, env):
+            for name in (self.pipeline.CAPTURE_ONLY_ENV,) + (() if stage else (self.pipeline.STAGE_ENV,)):
+                os.environ.pop(name, None)
+            with self.assertLogs("momento.pipeline", "WARNING") as logs:
+                self.pipeline.log.warning("marker")                    # so a stage that logs nothing still passes here
+                pl = rec._build(variant)
+        self.addCleanup(pl.set_state, self.pipeline.Gst.State.NULL)
+        names = {el.get_factory().get_name() for el in pl.children}
+        warnings = [line for line in logs.output if "marker" not in line]
+        return pl, names, warnings
+
+    def test_debug_stages_build_the_expected_elements(self):
+        p = self.pipeline
+        if not (p._have("vah264enc") and p._have("vapostproc")):
+            self.skipTest("needs vah264enc and vapostproc")
+        rec = self.recorder(source="test")
+        rec.source_name = "test"
+        v = p._Variant("vah264enc", True)
+        convert = {"videotestsrc", "vapostproc", "capsfilter", "queue", "videorate"}
+        mux = {"splitmuxsink", "h264parse"}
+        audio = {"audiotestsrc", "avenc_aac"} if p._have("avenc_aac") else {"audiotestsrc"}
+        cases = {
+            "convert": (convert | {"fakesink"}, {"vah264enc"} | mux | audio),
+            "encode": (convert | {"vah264enc", "fakesink"}, mux | audio),
+            "noaudio": (convert | {"vah264enc"} | mux, audio | {"fakesink"}),
+            "lowpower": (convert | {"vah264enc"} | mux | audio, {"fakesink"}),
+        }
+        for stage, (present, absent) in cases.items():
+            with self.subTest(stage=stage):
+                pl, names, warnings = self._stage_pipeline(rec, v, stage)
+                self.assertTrue(present <= names, present - names)
+                self.assertFalse(absent & names, absent & names)
+                self.assertEqual(len(warnings), 1, warnings)            # one clear warning naming the stage
+                self.assertIn(f"{p.STAGE_ENV}={stage}", warnings[0])
+                if stage in ("convert", "encode"):
+                    # The real chain's conversion: NV12 in VA memory at the final size.
+                    self.assertEqual(pl.get_by_name("size").get_property("caps").to_string(),
+                                     "video/x-raw(memory:VAMemory), format=(string)NV12, "
+                                     "width=(int)1920, height=(int)1080")
+                enc = pl.get_by_name("enc")
+                if enc is not None:
+                    self.assertEqual(enc.get_property("key-int-max"), rec.fps)   # the normal settings
+                    self.assertEqual(enc.get_property("bitrate"), rec._kbps)
+                    lowpower = stage == "lowpower"
+                    self.assertEqual(enc.get_property("target-usage"), 2 if lowpower else 4)
+                    self.assertEqual(enc.get_property("ref-frames"), 1 if lowpower else 3)
+                    self.assertEqual(enc.get_property("dct8x8"), not lowpower)
+        # Capture via the stage name: the source straight into a fakesink.
+        _pl, names, warnings = self._stage_pipeline(rec, v, "capture")
+        self.assertEqual(names, {"videotestsrc", "capsfilter", "fakesink"})
+        self.assertIn("capture only", warnings[0])
+
+    def test_unknown_debug_stage_records_normally(self):
+        p = self.pipeline
+        if not (p._have("vah264enc") and p._have("vapostproc")):
+            self.skipTest("needs vah264enc and vapostproc")
+        rec = self.recorder(source="test")
+        rec.source_name = "test"
+        v = p._Variant("vah264enc", True)
+        _pl, normal, none = self._stage_pipeline(rec, v, None)
+        self.assertEqual(none, [])
+        pl, names, warnings = self._stage_pipeline(rec, v, "bogus")
+        self.assertEqual(names, normal)
+        self.assertTrue({"splitmuxsink", "vah264enc", "audiotestsrc"} <= names)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("bogus", warnings[0])
+        self.assertEqual(pl.get_by_name("enc").get_property("target-usage"), 4)
+
+    def test_mux_less_stage_reports_recording_and_flushes_at_once(self):
+        p = self.pipeline
+        if not (p._have("vah264enc") and p._have("vapostproc")):
+            self.skipTest("needs vah264enc and vapostproc")
+        Gst = p.Gst
+        rec = self.recorder(source="test")
+        rec.source_name = "test"
+        pl, _names, _w = self._stage_pipeline(rec, p._Variant("vah264enc", True), "encode")
+        rec._pipeline = pl
+        msg = Gst.Message.new_state_changed(pl, Gst.State.PAUSED, Gst.State.PLAYING, Gst.State.VOID_PENDING)
+        rec._on_message(pl.get_bus(), msg)
+        self.assertTrue(rec.recording)
+        self.assertEqual(self.states[-1], ("recording", None))
+        done = mock.Mock()
+        with mock.patch.object(p.GLib, "idle_add", lambda fn, *a: fn(*a)), \
+                mock.patch.object(p.GLib, "timeout_add", return_value=0):
+            rec.flush(done)
+        done.assert_called_once_with()
+        self.assertEqual(rec._flush_waiters, [])
+        rec._pipeline = None
+
 
 class _FakeMatch:
     def __init__(self, bus, key):

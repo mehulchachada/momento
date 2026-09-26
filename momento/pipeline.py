@@ -90,11 +90,47 @@ WINDOW_STOPPED = "Window capture stopped \u2014 press play to try again"
 # Debug A/B: with this set to 1 the video source feeds a fakesink directly (no
 # scaling, encoding, muxing or audio; nothing is recorded), so the cost of the
 # compositor's screencast alone can be told apart from Momento's encoding.
+# An alias of MOMENTO_DEBUG_STAGE=capture.
 CAPTURE_ONLY_ENV = "MOMENTO_DEBUG_CAPTURE_ONLY"
+
+# Debug A/B: build only part of the chain, to find which stage costs frames.
+#   capture   the source into a fakesink (as MOMENTO_DEBUG_CAPTURE_ONLY=1)
+#   convert   source -> the real video chain up to the encoder (vapostproc, its
+#             NV12/size caps, queue, videorate) -> fakesink; nothing is written
+#   encode    ... -> the encoder, same settings -> fakesink; nothing is written
+#   noaudio   the normal recording without the audio branch
+#   lowpower  the normal recording with the encoder at its cheapest (LOWPOWER_VA)
+# Anything else records normally (with a warning).
+STAGE_ENV = "MOMENTO_DEBUG_STAGE"
+STAGES = ("capture", "convert", "encode", "noaudio", "lowpower")
+
+# lowpower: vah264enc/vah264lpenc settings. On radeonsi (Mesa's va frontend)
+# target-usage is not a 1 (best) .. 7 (fastest) scale: any value but 1 is read as
+# bits (bit 0 unused, bits 1-2 VCN preset 0 speed / 1 balance / 2 quality /
+# 3 high quality, bit 3 pre-encode, bit 4 VBAQ). GStreamer's default 4 is the
+# *quality* preset and 7 is *high quality*, the dearest. 2 is the balance preset
+# with no pre-encode and no VBAQ: the cheapest reachable in GStreamer's 1-7 range
+# (speed would need 0, 8, 16 or 24). On Intel (iHD) 7 would be the fastest.
+# One reference frame and no 8x8 transform trim motion search / transform work;
+# rate control stays CBR at the same bitrate, so the written bytes compare.
+LOWPOWER_VA = {"target_usage": 2, "ref_frames": 1, "dct8x8": False}
+
+FAKESINK = "fakesink name=sink sync=false async=false enable-last-sample=false"
 
 
 def capture_only() -> bool:
     return os.environ.get(CAPTURE_ONLY_ENV, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def debug_stage() -> str | None:
+    """The MOMENTO_DEBUG_STAGE debug variant to build, or None for a normal recording."""
+    value = os.environ.get(STAGE_ENV, "").strip().lower()
+    if value in STAGES:
+        return value
+    if value:
+        log.warning("%s=%r is not one of %s: ignored (a normal recording)",
+                    STAGE_ENV, value, ", ".join(STAGES))
+    return "capture" if capture_only() else None
 
 
 def native_display_sizes(root: str | Path = "/sys/class/drm") -> set[tuple[int, int]]:
@@ -318,7 +354,7 @@ class Recorder:
         if enc is not None:
             enc.send_event(GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
         mux = self._pipeline.get_by_name("mux")
-        if mux is None:  # capture-only debug pipeline: nothing is written
+        if mux is None:  # a debug stage without a mux (capture, convert, encode): nothing is written
             self._fire_flush_waiters()
             return
         mux.emit("split-now")
@@ -605,7 +641,9 @@ class Recorder:
         elif self._locked_size is not None:
             log.info("window capture: output size locked to %dx%d for this session", *self._locked_size)
 
-    def _video_chain(self, v: _Variant) -> str:
+    def _video_chain(self, v: _Variant, tail: str | None = None) -> str:
+        """The video chain after the source; ``tail`` replaces the encoder onwards (debug stages)."""
+        tail = tail or self._encoder_tail(v)
         fps = f"{self.fps}/1"
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
         # (A window that is resized mid-stream is scaled into the same frame.)
@@ -629,14 +667,13 @@ class Recorder:
             # a millisecond. KWin shares only 3-4 buffers; holding them in a
             # queue/videorate made it skip every other frame (~30 fps real motion).
             return (f"vapostproc add-borders=true ! {sized} ! "
-                    f"{queue.format(8)} ! videorate ! video/x-raw(memory:VAMemory),framerate={fps} ! "
-                    f"{self._encoder_tail(v)}")
+                    f"{queue.format(8)} ! videorate ! video/x-raw(memory:VAMemory),framerate={fps} ! {tail}")
         conv = f"{queue.format(3)} ! "
         if v.encoder in VA_ENCODERS:
             conv += f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! {sized}"
         else:
             conv += f"videoconvert ! {scale}videorate ! {sized}"
-        return f"{conv} ! {self._encoder_tail(v)}"
+        return f"{conv} ! {tail}"
 
     @staticmethod
     def _encoder_tail(v: _Variant) -> str:
@@ -681,20 +718,27 @@ class Recorder:
         # The output size is decided before the chain is described, so the "size"
         # capsfilter starts at its final caps when the source's size is known.
         self._prepare_size()
-        if capture_only():
+        stage = debug_stage()
+        if stage == "capture":
             return self._build_capture_only(v)
+        if stage in ("convert", "encode"):
+            return self._build_partial(v, stage)
+        if stage == "noaudio":
+            log.warning("%s=noaudio: debug A/B. Recording normally but without the audio branch "
+                        "(no audio source, AAC encoder or audio track)", STAGE_ENV)
+        elif stage == "lowpower":
+            cheap = (" ".join(f"{k.replace('_', '-')}={val}" for k, val in LOWPOWER_VA.items())
+                     if v.encoder in VA_ENCODERS else f"nothing to change on {v.encoder}")
+            log.warning("%s=lowpower: debug A/B. Recording normally with the encoder at its cheapest (%s)",
+                        STAGE_ENV, cheap)
         parts = [
             "splitmuxsink name=mux muxer=mpegtsmux send-keyframe-requests=true max-files=0 max-size-bytes=0",
             f"{self._video_source()} ! {self._video_chain(v)}",
         ]
-        audio = self._audio_chain()
+        audio = None if stage == "noaudio" else self._audio_chain()
         if audio:
             parts.append(audio)
-        desc = " ".join(parts)
-        log.debug("pipeline: %s", desc)
-        pipeline = Gst.parse_launch(desc)
-        if not isinstance(pipeline, Gst.Pipeline):
-            raise RuntimeError("parse_launch did not return a pipeline")
+        pipeline = self._launch(" ".join(parts))
 
         # Recreate the folder if something removed it while we were running
         # (a cache cleaner, or a manual rm); otherwise every retry fails.
@@ -708,6 +752,8 @@ class Recorder:
 
         enc = pipeline.get_by_name("enc")
         self._encoder_settings(enc, v.encoder, self._kbps)
+        if stage == "lowpower" and v.encoder in VA_ENCODERS:
+            _set(enc, **LOWPOWER_VA)
 
         aenc = pipeline.get_by_name("aenc")
         if aenc is not None:
@@ -731,22 +777,17 @@ class Recorder:
                                              v.encoder))
 
     def _build_capture_only(self, v: _Variant) -> Gst.Pipeline:
-        """``MOMENTO_DEBUG_CAPTURE_ONLY=1``: the video source straight into a fakesink.
+        """``MOMENTO_DEBUG_STAGE=capture`` (``MOMENTO_DEBUG_CAPTURE_ONLY=1``): the source into a fakesink.
 
         No scaling, encoding, muxing or audio, and nothing is written. The source
         is offered the same formats the real chain's first element takes
         (vapostproc's, or system memory before videoconvert), so the compositor
         negotiates the same kind of buffers (DMA-BUF) as when recording.
         """
-        log.warning("%s is set: capture only, a debug A/B. The %s source feeds a fakesink: "
+        log.warning("%s=capture (or %s=1): capture only, a debug A/B. The %s source feeds a fakesink: "
                     "no scaling, encoding, audio or recording, and saves find no new footage",
-                    CAPTURE_ONLY_ENV, self.source_name)
-        desc = (f"{self._video_source()} ! capsfilter name=capture_caps ! "
-                "fakesink name=sink sync=false async=false enable-last-sample=false")
-        log.debug("pipeline: %s", desc)
-        pipeline = Gst.parse_launch(desc)
-        if not isinstance(pipeline, Gst.Pipeline):
-            raise RuntimeError("parse_launch did not return a pipeline")
+                    STAGE_ENV, CAPTURE_ONLY_ENV, self.source_name)
+        pipeline = self._launch(f"{self._video_source()} ! capsfilter name=capture_caps ! {FAKESINK}")
         caps = None
         if v.zero_copy:
             factory = Gst.ElementFactory.find("vapostproc")
@@ -759,6 +800,37 @@ class Recorder:
             pipeline.get_by_name("capture_caps").set_property("caps", caps)
         self._setup_source(pipeline, v)
         pipeline.use_clock(Gst.SystemClock.obtain())
+        return pipeline
+
+    def _build_partial(self, v: _Variant, stage: str) -> Gst.Pipeline:
+        """``MOMENTO_DEBUG_STAGE=convert|encode``: the real video chain cut short into a fakesink.
+
+        convert stops after the conversion (vapostproc, the "size" caps, queue and
+        videorate: everything before the encoder); encode keeps the encoder, with
+        its normal settings. No parser, mux or audio, and nothing is written, so
+        as with capture only the state still says "recording" and saves find no
+        new footage.
+        """
+        what = ("the conversion (no encoder)" if stage == "convert"
+                else f"the {v.encoder} encoder (no mux)")
+        log.warning("%s=%s: debug A/B. The %s source runs through %s into a fakesink: "
+                    "no audio or recording, and saves find no new footage",
+                    STAGE_ENV, stage, self.source_name, what)
+        tail = FAKESINK if stage == "convert" else f"{v.encoder} name=enc ! {FAKESINK}"
+        pipeline = self._launch(f"{self._video_source()} ! {self._video_chain(v, tail)}")
+        self._setup_source(pipeline, v)
+        enc = pipeline.get_by_name("enc")
+        if enc is not None:
+            self._encoder_settings(enc, v.encoder, self._kbps)
+        pipeline.use_clock(Gst.SystemClock.obtain())
+        return pipeline
+
+    @staticmethod
+    def _launch(desc: str) -> Gst.Pipeline:
+        log.debug("pipeline: %s", desc)
+        pipeline = Gst.parse_launch(desc)
+        if not isinstance(pipeline, Gst.Pipeline):
+            raise RuntimeError("parse_launch did not return a pipeline")
         return pipeline
 
     def _encoder_settings(self, enc: Gst.Element, name: str, kbps: int) -> None:
@@ -868,7 +940,7 @@ class Recorder:
                 if new == Gst.State.PLAYING and self._start_wall is None:
                     self._compute_start_wall()
                 if new == Gst.State.PLAYING and not self.recording and self._pipeline.get_by_name("mux") is None:
-                    # Capture only: no segments will ever open; report it as running.
+                    # A debug stage without a mux: no segments will ever open; report it as running.
                     self.recording = True
                     self._set_state("recording")
         elif t == Gst.MessageType.ERROR:
