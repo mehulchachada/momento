@@ -84,7 +84,12 @@ Commands (fields are in ``COMMANDS``)
     footage on disk (footage, not wall clock; 0 after ``stop`` unless
     ``keep_history``). ``source`` / ``encoder`` are null until capture has
     started once. ``error`` is present in state ``error``/``no_storage``
-    (``no_window`` on older daemons). ``storage`` is a ``STORAGE_CHECK``.
+    (``no_window`` on older daemons). ``storage`` is a ``STORAGE_CHECK``;
+    its ``low`` flag (any state) means a full ``max_seconds`` of recording at the
+    current settings (plus, with ``keep_history``, the span saved to the output
+    folder) doesn't fit: clients show a warning built from ``needed``,
+    ``available`` and ``label``. The daemon also sends one desktop notification
+    when ``low`` starts (not while capture is blocked, which has its own).
     ``target`` is what is recorded: ``"screen"`` or ``"window"`` (absent: screen);
     ``target_name`` the picked window's title (null when unknown or full screen).
     ``stop_reason`` (``STOP_REASONS`` or null) says why it is ``stopped``;
@@ -259,6 +264,14 @@ STORAGE_CHECK = {
     "required": (("integer",), True),    # bytes a full buffer + 1 GiB reserve needs
     "reclaimable": (("integer",), True),  # bytes of our own buffer (counts as free for a restart)
     "path": (("string",), True),         # the buffer directory
+    # Low-storage warning (absent on older daemons): does a full buffer.max_seconds of
+    # recording at the current settings fit, with keep_history's saved span included?
+    "low": (("boolean",), False),        # available < needed: warn (capture keeps running while ok)
+    "needed": (("integer",), False),     # required, + one saved span when keep_history (same disk)
+    "available": (("integer",), False),  # free + reclaimable (disk "output": that disk's free)
+    "history": (("boolean",), False),    # keep_history's saved span is counted in needed
+    "disk": (("string",), False),        # which disk needed/available describe: "buffer" | "output"
+    "label": (("string",), False),       # the settings in words: "1080p High", "1080p High 120 fps"
 }
 
 STORAGE_REQUIREMENTS = {

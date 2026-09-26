@@ -78,12 +78,27 @@ def _request(msg: dict, timeout: float = 120) -> dict | None:
 
 
 def storage_line(st: dict) -> str:
-    """'3.1 GB free, needs 8.2 GB - not enough' (+ the buffer a restart would free, if any)."""
+    """'3.1 GB free, needs 8.2 GB - not enough' (+ the buffer a restart would free, if any).
+
+    "needs" is a full buffer + reserve, plus Keep history's saved hour when that
+    goes to the same disk; "low" means capture can start but a full span won't fit.
+    """
     free = f"{storage.human(st.get('free', 0))} free"
     if st.get("reclaimable"):
         free += f" + {storage.human(st['reclaimable'])} buffer"
-    verdict = "ok" if st.get("ok") else "not enough"
-    return f"{free}, needs {storage.human(st.get('required', 0))} \u2014 {verdict}"
+    need = st.get("required", 0)
+    if "needed" in st and st.get("disk", "buffer") == "buffer":
+        need = st["needed"]
+    verdict = "not enough" if not st.get("ok") else "low" if st.get("low") else "ok"
+    return f"{free}, needs {storage.human(need)} \u2014 {verdict}"
+
+
+def low_storage_line(r: dict) -> str | None:
+    """status: the low-storage warning, unless capture is blocked (the state says so then)."""
+    sto = r.get("storage")
+    if not isinstance(sto, dict) or not sto.get("low") or r.get("state") == "no_storage":
+        return None
+    return storage.low_message(sto, r.get("max_seconds") or 3600)
 
 
 def controller_line(cfg: dict) -> str:
@@ -195,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
             rows.insert(3, ("history", HISTORY_LINE[r["keep_history"]]))
         if isinstance(r.get("storage"), dict):
             rows.append(("storage", storage_line(r["storage"])))
+        warning = low_storage_line(r)
+        if warning:
+            rows.append(("warning", warning))
         for key, value in rows:
             print(f"{key:>9}: {value}")
         return 0
