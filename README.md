@@ -6,8 +6,8 @@
 
 **Never miss the moment.**
 
-Instant replay for Linux gaming. Momento keeps the last hour of your screen in the background,<br>
-and one key saves what just happened, from the last 15 seconds up to the full hour.
+Instant replay and screenshots for Linux gaming.<br>
+Momento keeps the last hour of your game in the background. Something great happens? Save it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](#install)
@@ -19,54 +19,38 @@ and one key saves what just happened, from the last 15 seconds up to the full ho
 
 ---
 
-## What is it?
+<p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento bar: Recording Ember Rift, 42:17 recorded, 742 GB free, the lengths 15s to 60m with 5m selected, and pause, stop, screenshot and settings buttons"></p>
 
-Momento is the Linux version of the PS5's Create button. Press play once, pick your game, and it records in the background from then on. When something worth keeping happens, press **Super + Shift + G**, pick how far back to go, and the clip is saved to `~/Videos/Momento`.
-
-<p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento clip bar: logo, record dot, 12:34 recorded, 742 GB free, the lengths 15s to 60m with 5m highlighted, and settings, pause and stop buttons"></p>
+Think of it as the PS5's Create button for your Linux PC or handheld. Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or hold **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
 
 ## Features
 
-- **Any game.** Steam, non-Steam, emulators, browser games, and cloud gaming like GeForce NOW.
-- **Pick the length after the moment.** 15s, 30s, 1m, 3m, 5m, 15m, 30m or 60m.
-- **MP4 in seconds.** No re-encoding, so a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
-- **One shortcut.** Super + Shift + G opens a slim bar at the bottom of the screen.
-- **Settings in the bar.** Resolution, 60 or 120 fps, quality, sound and mic.
-- **Works with a controller.** Hold View + Menu to open the bar, then pick with the D-pad and A.
-- **Your game window or the full screen.** Record just the game (the default, so nothing else ends up in your clips) or everything on screen. The bar shows what it's recording, like *Recording Elden Ring*.
-- **Pause and stop** from the bar whenever you want.
-- **Keep history if you want it.** Turn it on and your replay survives stopping and closing the game, and every full hour is saved as a video too.
+- **Any game.** Steam, non-Steam, emulators, browser games, GeForce NOW and other cloud gaming.
+- **Save it after it happened.** Always-on replay of up to 60 minutes. Keep the last 15s, 30s, 1m, 3m, 5m, 15m, 30m or the full hour.
+- **MP4 in seconds.** No re-encoding: a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
+- **Just the game.** Window mode (the default) records only your game, so the bar, chats and notifications stay out of your clips. The bar shows what it's recording: *Recording Ember Rift*. Prefer everything? Switch to Full screen.
+- **Screenshots.** One button. The bar gets out of the way first, then the picture lands in `~/Videos/Momento/Images`.
+- **Made for controllers.** Hold View + Menu to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
+- **Opens instantly.** The bar is kept ready, so it's on screen the moment you ask.
+- **Pause and stop** whenever you want.
+- **Keep history, if you want it.** Keep your replay after you stop or quit the game, and get every full hour saved as a video.
 - **A heads-up before the hour.** A notification 10, 5 or 3 minutes before the start of your session starts being replaced.
-- **Screenshots too.** The camera button saves a picture of your game to `~/Videos/Momento/Images`.
-- **Protects your game.** Uses little memory and never fills your disk.
-- **Light on performance.** Your graphics card does the heavy lifting.
+- **Never fills your disk.** Momento checks free space and tells you early when it's getting tight.
+- **Light.** Your graphics card does the heavy lifting. About 150 MB of memory for a full hour of replay.
 - **Local only.** Nothing is uploaded. No account.
-
-## How it works
-
-Momento quietly keeps the last hour of what's on your screen, like a dashcam. Older footage is deleted as new footage comes in, so it never grows. When you pick a length, it saves exactly that much, ending right now.
-
-```
-  |<------------------- last 60 minutes, always kept ------------------->|
-  |----------------------------------------------------------|-- 30 s ---|
-                                                                         ^
-                                          you press Super + Shift + G here
-                                          -> Momento_..._30s.mp4
-```
 
 ## How it compares
 
-| | **Momento** | Steam Game Recording | OBS Replay Buffer |
-|---|---|---|---|
-| Records | **Any game or app: Steam, non-Steam, emulators, GeForce NOW and other cloud gaming** | Only games running through Steam | Whatever is in your OBS scene |
-| Saving a clip | **One shortcut, pick 15 s to 60 min, MP4 ready in seconds** | Trim on a timeline, then export to MP4 | Always saves the whole buffer |
-| Memory used for an hour of history | **About 150 MB**, plus about 100 MB for the instant bar (can be turned off) | History on disk | About 6.8 GB of RAM at 1080p |
-| History kept across restarts and reboots | **Yes** | Not documented | No (RAM) |
-| Protects your game | **Memory cap, gives way under pressure, never fills your disk** | Disk-space limit you set | Memory limit you set |
-| Hotkey on Wayland desktops | **Yes, no plugins** | Steam shortcuts | Needs a plugin |
-| Steam Gaming Mode | Records today; clip bar coming | Built in | Not designed for it |
+| | **Momento** | Steam recording | OBS replay |
+|---|:---:|:---:|:---:|
+| Works with any game | ✓ | Steam games only | ✓ |
+| Pick the length when you save (15 s – 60 min) | ✓ | Trim on a timeline | Whole buffer only |
+| Controller-friendly overlay | ✓ | ✓ | ✗ |
+| Memory for an hour of replay | ~150 MB | Kept on disk | ~6.8 GB |
+| Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin |
+| Steam Gaming Mode | Records; bar coming | ✓ | ✗ |
 
-The full comparison, including GPU Screen Recorder, is in [docs/COMPARISON.md](docs/COMPARISON.md).
+More detail, including GPU Screen Recorder: [docs/COMPARISON.md](docs/COMPARISON.md).
 
 ## Install
 
@@ -126,32 +110,45 @@ Start your game, press **Super + Shift + G** and press play. Your desktop asks w
 2. Tick **Remember** or **Allow restoring** if you see it.
 3. Click **Share**. If your desktop asks you to confirm the shortcut, accept it or pick another key.
 
-Pause and resume keep the same window. After you stop, or the game closes, play asks for a window again.
+That's it. Momento now records in the background until you stop it or the game closes.
 
 ## Using it
 
 | Do this | Result |
 |---|---|
-| **Super + Shift + G** | Opens the clip bar |
+| **Super + Shift + G** | Opens the bar (press again to close it) |
 | Click or tap a length | Saves that much, ending right now |
 | **Left/Right + Enter**, or **1** to **8** | Picks a length with the keyboard |
-| **P**, or the pause button | Pauses or resumes recording. Your history is kept |
-| **S**, or the gear button | Opens settings in the bar |
-| The stop button | Stops recording (the bar asks first). The replay is cleared unless **Keep history** is on |
-| The camera button | Takes a screenshot. The bar gets out of the way first, and a notification tells you it's saved |
+| **P**, or the pause button | Pauses or resumes. Your replay is kept and can still be saved |
+| The stop button | Stops recording (the bar asks first) |
+| The camera button | Takes a screenshot |
+| **S**, or the gear | Opens [settings](#settings) |
 | **Esc** | Closes the bar without saving |
 
 The **Super** key is the Windows / start-menu key. Momento uses Super + Shift + G because KDE already uses Super + G.
+
+<p align="center">
+<img src="assets/bar-paused.png" width="880" alt="The bar while paused: Paused Ember Rift, with a note that saving uses the footage so far"><br>
+<em>Paused: you can still save what you have.</em>
+</p>
+<p align="center">
+<img src="assets/bar-stopped.png" width="880" alt="The bar after stopping: Press play to pick a window"><br>
+<em>Stopped: press play to pick a window and start again.</em>
+</p>
+<p align="center">
+<img src="assets/bar-screenshot.png" width="880" alt="The bar with the screenshot button selected"><br>
+<em>The camera button saves a screenshot.</em>
+</p>
+
+Prefer a terminal, or want to bind these to keys or buttons?
 
 ```bash
 momento save 30s        # save without opening the bar (15s, 1m, 5m, 60m, 90s...)
 momento screenshot      # save a picture of your game
 momento status          # is it recording, and how much is kept
-momento settings        # current settings and your sound devices
-momento set fps 120     # change a setting
 momento pause           # pause (what you have can still be saved)
 momento resume          # resume
-momento stop            # stop recording (clears the replay unless Keep history is on)
+momento stop            # stop recording
 ```
 
 ## Using a controller
@@ -169,22 +166,89 @@ Hold **View + Menu** (the two small buttons in the middle) for a moment to open 
 
 Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back.
 
-While the bar is open, Momento takes over the controller so your game doesn't react to your presses, and gives it back when the bar closes. If another app already holds the controller, the game may still see them. The shortcut itself does reach the game, so pick one your game doesn't use.
-
-To change the shortcut, open settings (**Y**) and choose under **Controller**:
-
-- **View + Menu** (the default)
-- **Left paddle** or **Right paddle**: the back buttons on the ROG Ally and Xbox Elite controllers
-- **L3 + R3**: press both sticks in
-- **Off**
-
-Or in a terminal: `momento set controller left_paddle`. If a paddle seems swapped or a button does nothing, run `momento controller --watch` and press it to see what Momento gets.
+Want a different shortcut, or a quick tap instead of a hold? See [Controller settings](#controller).
 
 **Steam Gaming Mode:** the bar can't appear over the game there yet. Use Steam Input to bind a button to `momento save 30s` instead.
 
+## Settings
+
+Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a controller). Pick what you want on any tab, then **Apply**. Applying restarts recording, and your replay is kept.
+
+### General
+
+<img src="assets/settings-general.png" width="880" alt="Settings, General tab: Record Full screen or Window, Keep history Off or On">
+
+- **Record: Window** (default) records only the game window you pick. The bar and notifications never end up in your clips.
+- **Record: Full screen** records everything on your screen.
+- **Keep history: Off** (default): stopping, or the game closing, clears the replay. Save first!
+- **Keep history: On**: your replay stays after you stop or quit, and every full hour is saved to `~/Videos/Momento` automatically.
+
+### Video
+
+<img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p to Native, Frame rate 60 or 120 fps, Quality Standard, High or Ultra">
+
+- **Resolution**: 720p, 1080p (default), 1440p, 4K, or Native (your screen's own).
+- **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
+- **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
+- The line at the bottom shows how much space a full hour will take. See [Video quality](#video-quality) for picks.
+
+### Audio
+
+<img src="assets/settings-audio.png" width="880" alt="Settings, Audio tab: Sound, Mic Off or On, Mic device">
+
+- **Sound**: records your default output, a specific device (speakers, headphones, HDMI), or no sound at all.
+- **Mic**: adds your voice to clips. Off by default.
+- **Mic device**: which microphone to use. Shows up when Mic is on.
+
+### Controller
+
+<img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: Controller shortcut Off, View + Menu, Left paddle, Right paddle or L3 + R3, and Exclusive Off or On">
+
+- **Controller**: the button combo that opens the bar: **View + Menu** (default), **Left paddle** or **Right paddle** (the back buttons on the ROG Ally and Xbox Elite controllers), **L3 + R3** (press both sticks in), or **Off**.
+- **Exclusive: On** (default): while the bar is open, Momento takes the controller so your game doesn't react to your presses. It gives it back when the bar closes.
+- **Open with: Hold** (default) opens the bar after holding the combo for 0.3 s. **Tap** opens it the moment you press it.
+
+### Misc
+
+<img src="assets/settings-misc.png" width="880" alt="Settings, Misc tab: Hour warning 10, 5 or 3 min, Instant bar On or Off">
+
+- **Hour warning**: how early you're told before the start of your session starts being replaced: 10 (default), 5 or 3 minutes.
+- **Instant bar: On** (default): the bar is kept ready so it opens instantly. Uses about 100 MB of memory.
+- **Instant bar: Off**: saves that memory. The bar takes about 0.3–0.5 s to open, and doesn't remember where you left off between presses.
+
+<details><summary><b>More settings (for tinkerers)</b></summary>
+
+Everything above can also be changed in a terminal with `momento set` (for example `momento set fps 120`). `momento settings` shows the current values and your sound devices.
+
+A few extras live only in `~/.config/momento/config.toml`. Restart Momento after editing it: `systemctl --user restart momento.service`.
+
+| Setting | Key | Default |
+|---|---|---|
+| Clip folder | `[output] dir` | your Videos folder + `/Momento` |
+| Keyboard shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
+| History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
+</details>
+
+## Notifications
+
+Momento tells you what happened, so you never have to guess.
+
+| You'll see | When |
+|---|---|
+| **Saved last 5m** | A clip is saved. Shows where. If less was recorded than you asked for, it says so. |
+| **Screenshot saved** | A screenshot is saved to `~/Videos/Momento/Images`. |
+| **Game closed** | The window you were recording closed, so recording stopped. It tells you whether your replay was cleared or kept (Keep history). |
+| **60 min almost full** | Your [hour warning](#misc): in a few minutes the start of your session starts being replaced. Save anything you want from it now. With Keep history on, it tells you the hour is about to be saved instead. |
+| **Saved the last hour to Videos** | Keep history saved a full hour for you. |
+| **Running low on space** | Free space is below what a full hour needs at your settings. The bar warns too. Free up some space. |
+| **Not enough disk space** | Momento can't start, the disk got almost full and recording stopped, or there's no room for a clip or screenshot. What you already have can still be saved, and recording starts again by itself once there's room. |
+| **Couldn't save the hour — disk full** | Keep history had no room to save a full hour. Recording continues. |
+| **Save failed** / **Screenshot failed** | Something went wrong. The notification says what. |
+| **Nothing to save** | You asked for a clip before anything was recorded. |
+
 ## Video quality
 
-Free space Momento needs to start (a full hour of history in brackets):
+Free space Momento needs to start (a full hour of replay in brackets):
 
 | Resolution | Standard | High (default) | Ultra |
 |---|---|---|---|
@@ -198,13 +262,15 @@ Free space Momento needs to start (a full hour of history in brackets):
 - **1440p or 4K monitor:** 1440p High.
 - **Different screen shape** (like a 16:10 handheld): you get black bars. The picture is never stretched.
 
+The replay never grows past its hour: older footage is replaced as new footage comes in. The free-space number in the bar is green when there's plenty of room, yellow when it's getting tight and red when there isn't enough. A setting that won't fit gets a red mark in settings, and **Apply** is disabled.
+
 ## Performance
 
-- About **4.5% of one CPU core**.
-- About **2-3% lower FPS** in a heavy graphics test.
-- About **1.5 W** of extra power.
-- About **150 MB** of memory, plus about 100 MB for the instant bar (can be turned off).
-- About **7 GB written to disk per hour**.
+- **4.5% of one CPU core**.
+- **2-3% lower FPS** in a heavy graphics test.
+- **1.5 W** of extra power.
+- **150 MB** of memory, plus about 100 MB for the instant bar (can be turned off).
+- **7 GB written to disk per hour**.
 - A 1-minute clip saves in about **3 seconds**.
 
 These were measured on one ROG Ally (Z1 Extreme) on a light desktop workload. Results will vary with other hardware and games.
@@ -214,40 +280,54 @@ These were measured on one ROG Ally (Z1 Extreme) on a light desktop workload. Re
 ASUS ROG Ally (Z1 Extreme, 16 GB), Bazzite 44, KDE Plasma 6.7 on Wayland, on AC power. Momento 0.1.0 at 1080p, High, 60 fps, desktop sound on, mic off. September 2026.
 </details>
 
-## Storage warnings
+## Good to know
 
-Momento checks free space so it never fills your disk.
-
-| When | What happens |
-|---|---|
-| Not enough space to start | It doesn't start and shows **Low storage**. It starts by itself once there's room. |
-| Disk almost full while recording | It stops recording. What you already have can still be saved. |
-| A setting that won't fit | That option gets a red mark and **Apply** is disabled. |
-| Free-space hint in the bar | Green: plenty of room. Yellow: getting tight. Red: not enough. |
-
-## Settings
-
-Change settings with the **gear** in the bar, or with `momento set …` in a terminal. Everything lives in `~/.config/momento/config.toml`. If you edit that file by hand, restart Momento: `systemctl --user restart momento.service`.
-
-| Setting | Key | Default |
-|---|---|---|
-| Record | `[capture] target` | `window`: only the window you pick. `screen` records the full screen |
-| Keep history | `[buffer] keep_history` | `false`: stopping, or the game closing, clears the replay. `true` keeps it and saves every full hour as a video |
-| Hour warning | `[buffer] warn_minutes` | `10` minutes before the hour (3 to 10) |
-| Resolution | `[capture] resolution` | `1080p` (also `720p`, `1440p`, `2160p`, `native`) |
-| Frame rate | `[capture] fps` | `60` (or `120`) |
-| Quality | `[capture] quality` | `high` (also `standard`, `ultra`) |
-| Game sound | `[audio] desktop` | `true` |
-| Microphone | `[audio] microphone` | `false` |
-| Clip folder | `[output] dir` | your Videos folder + `/Momento` |
-| Shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
-| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 300`. `enabled = false` turns controllers off |
-| History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
-| Instant bar | `[ui] keep_bar_loaded` | `true`: keeps the bar ready so it opens immediately; uses ~100 MB. Set `false` to save memory |
+- **Full screen records everything**, including the Momento bar and notifications while they're on screen. Use **Window** to keep them out.
+- **The window picker appears when you press play** in Window mode, and again after you stop or the game closes. Pause and resume keep the same window.
+- **"Recording Window" instead of the game's name?** The name comes from your desktop, and some desktops don't share it. Recording works the same.
+- **Any sound you hear is recorded**, like Discord calls or music, unless you mute it or pick another output under **Sound**.
+- **On GNOME**, the bar can't appear over exclusive fullscreen games. Use borderless or windowed fullscreen.
+- **Screenshots come from the recording**, so they work only while Momento is recording (not paused or stopped).
+- **With Keep history off, stopping clears your replay.** So does the game closing. Save first.
+- **Momento needs free space for a full hour** before it starts: about 8 GB at the default settings.
+- **The controller shortcut also reaches your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
+- **Tap can clash with emulators** that use Select + Start (the same buttons as View + Menu). Keep **Hold**, or pick another shortcut.
 
 ## FAQ
 
-<details><summary><b>My clip is black or shows the wrong screen</b></summary>
+<details><summary><b>Where are my clips and screenshots?</b></summary>
+
+Clips are in `~/Videos/Momento`, screenshots in `~/Videos/Momento/Images`. The notification after each save shows the exact file.
+</details>
+<details><summary><b>Why did recording stop?</b></summary>
+
+In Window mode, recording stops when the game's window closes. It also stops if your disk gets almost full. A notification tells you which. Press play in the bar to start again.
+</details>
+<details><summary><b>Can I record only the game?</b></summary>
+
+Yes. That's **Record: Window**, the default. The bar and notifications stay out of your clips.
+</details>
+<details><summary><b>How much disk space and memory does it use?</b></summary>
+
+About 7.2 GB of disk for a full hour at the default settings, and it never grows. About 150 MB of memory, plus about 100 MB for the instant bar. Lower resolution or quality to use less disk.
+</details>
+<details><summary><b>Does it lower my FPS?</b></summary>
+
+Barely: about 2-3% in a heavy graphics test on our ROG Ally (see [Performance](#performance)). If the installer says only a *software* encoder was found, you will notice it. Install your graphics driver's video support from the [Install](#install) section.
+</details>
+<details><summary><b>How do I change the shortcut?</b></summary>
+
+Controller: settings → **Controller**. Keyboard: on KDE, *System Settings → Keyboard → Shortcuts → Momento*. On other desktops, look for Momento in the keyboard shortcut settings.
+</details>
+<details><summary><b>My controller doesn't open the bar</b></summary>
+
+Hold the two small middle buttons for a moment: **View + Menu** (Xbox, ROG Ally, Steam Deck), **Create + Options** (PlayStation), **− and +** (Nintendo). Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
+</details>
+<details><summary><b>How do I turn off Keep history or the hour warning?</b></summary>
+
+Keep history: settings → **General** → Off (it's off by default). The hour warning can't be turned off, but you can set it to 3 minutes under **Misc**, or mute Momento in your desktop's notification settings.
+</details>
+<details><summary><b>My clip is black or shows the wrong thing</b></summary>
 
 The wrong thing was picked in the share dialog. In Window mode, stop and press play to pick again. In Full screen mode, reset it and pick your monitor:
 
@@ -256,21 +336,9 @@ rm ~/.local/state/momento/portal_token
 systemctl --user restart momento.service
 ```
 </details>
-<details><summary><b>Keep the Momento bar out of my clips</b></summary>
-
-Set **Record** to **Window** (the default). Momento then records only your game: no bar, no notifications. In **Full screen** mode everything on screen is recorded, the bar included while it's open.
-</details>
-<details><summary><b>What happens when my game closes?</b></summary>
-
-Recording stops and you get a notification. With **Keep history** off (the default) the replay is cleared, so save your moment before you quit. With it on, open the bar and save the last moments even after the game is gone.
-</details>
 <details><summary><b>My clip has no sound</b></summary>
 
-Momento records your **default** sound output. If the game plays through another device, make that the default, or pick it under **Sound** in the bar's settings. Also check that sound isn't set to Off.
-</details>
-<details><summary><b>The bar doesn't show over my game on GNOME</b></summary>
-
-GNOME doesn't let apps draw over exclusive fullscreen games. Switch the game to borderless or windowed fullscreen. Or bind `momento save 30s` to a key in *Settings → Keyboard → Custom Shortcuts*.
+Momento records your **default** sound output. If the game plays through another device, make that the default, or pick it under **Sound** in settings. Also check that Sound isn't set to Off.
 </details>
 <details><summary><b>Does it work in Steam Gaming Mode?</b></summary>
 
@@ -280,30 +348,30 @@ Recording works, but the bar can't appear there yet. Bind a controller button to
 
 Check that `momento status` says *recording*. On KDE, look for Momento under *System Settings → Keyboard → Shortcuts*. If your desktop has no app shortcuts, add a custom shortcut that runs `momento overlay`.
 </details>
-<details><summary><b>How much disk space does it use? Will it wear out my SSD?</b></summary>
+<details><summary><b>Will it wear out my SSD?</b></summary>
 
-At the default settings the history takes about 7.2 GB and never grows. Momento writes about 7 GB per hour, a small part of a typical SSD's rated life. To write less, pick a lower resolution or quality, or a shorter history.
-</details>
-<details><summary><b>Does it slow my games down?</b></summary>
-
-Barely, on our test machine (see [Performance](#performance)). If the installer says only a *software* encoder was found, you will notice it. Install your graphics driver's video support from the [Install](#install) section.
+Momento writes about 7 GB per hour of play, a small part of a typical SSD's rated life. To write less, pick a lower resolution or quality.
 </details>
 <details><summary><b>Running <code>momento</code> starts a different program</b></summary>
 
 An unrelated developer tool is also called `momento`. Check with `command -v momento`. This app lives in `~/.local/bin/momento`; put `~/.local/bin` first in your `PATH`, or use the full path. The shortcut and app menu are not affected.
+</details>
+<details><summary><b>How do I uninstall it?</b></summary>
+
+See [Uninstall](#uninstall) below. Your clips are never deleted.
 </details>
 
 ## Uninstall
 
 ```bash
 ~/.local/share/momento/install.sh --uninstall   # removes Momento, keeps settings and clips
-~/.local/share/momento/install.sh --purge       # also removes settings and the history (clips are never deleted)
+~/.local/share/momento/install.sh --purge       # also removes settings and the replay (clips are never deleted)
 ```
 
 ## Roadmap
 
 - Flatpak on Flathub, including SteamOS
-- The clip bar in Steam Gaming Mode
+- The bar in Steam Gaming Mode
 - Smaller files (HEVC and AV1)
 - Microphone on its own audio track
 
