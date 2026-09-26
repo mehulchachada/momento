@@ -13,7 +13,10 @@ Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9 stage, the transport row
 (−10, play/pause, +10, sound, time, scrubber, length, full screen; a
 screenshot shows its size and format instead) and a footer (what it is and
 when, the hints, Back). The hints show a controller's buttons while the bar has
-one connected (they follow a hotplug), else the keys.
+one connected (they follow a hotplug), else the keys. They carry the symbols of
+the controller in use (``Bar.pad_symbols``): ✕ ○ □ △ and L1 / R1 / L2 / R2 on a
+PlayStation one, Nintendo's letters on a Nintendo one, Xbox letters otherwise,
+and switch when another controller is picked up.
 
 Clips play muted. The speaker button, M or X / Square (the west button) turns
 the sound on; that sticks while the gallery is open (the next clip too, full
@@ -45,7 +48,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage,
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from . import config, media
+from . import config, gamepad, media
 from . import overlay as ov
 
 log = logging.getLogger(__name__)
@@ -86,14 +89,30 @@ KIND_NAMES = {"clip": "Clip", "shot": "Screenshot"}
 
 # The hints in the footer and the full screen strip: [([buttons or keys], word), ...].
 # A controller's buttons while the bar has one (Bar.pad_connected), else the keys.
-CLIP_HINT = [(["LB", "RB"], "browse"), (["↑", "↓"], "filter"), (["A"], "play"), (["LT", "RT"], "10 s"),
-             (["X"], "sound"), (["Y"], "full screen")]
-SHOT_HINT = [(["LB", "RB"], "browse"), (["↑", "↓"], "filter"), (["Y"], "full screen")]
-BACK_HINT = [(["B"], "Back")]
+# PAD_*: by button position (gamepad names); pad_hint() puts in the pad's own symbols.
+PAD_CLIP = [(["tl", "tr"], "browse"), (["↑", "↓"], "filter"), (["south"], "play"), (["tl2", "tr2"], "10 s"),
+            (["west"], "sound"), (["north"], "full screen")]
+PAD_SHOT = [(["tl", "tr"], "browse"), (["↑", "↓"], "filter"), (["north"], "full screen")]
+PAD_BACK = [(["east"], "Back")]
 CLIP_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["Space"], "play"), (["J", "L"], "10 s"),
              (["M"], "sound"), (["F"], "full screen")]
 SHOT_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["F"], "full screen")]
 BACK_KEYS = [(["Esc"], "Back")]
+
+_pad_hints: dict = {}
+
+
+def pad_hint(tokens, symbols="xbox"):
+    """``PAD_*`` hints with the buttons as a ``symbols`` pad labels them ("xbox",
+    "playstation", "nintendo"). The same list object for the same input, so the
+    footer repaints only on a real change."""
+    key = (id(tokens), symbols)
+    if key not in _pad_hints:
+        _pad_hints[key] = [([gamepad.button_symbol(b, symbols) for b in btns], word) for btns, word in tokens]
+    return _pad_hints[key]
+
+
+CLIP_HINT, SHOT_HINT, BACK_HINT = (pad_hint(t) for t in (PAD_CLIP, PAD_SHOT, PAD_BACK))
 
 
 # --------------------------------------------------------------------------
@@ -222,9 +241,36 @@ def draw_replay(p, x, y, color, scale=1.0):
     p.restore()
 
 
+PS_GLYPHS = ("✕", "○", "□", "△")    # drawn, not typed: fonts render them unevenly
+
+
+def ps_glyph(p, r, sym, color):
+    """A PlayStation face symbol, a thin outline centred in ``r`` (the chip's text colour)."""
+    c = r.center()
+    pen = QPen(QColor(color), 1.5)
+    pen.setJoinStyle(Qt.MiterJoin if sym == "□" else Qt.RoundJoin)
+    pen.setCapStyle(Qt.RoundCap)
+    p.save()
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    if sym == "✕":
+        d = 3.4
+        p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+        p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
+    elif sym == "○":
+        p.drawEllipse(c, 4.0, 4.0)
+    elif sym == "□":
+        p.drawRect(QRectF(c.x() - 3.6, c.y() - 3.6, 7.2, 7.2))
+    else:                               # △, its centre of mass on the chip's centre
+        h = 7.4
+        p.drawPolygon(QPolygonF([QPointF(c.x(), c.y() - h * 2 / 3), QPointF(c.x() + 4.3, c.y() + h / 3),
+                                 QPointF(c.x() - 4.3, c.y() + h / 3)]))
+    p.restore()
+
+
 def chip_run(p, x, y, tokens, word_color=ov.MUTED):
     """Paint controller hints ([LB][RB] browse   [A] play ...) from (x, centre y);
-    returns the width. ``p`` None only measures."""
+    returns the width. ``p`` None only measures. ✕ ○ □ △ are drawn (``ps_glyph``)."""
     cf = font(10, weight=QFont.Bold)
     wf = font(12)
     cfm, wfm = QFontMetrics(cf), QFontMetrics(wf)
@@ -235,16 +281,20 @@ def chip_run(p, x, y, tokens, word_color=ov.MUTED):
         for bi, b in enumerate(btns):
             if bi:
                 x += 3
-            w = max(18, cfm.horizontalAdvance(b) + 10)
+            glyph = b in PS_GLYPHS
+            w = 18 if glyph else max(18, cfm.horizontalAdvance(b) + 10)
             r = QRectF(x, y - 9, w, 18)
             if p is not None:
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(ov.TAB_SEL))
                 rad = 9 if w == 18 else 5
                 p.drawRoundedRect(r, rad, rad)
-                p.setPen(QColor(ov.PILL_SEL))
-                p.setFont(cf)
-                p.drawText(r, Qt.AlignCenter, b)
+                if glyph:
+                    ps_glyph(p, r, b, ov.PILL_SEL)
+                else:
+                    p.setPen(QColor(ov.PILL_SEL))
+                    p.setFont(cf)
+                    p.drawText(r, Qt.AlignCenter, b)
             x += w
         x += 6
         if p is not None:
@@ -1040,7 +1090,7 @@ class Gallery(QObject):
         lay.addSpacing(10)
         lay.addWidget(divider())
         lay.addSpacing(16)
-        back = W.Chips(BACK_HINT if self.bar.pad_connected() else BACK_KEYS)
+        back = W.Chips(pad_hint(PAD_BACK, self.bar.pad_symbols()) if self.bar.pad_connected() else BACK_KEYS)
         back.clicked.connect(self.back)
         lay.addWidget(back)
         strip.setFixedHeight(ov.BAR_HEIGHT + 2)
@@ -1771,20 +1821,22 @@ class Gallery(QObject):
         self._fix_focus()
 
     def sync_hints(self):
-        """The footer's hints and the full screen Back chip: a controller's buttons while
-        the bar has one connected, else the keys (also called on a hotplug)."""
+        """The footer's hints and the full screen Back chip: a controller's buttons (with
+        the symbols of the one in use) while the bar has one connected, else the keys
+        (also called on a hotplug, and when another controller is picked up)."""
         pad = self.bar.pad_connected()
+        sym = self.bar.pad_symbols() if pad else "xbox"
         item = self.current()
         if item is None:
             hint = []
         elif item.kind == "clip":
-            hint = CLIP_HINT if pad else CLIP_KEYS
+            hint = pad_hint(PAD_CLIP, sym) if pad else CLIP_KEYS
         else:
-            hint = SHOT_HINT if pad else SHOT_KEYS
+            hint = pad_hint(PAD_SHOT, sym) if pad else SHOT_KEYS
         self.footer.set_hint(hint)
         if self.full is not None:
             for chips in self.full.findChildren(self.W.Chips):
-                chips.set_tokens(BACK_HINT if pad else BACK_KEYS)
+                chips.set_tokens(pad_hint(PAD_BACK, sym) if pad else BACK_KEYS)
             self.full.place()
 
     # ------------------------------------------------------------------ focus

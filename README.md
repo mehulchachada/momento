@@ -166,7 +166,7 @@ Prefer the old **View + Menu**? It's still there, with the paddles and L3 + R3, 
 | **X** | Pause or resume recording |
 | **LB / RB** | Jump between the lengths and the buttons |
 
-Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back.
+Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back. The button hints in the bar show your own controller's buttons: ✕ ○ □ △ and L1 / R1 on a PlayStation controller.
 
 Want a different shortcut, or a short hold instead of a tap? See [Controller settings](#controller).
 

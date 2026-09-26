@@ -688,6 +688,116 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_F)
         self.assertEqual([c.tokens for c in g.full.findChildren(g.W.Chips)], [gm.BACK_KEYS, gm.BACK_KEYS])
 
+    def two_pad_bar(self, pads=("ps", "xbox")):
+        """A bar with fake pads: "ps" (a DualSense on hid-playstation) and/or "xbox"; fresh
+        devices on every open, like re-opening /dev/input. Returns (bar, {kind: [devices]})."""
+        made = {k: [] for k in pads}
+
+        def make(kind):
+            if kind == "ps":
+                return gamepad.FakeDevice(name="DualSense Wireless Controller", path="/fake/dualsense",
+                                          keys=gamepad.FakeDevice.XBOX_KEYS + (gamepad.BTN_TL2, gamepad.BTN_TR2),
+                                          axes={}, vendor=0x054c, driver="playstation")
+            return gamepad.FakeDevice(name="Microsoft X-Box One Elite 2 pad", path="/fake/elite",
+                                      keys=gamepad.FakeDevice.XBOX_KEYS + (gamepad.BTN_TL2, gamepad.BTN_TR2),
+                                      axes={}, vendor=0x045e, driver="xpad")
+
+        def factory(**kw):
+            devs = {}
+            for kind in pads:
+                devs[kind] = make(kind)
+                made[kind].append(devs[kind])
+            by_path = {d.path: d for d in devs.values()}
+            return gamepad.Gamepads(lister=lambda: list(by_path), opener=by_path.get, hotplug="off",
+                                    watchdog_thread=False, **kw)
+        self.addCleanup(setattr, overlay, "PAD_FACTORY", overlay.PAD_FACTORY)
+        overlay.PAD_FACTORY = factory
+        bar = self.bar()
+        self.addCleanup(lambda: [d.close() for devs in made.values() for d in devs])
+        self.wait_for(lambda: bar.pads is not None)
+        return bar, made
+
+    def touch(self, dev, code=gamepad.BTN_THUMBL):
+        """A press that does nothing in the bar (a stick click) but marks the pad as in use."""
+        dev.push(gamepad.EV_KEY, code, 1)
+        pump(self.app, 0.03)
+        dev.push(gamepad.EV_KEY, code, 0)
+        pump(self.app, 0.03)
+
+    def test_hints_with_a_playstation_pad(self):
+        """A DualSense: ✕ ○ □ △ by position, L1 / R1, L2 / R2, drawn as chips."""
+        gm = self.gallery_mod
+        self.screen_size()
+        bar, made = self.two_pad_bar(("ps",))
+        self.assertEqual(bar.pad_symbols(), "playstation")           # the only pad: in use already
+        g = self.open(bar)
+        self.assertEqual(g.footer.hint, [(["L1", "R1"], "browse"), (["↑", "↓"], "filter"), (["✕"], "play"),
+                                         (["L2", "R2"], "10 s"), (["□"], "sound"), (["△"], "full screen")])
+        self.player.advance(21_000)
+        g.panel.w["play"].setFocus()
+        pump(self.app, 0.05)
+        self.shot(bar, "16-above-clip-playstation")
+        self.key(Qt.Key_F)
+        self.assertEqual([c.tokens for c in g.full.findChildren(g.W.Chips)], [[(["○"], "Back")]] * 2)
+        self.key(Qt.Key_F)
+        self.key(Qt.Key_Right)                                        # a screenshot
+        self.settle_items(g)
+        self.assertEqual(g.footer.hint, gm.pad_hint(gm.PAD_SHOT, "playstation"))
+        self.assertEqual(g.footer.hint[-1], (["△"], "full screen"))
+        # the symbols are drawn: each chip is a round 18 px one with a light glyph in its middle
+        self.assertEqual(gm.chip_run(None, 0, 0, [(["✕"], "")]), gm.chip_run(None, 0, 0, [(["A"], "")]))
+        for sym in gm.PS_GLYPHS:
+            img = QImage(24, 24, QImage.Format_ARGB32)
+            img.fill(QColor("#000000"))
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing)
+            gm.chip_run(p, 3, 12, [([sym], "")])
+            p.end()
+            lit = [QColor(img.pixel(x, y)).lightness() for x in range(8, 17) for y in range(7, 17)]
+            self.assertGreater(max(lit), 150, sym)                   # the glyph (PILL_SEL) shows
+
+    def test_hints_follow_the_pad_in_use(self):
+        """PS and Xbox pads: the hints switch to whichever was pressed last, live, and the
+        next open starts with it."""
+        gm = self.gallery_mod
+        bar, made = self.two_pad_bar()
+        g = self.open(bar)
+        self.assertEqual(g.footer.hint, gm.CLIP_HINT)                  # two pads, none used yet: Xbox
+        self.touch(made["ps"][-1])
+        self.assertEqual(bar.pad_symbols(), "playstation")
+        self.assertEqual(g.footer.hint, gm.pad_hint(gm.PAD_CLIP, "playstation"))
+        self.assertEqual(bar.mode, "gallery")                         # the stick click did nothing else
+        pump(self.app, 0.3)
+        self.touch(made["xbox"][-1])
+        self.assertEqual(g.footer.hint, gm.CLIP_HINT)
+        self.assertIn((["A"], "play"), g.footer.hint)
+        pump(self.app, 0.3)
+        made["ps"][-1].push(gamepad.EV_KEY, gamepad.BTN_NORTH, 1)     # △ (0x133 on hid-playstation): full screen
+        pump(self.app, 0.03)
+        made["ps"][-1].push(gamepad.EV_KEY, gamepad.BTN_NORTH, 0)
+        pump(self.app, 0.03)
+        self.assertIsNotNone(g.full)
+        self.assertEqual([c.tokens for c in g.full.findChildren(g.W.Chips)], [[(["○"], "Back")]] * 2)
+        self.key(Qt.Key_F)
+        bar.pads.remove_device(made["ps"][-1].path)                    # unplugged: the other one's
+        self.assertEqual(g.footer.hint, gm.CLIP_HINT)
+        self.touch(made["xbox"][-1])
+        pump(self.app, 0.3)
+        # hidden and shown again (fresh devices): the pad last used keeps its symbols
+        bar.close_gallery()
+        bar.hide()
+        pump(self.app, 0.05)
+        bar.show()
+        self.wait_for(lambda: bar.pads is not None and len(bar.pads.pads) == 2)
+        self.assertEqual(bar.pad_symbols(), "xbox")
+        self.touch(made["ps"][-1])
+        self.assertEqual(bar.pad_symbols(), "playstation")
+        bar.hide()
+        pump(self.app, 0.05)
+        bar.show()
+        self.wait_for(lambda: bar.pads is not None and len(bar.pads.pads) == 2)
+        self.assertEqual(bar.pad_symbols(), "playstation")
+
     def test_keyboard_hints_without_a_controller(self):
         """No controller (the sandbox opens none): the keys, for a clip and a screenshot."""
         gm = self.gallery_mod

@@ -1506,6 +1506,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.applied = None       # settings: the changes the last Apply sent
             self.pads = None          # game controllers while the bar is on screen
             self.pads_handle = None
+            self.pad_used = None      # the controller last in use, kept across opens (its hints)
             self.gallery = None       # momento.gallery.Gallery, built on the first open
             self.gallery_hint = None  # "No clips or screenshots yet" in the strip above the bar
             self.recycle = False      # the gallery was used: a resident bar exits once hidden
@@ -2904,7 +2905,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             factory = PAD_FACTORY or gamepad.Gamepads
             hub = factory(navigate=True, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
                           on_action=self.on_pad_action, on_chord=self.on_pad_chord,
-                          on_button=self.on_pad_button, on_devices=self.on_pads_changed)
+                          on_button=self.on_pad_button, on_devices=self.on_pads_changed,
+                          on_active=self.on_pads_changed)
             try:
                 ok = hub.start()
             except Exception:  # noqa: BLE001
@@ -2914,6 +2916,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 hub.close()
                 return
             self.pads = hub
+            if self.pad_used in getattr(hub, "pads", {}):
+                hub.last_input_key = self.pad_used    # still there: its buttons in the hints
             self.pads_handle = hub.attach_qt(self)
             if ctl["exclusive"]:
                 hub.grab()
@@ -2922,6 +2926,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def pads_close(self):
             hub, self.pads = self.pads, None
             handle, self.pads_handle = self.pads_handle, None
+            if getattr(hub, "last_input_key", None) is not None:
+                self.pad_used = hub.last_input_key    # the next open starts with its symbols
             try:
                 if handle is not None:
                     handle.detach()
@@ -2957,8 +2963,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             except Exception:  # noqa: BLE001 - only decides which hints show
                 return False
 
+        def pad_symbols(self):
+            """Whose button names the hints show: "playstation" (✕ ○ □ △, L1 / R1),
+            "nintendo" or "xbox", from the controller in use (``Gamepads.symbols``)."""
+            symbols = getattr(self.pads, "symbols", None)
+            try:
+                return symbols() if symbols is not None else "xbox"
+            except Exception:  # noqa: BLE001 - only decides which hints show
+                return "xbox"
+
         def on_pads_changed(self):
-            """A controller came or went (or the hub opened): the hints follow."""
+            """A controller came or went, or another one is in use (or the hub opened):
+            the hints follow."""
             if self.gallery is not None and self.mode == "gallery":
                 self.gallery.sync_hints()
 
