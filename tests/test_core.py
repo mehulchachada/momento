@@ -3153,6 +3153,126 @@ class PortalSizeHintTest(unittest.TestCase):
         self.assertIn("bogus", warnings[0])
         self.assertEqual(pl.get_by_name("enc").get_property("target-usage"), 4)
 
+    def _stage_recorder(self, *factories):
+        p = self.pipeline
+        for name in ("vah264enc", "vapostproc") + factories:
+            if not p._have(name):
+                self.skipTest(f"needs {name}")
+        rec = self.recorder(source="test")
+        rec.source_name = "test"
+        return rec, p._Variant("vah264enc", True)
+
+    def test_codec_stages_swap_encoder_parser_and_muxer(self):
+        """h265 / av1: the normal recording with another VA encoder, same bitrate and GOP, no B-frames."""
+        p = self.pipeline
+        rec, v = self._stage_recorder("vah265enc", "h265parse", "vaav1enc", "av1parse", "matroskamux")
+        audio = {"audiotestsrc", "avenc_aac"} if p._have("avenc_aac") else {"audiotestsrc"}
+        cases = {"h265": ("vah265enc", "h265parse", "mpegtsmux", "h265"),
+                 "av1": ("vaav1enc", "av1parse", "matroskamux", "av1")}
+        for stage, (encoder, parser, muxer, codec) in cases.items():
+            with self.subTest(stage=stage):
+                pl, names, warnings = self._stage_pipeline(rec, v, stage)
+                self.assertTrue({"vapostproc", "splitmuxsink", encoder, parser} | audio <= names, names)
+                self.assertFalse({"vah264enc", "h264parse", "fakesink"} & names)
+                self.assertEqual(len(warnings), 1, warnings)
+                self.assertIn(f"{p.STAGE_ENV}={stage}", warnings[0])
+                self.assertEqual(pl.get_by_name("mux").get_property("muxer").get_factory().get_name(), muxer)
+                enc = pl.get_by_name("enc")
+                self.assertEqual(enc.get_property("bitrate"), rec._kbps)
+                self.assertEqual(enc.get_property("key-int-max"), rec.fps)
+                if stage == "h265":
+                    self.assertEqual(enc.get_property("b-frames"), 0)
+                    self.assertIn("MPEG-TS", warnings[0])
+                else:
+                    self.assertEqual(enc.get_property("hierarchical-level"), 1)   # no future references
+                    self.assertIn("matroskamux", warnings[0])
+                # The ring buffer is told the real codec, so sessions of another codec are never joined.
+                rec._pipeline, rec._params = pl, None
+                self.assertEqual(rec._stream_params()["codec"], codec)
+                rec._pipeline, rec._params = None, None
+                # A runtime bitrate change keeps the stage's settings.
+                rec._encoder_settings(enc, encoder, 7000)
+                self.assertEqual(enc.get_property("bitrate"), 7000)
+
+    def test_codec_stage_without_a_va_encoder_records_normally(self):
+        p = self.pipeline
+        rec, v = self._stage_recorder()
+        real_have = p._have
+        with mock.patch.object(p, "_have", lambda name: name != "vah265enc" and real_have(name)):
+            _pl, names, warnings = self._stage_pipeline(rec, v, "h265")
+        self.assertTrue({"vah264enc", "h264parse", "splitmuxsink"} <= names)
+        self.assertNotIn("h265parse", names)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("recording normally", warnings[0])
+
+    def test_lowbitrate_stage(self):
+        p = self.pipeline
+        rec, v = self._stage_recorder()
+        pl, names, warnings = self._stage_pipeline(rec, v, "lowbitrate")
+        self.assertTrue({"vah264enc", "h264parse", "splitmuxsink", "audiotestsrc"} <= names)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(f"{p.STAGE_ENV}=lowbitrate", warnings[0])
+        enc = pl.get_by_name("enc")
+        self.assertEqual(enc.get_property("bitrate"), round(rec._kbps * 0.6))
+        self.assertEqual(enc.get_property("rate-control").value_nick, "cbr")
+        self.assertEqual(enc.get_property("target-usage"), 4)
+        rec._encoder_settings(enc, "vah264enc", 10000)            # 10 Mbps Standard 1080p60 -> 6 Mbps
+        self.assertEqual(enc.get_property("bitrate"), 6000)
+
+    def test_vbr_stage(self):
+        p = self.pipeline
+        rec, v = self._stage_recorder()
+        probe = p.Gst.ElementFactory.make("vah264enc", None)
+        p.Gst.util_set_object_arg(probe, "rate-control", "qvbr")
+        want = "qvbr" if probe.get_property("rate-control").value_nick == "qvbr" else "vbr"
+        pl, names, warnings = self._stage_pipeline(rec, v, "vbr")
+        self.assertTrue({"vah264enc", "h264parse", "splitmuxsink", "audiotestsrc"} <= names)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(f"{p.STAGE_ENV}=vbr", warnings[0])
+        self.assertIn(want.upper(), warnings[0])
+        enc = pl.get_by_name("enc")
+        self.assertEqual(enc.get_property("rate-control").value_nick, want)
+        self.assertEqual(enc.get_property("bitrate"), rec._kbps)                  # the target, as with CBR
+        self.assertEqual(enc.get_property("key-int-max"), rec.fps)
+        self.assertEqual(enc.get_property("b-frames"), 0)
+        self.assertEqual(enc.get_property("target-usage"), 4)
+
+    def test_lowprio_stage(self):
+        p = self.pipeline
+        Gst = p.Gst
+        rec, v = self._stage_recorder()
+        pl, names, warnings = self._stage_pipeline(rec, v, "lowprio")
+        self.assertTrue({"vah264enc", "h264parse", "splitmuxsink", "audiotestsrc"} <= names)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn(f"{p.STAGE_ENV}=lowprio", warnings[0])
+        enc = pl.get_by_name("enc")
+        self.assertEqual(enc.get_property("bitrate"), rec._kbps)
+        self.assertEqual(enc.get_property("rate-control").value_nick, "cbr")
+        # A 2-frame leaky queue right before the encoder.
+        encq = pl.get_by_name("encq")
+        self.assertEqual(encq.get_factory().get_name(), "queue")
+        self.assertEqual(encq.get_property("max-size-buffers"), 2)
+        self.assertEqual(encq.get_property("max-size-time"), 0)
+        self.assertEqual(encq.get_property("leaky").value_nick, "downstream")
+        self.assertIs(encq.get_static_pad("src").get_peer().get_parent_element(), enc)
+        self.assertEqual(p.GLib.ThreadPool.get_max_unused_threads(), 0)
+        # The encq thread (and only it) is lowered when it starts, by a sync bus handler.
+        with mock.patch.object(p.os, "setpriority") as nice, mock.patch.object(p.os, "sched_setscheduler") as sched:
+            for owner, kind in ((pl.get_by_name("size"), Gst.StreamStatusType.ENTER),
+                                (encq, Gst.StreamStatusType.CREATE),
+                                (encq, Gst.StreamStatusType.LEAVE)):
+                pl.get_bus().post(Gst.Message.new_stream_status(owner, kind, owner))
+            nice.assert_not_called()
+            sched.assert_not_called()
+            pl.get_bus().post(Gst.Message.new_stream_status(encq.get_static_pad("src"),
+                                                           Gst.StreamStatusType.ENTER, encq))
+            nice.assert_called_once_with(os.PRIO_PROCESS, threading.get_native_id(), 19)
+            sched.assert_called_once()
+            self.assertEqual(sched.call_args.args[:2], (0, os.SCHED_IDLE))
+        # Other stages have no such queue.
+        pl, _names, _w = self._stage_pipeline(rec, v, None)
+        self.assertIsNone(pl.get_by_name("encq"))
+
     def test_mux_less_stage_reports_recording_and_flushes_at_once(self):
         p = self.pipeline
         if not (p._have("vah264enc") and p._have("vapostproc")):

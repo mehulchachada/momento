@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -64,7 +65,8 @@ Gst.init(None)
 
 ENCODER_ORDER = ["vah264enc", "vah264lpenc", "vaapih264enc", "nvh264enc", "qsvh264enc", "x264enc", "openh264enc"]
 # Encoders that take VAMemory NV12 straight from vapostproc (GPU colour conversion).
-VA_ENCODERS = {"vah264enc", "vah264lpenc"}
+# vah265enc and vaav1enc are only used by the h265/av1 debug stages.
+VA_ENCODERS = {"vah264enc", "vah264lpenc", "vah265enc", "vaav1enc"}
 RETRY_SECONDS = 3
 STOP_TIMEOUT = 3.0
 # A fragment that closes up to this long before a flush request still counts as
@@ -100,9 +102,14 @@ CAPTURE_ONLY_ENV = "MOMENTO_DEBUG_CAPTURE_ONLY"
 #   encode    ... -> the encoder, same settings -> fakesink; nothing is written
 #   noaudio   the normal recording without the audio branch
 #   lowpower  the normal recording with the encoder at its cheapest (LOWPOWER_VA)
+#   h265      the normal recording with vah265enc (CODEC_STAGES) in place of vah264enc
+#   av1       the normal recording with vaav1enc, muxed as Matroska (AV1_MUXER)
+#   lowbitrate  the normal recording at LOWBITRATE_SHARE of the bitrate
+#   vbr       the normal recording with QVBR (or VBR) rate control, same target bitrate
+#   lowprio   the normal recording with the encoder made to yield (LOWPRIO_QUEUE)
 # Anything else records normally (with a warning).
 STAGE_ENV = "MOMENTO_DEBUG_STAGE"
-STAGES = ("capture", "convert", "encode", "noaudio", "lowpower")
+STAGES = ("capture", "convert", "encode", "noaudio", "lowpower", "h265", "av1", "lowbitrate", "vbr", "lowprio")
 
 # lowpower: vah264enc/vah264lpenc settings. On radeonsi (Mesa's va frontend)
 # target-usage is not a 1 (best) .. 7 (fastest) scale: any value but 1 is read as
@@ -114,6 +121,46 @@ STAGES = ("capture", "convert", "encode", "noaudio", "lowpower")
 # One reference frame and no 8x8 transform trim motion search / transform work;
 # rate control stays CBR at the same bitrate, so the written bytes compare.
 LOWPOWER_VA = {"target_usage": 2, "ref_frames": 1, "dct8x8": False}
+
+# h265 / av1: the VA encoder that stands in for vah264enc (vah264lpenc), with the
+# same bitrate, GOP and no B-frames (AV1 has none: no future references instead),
+# and the parser + caps that go where h264parse is.
+CODEC_STAGES = {"h265": "vah265enc", "av1": "vaav1enc"}
+H264_PARSE = "h264parse name=parse config-interval=-1 ! video/x-h264,stream-format=byte-stream"
+PARSERS = {
+    "vah265enc": "h265parse name=parse config-interval=-1 ! video/x-h265,stream-format=byte-stream",
+    "vaav1enc": "av1parse name=parse ! video/x-av1,stream-format=obu-stream,alignment=tu",
+}
+# The ring buffer's "codec" of what an encoder writes (anything else: h264).
+CODECS = {"vah265enc": "h265", "vaav1enc": "av1"}
+# av1 only: mpegtsmux lists video/x-av1, but in GStreamer 1.28 it is a
+# non-standard mapping (refused unless enable-custom-mappings=true) that ffmpeg
+# 8.1 reads as a data stream, so a save would have no video. Matroska carries
+# AV1 properly, and ffmpeg reads byte-joined Matroska segments; the files keep
+# their .ts names (the ring buffer's), ffmpeg goes by content.
+AV1_MUXER = "matroskamux"
+
+# lowbitrate: the share of the normal bitrate (10 Mbps Standard 1080p60 -> 6 Mbps).
+LOWBITRATE_SHARE = 0.6
+
+# vbr: the first rate control the driver offers (radeonsi 26.2 offers QVBR). The
+# "bitrate" stays the target; GStreamer's va encoders make the maximum
+# bitrate * 100 / target-percentage (66 by default).
+VBR_MODES = ("qvbr", "vbr")
+
+# lowprio: make the encoder yield to the game. A lower-priority VA context was
+# looked for first and can't be had: Mesa 26.2.1's VA frontend has no
+# VAConfigAttribContextPriority and doesn't handle VAContextParameterUpdateBuffer,
+# and it creates its context with pipe_create_multimedia_context(), which never
+# passes PIPE_CONTEXT_LOW_PRIORITY (radeonsi's amdgpu winsys would turn that into
+# AMDGPU_CTX_PRIORITY_LOW; no env var sets it); GStreamer's va encoders have no
+# priority property. So the CPU side yields instead: a 2-frame leaky queue right
+# before the encoder, so frames are dropped when it falls behind instead of
+# piling up, and that queue's streaming thread (it runs the encoder and parser)
+# at SCHED_IDLE and nice LOWPRIO_NICE. (radeonsi may still submit the encode job
+# from its own winsys thread, which keeps its priority.)
+LOWPRIO_QUEUE = "queue name=encq max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream"
+LOWPRIO_NICE = 19
 
 FAKESINK = "fakesink name=sink sync=false async=false enable-last-sample=false"
 
@@ -293,6 +340,7 @@ class Recorder:
         self._settle_from = 0.0          # monotonic time of the start / last runtime caps change
         self._restarted = False          # a renegotiation restart was used (once per start)
         self._kbps = 0  # the encoder's bitrate as last set
+        self._stage: str | None = None  # the MOMENTO_DEBUG_STAGE of the pipeline last built
         self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
 
     # --- public API -------------------------------------------------------------
@@ -542,8 +590,11 @@ class Recorder:
             log.warning("could not build pipeline with %s: %s", variant, e)
             self._next_variant_or_fail(str(e))
             return
-        log.info("starting capture: source=%s encoder=%s", self.source_name, variant)
-        self.encoder_name = variant.encoder
+        enc = pipeline.get_by_name("enc")
+        # A debug stage may have swapped the encoder (h265, av1).
+        self.encoder_name = enc.get_factory().get_name() if enc is not None else variant.encoder
+        log.info("starting capture: source=%s encoder=%s", self.source_name,
+                 variant if self.encoder_name == variant.encoder else self.encoder_name)
         self._pipeline = pipeline
         self._session = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
         self._params = None
@@ -675,9 +726,9 @@ class Recorder:
             conv += f"videoconvert ! {scale}videorate ! {sized}"
         return f"{conv} ! {tail}"
 
-    @staticmethod
-    def _encoder_tail(v: _Variant) -> str:
-        return f"{v.encoder} name=enc ! h264parse name=parse config-interval=-1 ! video/x-h264,stream-format=byte-stream ! queue ! mux.video"
+    def _encoder_tail(self, v: _Variant) -> str:
+        first = f"{LOWPRIO_QUEUE} ! " if self._stage == "lowprio" else ""
+        return f"{first}{v.encoder} name=enc ! {PARSERS.get(v.encoder, H264_PARSE)} ! queue ! mux.video"
 
     def _audio_chain(self) -> str | None:
         a = self.cfg["audio"]
@@ -718,7 +769,7 @@ class Recorder:
         # The output size is decided before the chain is described, so the "size"
         # capsfilter starts at its final caps when the source's size is known.
         self._prepare_size()
-        stage = debug_stage()
+        stage = self._stage = debug_stage()
         if stage == "capture":
             return self._build_capture_only(v)
         if stage in ("convert", "encode"):
@@ -731,8 +782,20 @@ class Recorder:
                      if v.encoder in VA_ENCODERS else f"nothing to change on {v.encoder}")
             log.warning("%s=lowpower: debug A/B. Recording normally with the encoder at its cheapest (%s)",
                         STAGE_ENV, cheap)
+        elif stage in CODEC_STAGES:
+            v = self._codec_variant(v, stage)
+        elif stage == "lowbitrate":
+            log.warning("%s=lowbitrate: debug A/B. Recording normally at %d%% of the bitrate "
+                        "(%s at %d kbps instead of %d)", STAGE_ENV, round(LOWBITRATE_SHARE * 100),
+                        v.encoder, round(self._kbps * LOWBITRATE_SHARE), self._kbps)
+        elif stage == "lowprio":
+            log.warning("%s=lowprio: debug A/B. Recording normally with the encoder made to yield: a leaky "
+                        "2-frame queue before %s (frames drop instead of piling up) and its streaming thread at "
+                        "SCHED_IDLE, nice %d (radeonsi's VA encoder has no lower-priority context)",
+                        STAGE_ENV, v.encoder, LOWPRIO_NICE)
+        muxer = AV1_MUXER if v.encoder == "vaav1enc" else "mpegtsmux"
         parts = [
-            "splitmuxsink name=mux muxer=mpegtsmux send-keyframe-requests=true max-files=0 max-size-bytes=0",
+            f"splitmuxsink name=mux muxer={muxer} send-keyframe-requests=true max-files=0 max-size-bytes=0",
             f"{self._video_source()} ! {self._video_chain(v)}",
         ]
         audio = None if stage == "noaudio" else self._audio_chain()
@@ -754,6 +817,18 @@ class Recorder:
         self._encoder_settings(enc, v.encoder, self._kbps)
         if stage == "lowpower" and v.encoder in VA_ENCODERS:
             _set(enc, **LOWPOWER_VA)
+        elif stage == "vbr":
+            mode = _vbr(enc) if v.encoder in VA_ENCODERS else None
+            log.warning("%s=vbr: debug A/B. Recording normally with %s", STAGE_ENV,
+                        f"{mode.upper()} rate control at the same target bitrate ({self._kbps} kbps)"
+                        if mode else f"nothing to change on {v.encoder} (not a VA encoder)")
+        elif stage == "lowprio":
+            # The encoder thread can't be given its priority back (unprivileged,
+            # RLIMIT_NICE 0): let idle threads end rather than be reused by other pools.
+            GLib.ThreadPool.set_max_unused_threads(0)
+            bus = pipeline.get_bus()
+            bus.enable_sync_message_emission()
+            bus.connect("sync-message::stream-status", _idle_encoder_thread)
 
         aenc = pipeline.get_by_name("aenc")
         if aenc is not None:
@@ -763,6 +838,22 @@ class Recorder:
         # fixed offset (audio devices would otherwise provide a drifting clock).
         pipeline.use_clock(Gst.SystemClock.obtain())
         return pipeline
+
+    def _codec_variant(self, v: _Variant, stage: str) -> _Variant:
+        """h265 / av1: ``v`` with CODEC_STAGES' encoder in place of its VA H.264 one (logs the stage)."""
+        encoder = CODEC_STAGES[stage]
+        if v.encoder not in VA_ENCODERS or not _have(encoder):
+            log.warning("%s=%s: debug A/B, but %s can't stand in for %s here: recording normally",
+                        STAGE_ENV, stage, encoder, v.encoder)
+            return v
+        if encoder == "vaav1enc":
+            mux = (f"muxed by {AV1_MUXER}, not mpegtsmux (its AV1 mapping is non-standard and ffmpeg can't "
+                   "read it); segments keep .ts names, ffmpeg saves them by content")
+        else:
+            mux = "in MPEG-TS as usual"
+        log.warning("%s=%s: debug A/B. Recording normally with %s in place of %s (same bitrate %d kbps, "
+                    "GOP %d, no B-frames), %s", STAGE_ENV, stage, encoder, v.encoder, self._kbps, self.fps, mux)
+        return _Variant(encoder, v.zero_copy)
 
     def _setup_source(self, pipeline: Gst.Pipeline, v: _Variant) -> None:
         src = pipeline.get_by_name("src")
@@ -835,8 +926,12 @@ class Recorder:
 
     def _encoder_settings(self, enc: Gst.Element, name: str, kbps: int) -> None:
         gop = self.fps
+        if self._stage == "lowbitrate":
+            kbps = round(kbps * LOWBITRATE_SHARE)
         if name in VA_ENCODERS:
             _set(enc, bitrate=kbps, key_int_max=gop, b_frames=0)
+            if name == "vaav1enc":
+                _set(enc, hierarchical_level=1)  # AV1's "no B-frames": no future references, no reordering
         elif name == "vaapih264enc":
             _set(enc, bitrate=kbps, keyframe_period=gop, max_bframes=0)
         elif name in ("nvh264enc", "qsvh264enc"):
@@ -1013,7 +1108,9 @@ class Recorder:
             width, height = self._locked_size or self.size
         if fps is None:
             fps = self.fps
-        params = {"width": width, "height": height, "fps": fps, "codec": "h264",
+        enc = pipeline.get_by_name("enc") if pipeline is not None else None
+        codec = CODECS.get(enc.get_factory().get_name(), "h264") if enc is not None else "h264"
+        params = {"width": width, "height": height, "fps": fps, "codec": codec,
                   "audio": pipeline is not None and pipeline.get_by_name("aenc") is not None}
         if width is not None:
             self._params = params  # caps are fixed for the life of this pipeline
@@ -1209,6 +1306,35 @@ class Recorder:
             self.on_state(state, message)
         except Exception:  # noqa: BLE001 - a UI callback must not kill capture
             log.exception("on_state callback failed")
+
+
+def _vbr(enc: Gst.Element) -> str:
+    """vbr stage: the first of VBR_MODES the encoder's driver offers; returns the mode set."""
+    for mode in VBR_MODES:
+        Gst.util_set_object_arg(enc, "rate-control", mode)  # a mode the driver lacks is refused
+        if enc.get_property("rate-control").value_nick == mode:
+            break
+    return enc.get_property("rate-control").value_nick
+
+
+def _idle_encoder_thread(_bus: Gst.Bus, msg: Gst.Message) -> None:
+    """lowprio stage, a sync bus handler: runs in the thread that is starting a task.
+
+    When that is the "encq" queue's streaming thread (it runs the encoder), it is
+    put at SCHED_IDLE and nice LOWPRIO_NICE (both only this thread: Linux applies
+    them per thread).
+    """
+    kind, owner = msg.parse_stream_status()
+    if kind != Gst.StreamStatusType.ENTER or owner is None or owner.get_name() != "encq":
+        return
+    tid = threading.get_native_id()
+    try:
+        os.setpriority(os.PRIO_PROCESS, tid, LOWPRIO_NICE)
+        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+    except OSError as e:
+        log.info("lowprio: could not lower the encoder thread %d: %s", tid, e)
+        return
+    log.info("lowprio: encoder thread %d at SCHED_IDLE, nice %d", tid, LOWPRIO_NICE)
 
 
 def _once(cb: Callable[[], None]) -> Callable[[], bool]:
