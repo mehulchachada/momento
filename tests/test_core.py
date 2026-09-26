@@ -137,8 +137,11 @@ def _gst_has(element: str) -> bool:
     return subprocess.run(["gst-inspect-1.0", element], capture_output=True).returncode == 0
 
 
-def make_segments(d: Path) -> list[Path]:
-    """~SEG_COUNT keyframe-aligned 2 s MPEG-TS segments with H.264 + AAC (1 s GOP)."""
+def make_segments(d: Path, width: int = 320, height: int = 240, pattern: str = "ball") -> list[Path]:
+    """~SEG_COUNT keyframe-aligned 2 s MPEG-TS segments with H.264 + AAC (1 s GOP).
+
+    Each call is its own "capture session": timestamps start over.
+    """
     frames = SEG_COUNT * SEG_SECONDS * 30
     audio_bufs = int(SEG_COUNT * SEG_SECONDS * 44100 / 1024)
     encoders = ["x264enc tune=zerolatency key-int-max=30", "vah264enc key-int-max=30",
@@ -148,8 +151,8 @@ def make_segments(d: Path) -> list[Path]:
             if not _gst_has(enc.split()[0]):
                 continue
             cmd = (
-                f"gst-launch-1.0 -q -e videotestsrc num-buffers={frames} pattern=ball "
-                f"! video/x-raw,width=320,height=240,framerate=30/1 ! videoconvert ! {enc} "
+                f"gst-launch-1.0 -q -e videotestsrc num-buffers={frames} pattern={pattern} "
+                f"! video/x-raw,width={width},height={height},framerate=30/1 ! videoconvert ! {enc} "
                 f"! h264parse config-interval=-1 ! queue ! mux.video "
                 f"audiotestsrc num-buffers={audio_bufs} wave=ticks ! audioconvert ! audioresample "
                 f"! avenc_aac ! aacparse ! queue ! mux.audio_0 "
@@ -165,7 +168,7 @@ def make_segments(d: Path) -> list[Path]:
     # Fallback: ffmpeg's own segmenter (keeps continuous timestamps too).
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-         "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=30:duration={SEG_COUNT * SEG_SECONDS}",
+         "-f", "lavfi", "-i", f"testsrc2=size={width}x{height}:rate=30:duration={SEG_COUNT * SEG_SECONDS}",
          "-f", "lavfi", "-i", f"sine=frequency=440:duration={SEG_COUNT * SEG_SECONDS}",
          "-c:v", "libx264", "-g", "30", "-c:a", "aac",
          "-f", "segment", "-segment_time", str(SEG_SECONDS), "-segment_format", "mpegts",

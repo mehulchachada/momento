@@ -60,7 +60,9 @@ class Daemon:
         self.loop = loop
         self.bus = bus
         self.buffer_dir = Path(cfg["buffer"]["dir"])
-        self.ring = RingBuffer(cfg["buffer"]["max_seconds"])
+        # The buffer persists in buffer_dir (index.jsonl): it survives pause/resume,
+        # setting changes, restarts and reboots. Only an explicit quit clears it.
+        self.ring = RingBuffer(cfg["buffer"]["max_seconds"], directory=self.buffer_dir)
         self.state = "starting"
         self.error: str | None = None
         self.recorder = None
@@ -75,8 +77,10 @@ class Daemon:
         from . import ipc
         from .pipeline import Recorder
 
-        _clean_dir(self.buffer_dir)
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
+        # Pick up footage from before a restart/reboot (drops strays and the
+        # unfinished last segment); saveable even if capture cannot start.
+        self.ring.recover()
         self.server = ipc.Server(config.SOCKET_PATH, self.handle)
         self.server.start()
         if self.bus is not None:
@@ -114,8 +118,11 @@ class Daemon:
                 pass
         if self.server is not None:
             self.server.close()
-        _clean_dir(self.buffer_dir)
-        self.loop.quit()
+        if clear_buffer:
+            self.ring.clear()
+            _clean_dir(self.buffer_dir)
+        if self.loop is not None:
+            self.loop.quit()
 
     def _on_state(self, state: str, detail: str | None) -> None:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
@@ -141,10 +148,12 @@ class Daemon:
         elif cmd == "resume":
             self.resume(reply)
         elif cmd == "quit":
-            reply({"ok": True})
+            # The explicit Stop clears the replay buffer unless keep_buffer is set.
+            clear = not msg.get("keep_buffer")
+            reply({"ok": True, "buffer_cleared": clear})
             from gi.repository import GLib
 
-            GLib.timeout_add(100, lambda: (self.stop(), False)[1])
+            GLib.timeout_add(100, lambda: (self.stop(clear_buffer=clear), False)[1])
         else:
             reply({"ok": False, "error": f"unknown command {cmd!r}"})
 
@@ -152,7 +161,7 @@ class Daemon:
         return Path(self.cfg["_path"]) if self.cfg.get("_path") else None
 
     def reload(self, reply) -> None:
-        """Re-read the config file and restart capture with it (the buffer starts over).
+        """Re-read the config file and restart capture with it (buffered footage is kept).
 
         While paused the new settings are loaded but capture stays off until resume.
         """
@@ -274,7 +283,8 @@ class Daemon:
     def _export(self, seconds: int, t_req: float, when: datetime, reply) -> None:
         from . import exporter
 
-        sel = self.ring.select(t_req - seconds, t_req)
+        # The newest `seconds` of footage, across pauses/restarts, ending at the request.
+        sel = self.ring.select_last(seconds, until=t_req)
         if sel is None:
             result = {"ok": False, "error": "nothing recorded yet"}
             notify(self.bus, "Momento: nothing to save", "Nothing has been recorded yet.", "dialog-warning")
@@ -289,6 +299,8 @@ class Daemon:
                     "ok": True, "path": str(path), "seconds": round(sel.duration, 2),
                     "requested": seconds, "partial": sel.duration < seconds - 1.5,
                 }
+                if sel.note:  # e.g. "earlier footage used a different resolution"
+                    result["reason"] = sel.note
             except Exception as e:  # noqa: BLE001
                 log.exception("export failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -307,10 +319,18 @@ class Daemon:
             summary = f"Saved last {got}"
             if result["partial"]:
                 summary += f" (asked for {durations.label(result['requested'])})"
-            notify(self.bus, summary, result["path"], "media-record")
+            body = result["path"] + (f"\n{result['reason'].capitalize()}." if result.get("reason") else "")
+            notify(self.bus, summary, body, "media-record")
         else:
             notify(self.bus, "Momento: save failed", result.get("error", ""), "dialog-error")
         return False
+
+
+def _size(path) -> int:
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
 
 
 def _clean_dir(path: Path) -> None:

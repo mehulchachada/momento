@@ -190,13 +190,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"momento: {r.get('error', args.command + ' failed')}", file=sys.stderr)
             return 1
         if args.command == "pause":
-            print("Paused. What was buffered can still be saved; `momento resume` starts a fresh replay.")
+            print("Paused. What was buffered can still be saved; `momento resume` continues the same replay buffer.")
         else:
-            print("Recording resumed (fresh replay buffer).")
+            print("Recording resumed (earlier footage is kept).")
         return 0
 
     if args.command in ("quit", "stop"):
-        r = _request({"cmd": "quit"}, timeout=10)
+        msg = {"cmd": "quit"}
+        if getattr(args, "keep_buffer", False):
+            msg["keep_buffer"] = True
+        r = _request(msg, timeout=10)
         return 0 if r and r.get("ok") else 1
 
     parser.error(f"unknown command {args.command}")

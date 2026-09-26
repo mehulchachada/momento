@@ -1,8 +1,10 @@
 """GStreamer capture pipeline: screen + audio -> H.264/AAC -> MPEG-TS segments.
 
 Segments are written by splitmuxsink into the buffer directory; every
-fragment open/close is reported to the RingBuffer with wall-clock times, which
-is what lets the exporter cut [now - X, now] out of the buffer later.
+fragment open/close is reported to the RingBuffer with wall-clock times, the
+capture session id and the negotiated stream parameters. The RingBuffer keeps
+an on-disk index of them, so footage from earlier sessions (before a pause,
+setting change or restart) stays saveable.
 
 Everything here runs on the GLib main loop of the caller.
 """
@@ -15,6 +17,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -127,6 +130,8 @@ class Recorder:
         self._start_wall: float | None = None
         self._got_fragment = False
         self._next_index = 0
+        self._session: str | None = None
+        self._params: dict | None = None
         self._open: dict[str, float] = {}
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
 
@@ -138,13 +143,9 @@ class Recorder:
         self._stop_requested = False
         self._cancel_retry()
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
-        self.ring.reset()
-        for f in self.buffer_dir.glob("*.ts"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
-        self._next_index = 0
+        # Keep earlier footage: reconcile the on-disk index, number after it.
+        self.ring.attach(self.buffer_dir)
+        self._next_index = max(self._next_index, self.ring.recover())
         self.source_name = resolve_source(self.cfg["capture"]["source"])
         self._variants = self._plan_variants()
         self._variant_idx = 0
@@ -230,6 +231,10 @@ class Recorder:
         self._error_and_retry(f"screen capture portal: {message}")
 
     def _build_and_play(self) -> None:
+        # A previous pipeline may have died mid-segment (error/retry): drop its
+        # unfinished file and never reuse a number.
+        self.ring.attach(self.buffer_dir)
+        self._next_index = max(self._next_index, self.ring.recover())
         variant = self._variants[self._variant_idx]
         try:
             pipeline = self._build(variant)
@@ -240,6 +245,8 @@ class Recorder:
         log.info("starting capture: source=%s encoder=%s", self.source_name, variant)
         self.encoder_name = variant.encoder
         self._pipeline = pipeline
+        self._session = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        self._params = None
         self._start_wall = None
         self._got_fragment = False
         self._open.clear()
@@ -307,7 +314,7 @@ class Recorder:
 
     @staticmethod
     def _encoder_tail(v: _Variant) -> str:
-        return f"{v.encoder} name=enc ! h264parse config-interval=-1 ! video/x-h264,stream-format=byte-stream ! queue ! mux.video"
+        return f"{v.encoder} name=enc ! h264parse name=parse config-interval=-1 ! video/x-h264,stream-format=byte-stream ! queue ! mux.video"
 
     def _audio_chain(self) -> str | None:
         a = self.cfg["audio"]
@@ -449,7 +456,7 @@ class Recorder:
             if m:
                 self._next_index = int(m.group(1)) + 1
             self._open[location] = wall
-            self.ring.opened(location, wall)
+            self.ring.opened(location, wall, session=self._session, **self._stream_params())
             log.debug("segment opened %s at %.3f", location, wall)
             if not self._got_fragment:
                 self._got_fragment = True
@@ -465,6 +472,37 @@ class Recorder:
                 # holds, which can predate the request. Ask again: the next
                 # keyframe is the one flush() forced, right after the request.
                 self._pipeline.get_by_name("mux").emit("split-now")
+
+    def _stream_params(self) -> dict:
+        """Negotiated video size/frame rate (h264parse src, else encoder sink caps) + audio flag."""
+        if self._params is not None:
+            return self._params
+        width = height = fps = None
+        pipeline = self._pipeline
+        for el_name, pad_name in (("parse", "src"), ("enc", "sink")):
+            el = pipeline.get_by_name(el_name) if pipeline is not None else None
+            pad = el.get_static_pad(pad_name) if el is not None else None
+            caps = pad.get_current_caps() if pad is not None else None
+            if caps is None or caps.get_size() == 0:
+                continue
+            st = caps.get_structure(0)
+            ok_w, w = st.get_int("width")
+            ok_h, h = st.get_int("height")
+            if width is None and ok_w and ok_h and w > 0 and h > 0:
+                width, height = w, h
+            ok_f, num, den = st.get_fraction("framerate")
+            if fps is None and ok_f and num > 0 and den > 0:
+                fps = round(num / den, 3)
+                fps = int(fps) if fps == int(fps) else fps
+        if width is None and self.size:
+            width, height = self.size
+        if fps is None:
+            fps = self.fps
+        params = {"width": width, "height": height, "fps": fps, "codec": "h264",
+                  "audio": pipeline is not None and pipeline.get_by_name("aenc") is not None}
+        if width is not None:
+            self._params = params  # caps are fixed for the life of this pipeline
+        return params
 
     def _on_pipeline_failure(self, message: str) -> None:
         if self._stop_requested:
@@ -566,8 +604,7 @@ class Recorder:
         if self._stop_requested or self._pipeline is not None:
             return False
         log.info("retrying capture")
-        # Footage before the gap is not contiguous with what comes next.
-        self.ring.reset()
+        # Earlier footage stays; the new pipeline starts a new session.
         self._variant_idx = 0
         self._set_state("starting")
         self._begin()
