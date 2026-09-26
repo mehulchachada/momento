@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import config, durations, quality, settings, storage
+from . import config, durations, protocol, quality, settings, storage
 
 log = logging.getLogger(__name__)
 
@@ -355,7 +355,8 @@ class Daemon:
         elif cmd == "stop":
             self.stop_recording(reply)
         elif cmd == "quit":
-            # The explicit Stop clears the replay buffer unless keep_buffer is set.
+            # Shuts the service down (the bar's Stop uses "stop" instead). Clears the
+            # replay buffer unless keep_buffer is set.
             clear = not msg.get("keep_buffer")
             reply({"ok": True, "buffer_cleared": clear})
             from gi.repository import GLib
@@ -454,7 +455,7 @@ class Daemon:
             self.paused = True
             if self.recorder is not None:
                 self.recorder.stop()
-        reply({"ok": True, "state": "paused"})
+        reply({"ok": True, "state": self._idle_state()})
 
     def stop_recording(self, reply) -> None:
         """The bar's Stop: end recording and clear the replay history, but keep the
@@ -472,7 +473,9 @@ class Daemon:
 
     def resume(self, reply) -> None:
         """Start capturing again as a new session; the footage from before the pause stays."""
-        if self.paused or self.state == "no_storage":
+        # Also retry after an error (e.g. the screen-share prompt was dismissed),
+        # so the bar's play button is always a way back to recording.
+        if self.paused or self.state in ("no_storage", "error"):
             self.paused = False
             self.stopped = False
             if self.recorder is not None and not self._start_recorder():
@@ -485,6 +488,7 @@ class Daemon:
         rec = self.recorder
         result = {
             "ok": True,
+            "protocol": protocol.PROTOCOL_VERSION,
             "state": self._idle_state(),
             "recording": False if self.paused else bool(getattr(rec, "recording", False)),
             "buffered": round(self.ring.buffered_seconds(), 2),
@@ -507,6 +511,8 @@ class Daemon:
     def save(self, msg: dict, reply) -> None:
         try:
             seconds = msg.get("seconds")
+            if isinstance(seconds, bool):
+                raise ValueError("seconds must be a number or a duration like \"5m\"")
             seconds = durations.parse(seconds) if isinstance(seconds, str) else int(seconds)
             if not 1 <= seconds <= durations.MAX_SECONDS:
                 raise ValueError(f"duration must be between 1s and {durations.MAX_SECONDS}s")
