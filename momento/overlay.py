@@ -176,7 +176,7 @@ def _storage_level(sto) -> str | None:
     need = float(sto.get("required") or 0)
     if sto.get("ok") is False or (need and room < need):
         return "short"
-    return "ok" if room >= 2 * need else "tight"
+    return "ok" if room >= 2 * need and not sto.get("low") else "tight"
 
 
 STORAGE_COLORS = {"ok": GREEN, "tight": YELLOW, "short": RED}
@@ -195,12 +195,32 @@ def _storage_warning(sto, message=None) -> str:
     return f"Not enough free space. {STORAGE_TAIL}"
 
 
+def _low_storage(st) -> dict | None:
+    """The status's storage block when the daemon says a full span doesn't fit (``low``)
+    and capture still runs; None otherwise (and from a daemon without ``low``)."""
+    sto = st.get("storage") if st and st.get("ok") and isinstance(st.get("storage"), dict) else None
+    if sto is None or not sto.get("low") or st.get("state") == "no_storage":
+        return None
+    return sto
+
+
 def _status_warning(st) -> str | None:
+    low = _low_storage(st)
+    if low is not None:
+        from . import storage
+
+        return storage.low_message(low, st.get("max_seconds") or 3600)
     sto = _storage_short(st)
-    if sto is None:
+    if sto is None or (st.get("state") != "no_storage" and "low" in sto):
         return None
     msg = st.get("error") if st.get("state") == "no_storage" else None
     return _storage_warning(sto, msg)
+
+
+def _status_warning_soft(st) -> bool:
+    """Yellow, not red: low on space for a full span, but a restart would still fit."""
+    low = _low_storage(st)
+    return low is not None and low.get("ok") is not False
 
 
 # --------------------------------------------------------------------------
@@ -1523,6 +1543,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.view = None
             self.stopped = False      # daemon up, recording stopped by the user (Stop)
             self.warn = None          # storage warning shown above the bar
+            self.soft_warn = None     # the warning apply_status shows in yellow (still recording fine)
             self.set_view("off", False)
 
             self.idle = QTimer(self)
@@ -1599,7 +1620,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if self.warn:
                     fm = self.hintbar.fontMetrics()
                     text = fm.elidedText(self.warn, Qt.ElideRight, self.bar_w - 2 - 34)
-                    hint = f"<span style='color:{RED}'>{_esc(text)}</span>"
+                    color = YELLOW if self.warn == self.soft_warn else RED
+                    hint = f"<span style='color:{color}'>{_esc(text)}</span>"
                 elif self.paused and self.running:
                     hint = PAUSED_HINT
             if hint is not None and self.hintbar.text() != hint:
@@ -1794,6 +1816,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.buffered = 0.0 if self.stopped and not self.keep_history else buffered
                 if "storage" in st or st.get("state") == "no_storage":
                     self.warn = _status_warning(st)
+                    self.soft_warn = self.warn if _status_warning_soft(st) else None
                 # else: an older daemon without storage info; keep any warning a reply gave
                 self.storage_hint.set_storage(st.get("storage"))
                 if self.stopped:

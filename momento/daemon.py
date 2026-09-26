@@ -204,6 +204,11 @@ class Daemon:
         self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
         self._storage_notified = False
         self._storage_timer = 0
+        # Low-storage warning (status.storage.low): a full span at the current settings
+        # doesn't fit. Notified once; re-armed when space or the need changes enough.
+        self._low_notified = False
+        self._low_need = None  # (required, history bytes) of the settings when it was sent
+        self._low_disk = "buffer"
         # Resident clip bar ([ui] keep_bar_loaded).
         self.bar_proc = None
         self._bar_started = 0.0
@@ -240,6 +245,7 @@ class Daemon:
             log.info("window mode: waiting for play to pick a window")
         else:
             self._start_recorder()  # our own buffer (if any is left) counts as reclaimable
+        self._check_low()
         from gi.repository import GLib
 
         self._storage_timer = GLib.timeout_add_seconds(STORAGE_CHECK_SECONDS, self._storage_tick)
@@ -671,32 +677,76 @@ class Daemon:
         self._storage_notified = False
 
     def _storage_tick(self) -> bool:
-        """Every STORAGE_CHECK_SECONDS: auto-start once space appears; stop when it runs low."""
+        """Every STORAGE_CHECK_SECONDS: auto-start once space appears; stop when it runs low;
+        warn once when a full span no longer fits (in every state, paused and stopped too)."""
         try:
-            if self.paused or self.recorder is None or self._stopping or self.state == "no_window":
-                return True  # (no_window: nothing is being written, and only the user restarts it)
-            if self.state == "no_storage":
-                # After a low-space stop, only restart once real free space is back:
-                # the kept footage stays on disk, so it can't be counted as room to grow.
-                reclaimable = 0 if self._storage_reason == "low" else None
-                if self.storage_check(reclaimable=reclaimable)["ok"]:
-                    log.info("enough disk space again; starting capture")
-                    self._start_recorder(reclaimable=reclaimable)
-                return True
-            free = storage.free_bytes(self.buffer_dir)
-            if free < storage.LOW_WATER:
-                try:
-                    self.recorder.stop()  # keeps the ring: saves still work
-                except Exception:  # noqa: BLE001
-                    log.exception("recorder stop failed")
-                self._block(f"Disk almost full: {storage.human(free)} free", "low")
+            self._guard_capture()
         except Exception:  # noqa: BLE001 - the timer must keep running
             log.exception("storage check failed")
+        if not self._stopping:
+            self._check_low()
         return True
 
+    def _guard_capture(self) -> None:
+        if self.paused or self.recorder is None or self._stopping or self.state == "no_window":
+            return  # (no_window: nothing is being written, and only the user restarts it)
+        if self.state == "no_storage":
+            # After a low-space stop, only restart once real free space is back:
+            # the kept footage stays on disk, so it can't be counted as room to grow.
+            reclaimable = 0 if self._storage_reason == "low" else None
+            if self.storage_check(reclaimable=reclaimable)["ok"]:
+                log.info("enough disk space again; starting capture")
+                self._start_recorder(reclaimable=reclaimable)
+            return
+        free = storage.free_bytes(self.buffer_dir)
+        if free < storage.LOW_WATER:
+            try:
+                self.recorder.stop()  # keeps the ring: saves still work
+            except Exception:  # noqa: BLE001
+                log.exception("recorder stop failed")
+            self._block(f"Disk almost full: {storage.human(free)} free", "low")
+
+    def _check_low(self) -> None:
+        """Notify once when a full span at the current settings stops fitting.
+
+        Runs at daemon start, after a settings change and on every storage tick.
+        Re-armed once there is REARM_MARGIN more than needed (so free space
+        wobbling around the line doesn't repeat it), or when a settings change
+        moves the need and it fits again. While capture is blocked the
+        "not enough disk space" notification has said it already.
+        """
+        try:
+            chk = self.storage_check()
+        except Exception:  # noqa: BLE001 - a warning must never break a command or the timer
+            log.exception("low-storage check failed")
+            return
+        src = self.source_size   # what the settings ask, at the size really recorded
+        need = (storage.required_bytes(self.cfg, src), storage.history_bytes(self.cfg, src))
+        if not chk["low"]:
+            if self._low_notified and (need != self._low_need or self._clear_of_low(chk)):
+                log.info("storage: room for a full %s again", storage.span(self.ring.max_seconds))
+                self._low_notified = False
+            return
+        if self._low_notified:
+            return
+        self._low_notified, self._low_need, self._low_disk = True, need, chk["disk"]
+        message = storage.low_message(chk, self.ring.max_seconds)
+        log.warning("%s", message)
+        if self.state == "no_storage" and self.storage_error:
+            return  # blocked: _block has notified
+        notify(self.bus, "Momento: low storage", message.removeprefix("Low storage: "), "dialog-warning")
+
+    def _clear_of_low(self, chk: dict) -> bool:
+        """Hysteresis: REARM_MARGIN more than needed on the disk that was short."""
+        if self._low_disk == "output" and chk["disk"] != "output":
+            # the clips disk recovered; this check describes the buffer disk, so look there
+            out = storage.output_dir(self.cfg)
+            need = storage.history_bytes(self.cfg, self.source_size) + storage.RESERVE
+            return out is None or storage.free_bytes(out) >= need + storage.REARM_MARGIN
+        return chk["available"] >= chk["needed"] + storage.REARM_MARGIN
+
     def _storage_status(self) -> dict:
-        chk = self.storage_check()
-        return {k: chk[k] for k in ("ok", "free", "required", "reclaimable", "path")}
+        return dict(self.storage_check())
 
     # --- requests (main loop) ----------------------------------------------------
 
@@ -761,6 +811,7 @@ class Daemon:
         started = False
         if not self.paused:
             started = self._start_recorder(interactive=interactive)
+        self._check_low()
         result = {"ok": True, "restarted": started, "paused": self.paused,
                   "state": self._idle_state(), "storage": self._storage_status()}
         if self.state == "no_storage" and not self.paused:
@@ -823,6 +874,7 @@ class Daemon:
             # the recording.
             if changed:
                 self._apply_live(changed)
+                self._check_low()  # keep_history adds (or drops) a saved hour
             reply({"ok": True, "changed": changed, "restarted": False, "paused": self.paused,
                    "state": self._idle_state(), "storage": self._storage_status()})
             return

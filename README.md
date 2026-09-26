@@ -6,7 +6,7 @@
 
 **Never miss the moment.**
 
-Instant replay and screenshots for Linux gaming.<br>
+Instant replay and screenshots for Linux. Made for games, handy for anything on your screen.<br>
 Momento keeps the last hour of your game in the background. Something great happens? Save it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -21,7 +21,7 @@ Momento keeps the last hour of your game in the background. Something great happ
 
 <p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento bar: Recording Ember Rift, 42:17 recorded, 742 GB free, the lengths 15s to 60m with 5m selected, and pause, stop, screenshot and settings buttons"></p>
 
-Think of it as the PS5's Create button for your Linux PC or handheld. Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or hold **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
+Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or hold **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
 
 ## Features
 
@@ -303,6 +303,10 @@ Clips are in `~/Videos/Momento`, screenshots in `~/Videos/Momento/Images`. The n
 <details><summary><b>Why did recording stop?</b></summary>
 
 In Window mode, recording stops when the game's window closes. It also stops if your disk gets almost full. A notification tells you which. Press play in the bar to start again.
+</details>
+<details><summary><b>Can I use it outside games?</b></summary>
+
+Yes. Momento records whatever is on your screen, or one window you pick: a bug you just hit, the last minutes of a call or a stream. Everything works the same.
 </details>
 <details><summary><b>Can I record only the game?</b></summary>
 
