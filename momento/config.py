@@ -19,6 +19,10 @@ RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/momento-{os.getui
 SOCKET_PATH = RUNTIME_DIR / "momento.sock"
 # The resident clip bar's control socket (toggle / show / hide / quit), see overlay.py.
 OVERLAY_SOCKET = RUNTIME_DIR / "overlay.sock"
+# The resident bar exits with this code to be replaced by a fresh process (after the
+# gallery, whose video libraries would otherwise stay in memory); the daemon restarts it
+# at once, without backoff. 75 is EX_TEMPFAIL.
+BAR_RECYCLE_EXIT = 75
 
 
 def _videos_dir() -> Path:

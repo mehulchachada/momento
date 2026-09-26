@@ -32,6 +32,12 @@ back          right face button (``BTN_EAST``: B / Circle)
 settings      top face button (Y / Triangle)
 pause         left face button (X / Square)
 prev_section  left bumper (``BTN_TL``);  next_section: right bumper
+left_trigger  left trigger (``BTN_TL2`` press, or ``ABS_Z`` past 0.6 of its
+              travel, re-armed below 0.3); right_trigger: ``BTN_TR2``/``ABS_RZ``.
+              One action per pull, no auto-repeat: a pad that reports both the
+              button and the axis (DualShock/DualSense) fires once. The axis
+              only counts when its range is unsigned (0..max) and it rested
+              below 0.3 when the pad was opened (a centred axis is a stick)
 ============  ==========================================================
 
 Raw buttons (``on_button(name, pressed)``; also the names a chord uses):
@@ -131,12 +137,14 @@ ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05
 ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
 
 ACTIONS = ("up", "down", "left", "right", "accept", "back", "settings", "pause",
-           "prev_section", "next_section")
+           "prev_section", "next_section", "left_trigger", "right_trigger")
 DIRECTIONS = ("up", "down", "left", "right")
 
 BUTTON_ACTIONS = {"south": "accept", "east": "back", "north": "settings", "west": "pause",
                   "tl": "prev_section", "tr": "next_section"}
 DPAD_BUTTONS = {"dpad_up": "up", "dpad_down": "down", "dpad_left": "left", "dpad_right": "right"}
+# (action, digital button, analog axis), indexed like _Pad.trig_latched
+TRIGGERS = (("left_trigger", BTN_TL2, ABS_Z), ("right_trigger", BTN_TR2, ABS_RZ))
 
 _COMMON = {
     BTN_SOUTH: "south", BTN_EAST: "east", BTN_TL: "tl", BTN_TR: "tr",
@@ -173,6 +181,8 @@ CHORD_PRESETS = (
 
 DEADZONE = 0.5            # stick deflection (0..1) that counts as a direction
 RELEASE_FRACTION = 0.7    # ...and it lets go below DEADZONE * this (hysteresis)
+TRIGGER_PRESS = 0.6       # analog trigger travel (0..1) that counts as a pull
+TRIGGER_RELEASE = 0.3     # ...re-armed once it is back below this
 REPEAT_DELAY_MS = 350
 REPEAT_INTERVAL_MS = 90
 WATCHDOG_S = 60.0
@@ -411,7 +421,7 @@ class _Pad:
                  "held", "axes", "hat", "dir", "dir_src", "dir_blocked", "repeat_at",
                  "chord_since", "chord_latched", "grabbed", "grab_failed", "grab_wait_since",
                  "busy_since", "grab_poll_at", "abs_hat", "mask", "mod_held", "mod_grabbed",
-                 "mod_since", "mod_check_at", "dropped")
+                 "mod_since", "mod_check_at", "dropped", "trig_axes", "trig_latched")
 
     def __init__(self, dev, key, name="", layout="standard", has_hat=True, axes_info=None,
                  abs_hat=None):
@@ -452,6 +462,8 @@ class _Pad:
         self.mod_since = None
         self.mod_check_at = None           # next re-read of the keys while the modifier is held
         self.dropped = False
+        self.trig_axes: set[int] = set()   # ABS_Z/ABS_RZ that behave as analog triggers
+        self.trig_latched = [False, False] # per TRIGGERS entry: pulled (fired), not yet re-armed
 
     def held_names(self) -> set[str]:
         return {self.names[c] for c in self.held if c in self.names}
@@ -595,6 +607,10 @@ class Gamepads:
             self._apply_mask(pad)
             if not on:
                 pad.repeat_at = None
+            else:
+                # axes were masked out: take their state now so a stale value fires nothing
+                self._resync(pad)
+                self._seed_triggers(pad)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> bool:
@@ -799,6 +815,14 @@ class Gamepads:
         pad.dir_blocked = pad.dir is not None
         pad.chord_latched = self._chord_held(pad)
         pad.mod_held = self._mod_held(pad)
+        pad.trig_axes = {code for _a, _b, code in TRIGGERS
+                         if pad.axes_info.get(code, (-1, 0))[0] >= 0
+                         and pad.axes.get(code, 0.0) < TRIGGER_RELEASE}
+        self._seed_triggers(pad)
+
+    def _seed_triggers(self, pad: _Pad) -> None:
+        """A trigger pulled right now is taken as already fired: it acts once let go."""
+        pad.trig_latched = [self._trigger_pulled(pad, i, True) for i in range(len(TRIGGERS))]
 
     def _mask_for(self, pad: _Pad):
         if self.navigate:
@@ -883,6 +907,8 @@ class Gamepads:
                 self._update_dir(pad, now)
             elif self.navigate and value and name in BUTTON_ACTIONS:
                 self._emit(pad, BUTTON_ACTIONS[name], False, now)
+            elif name in ("tl2", "tr2"):
+                self._update_triggers(pad, now)
             if self.navigate and self.on_button:
                 self._call(self.on_button, name, bool(value))
             self._update_chord(pad, now)
@@ -897,6 +923,7 @@ class Gamepads:
 
     def _after_report(self, pad: _Pad, now: float) -> None:
         self._update_dir(pad, now)
+        self._update_triggers(pad, now)
         self._check_pending_grab(pad, now)
 
     def _resync(self, pad: _Pad, axes: bool = True) -> None:
@@ -989,6 +1016,27 @@ class Gamepads:
             pad.repeat_at = now + self.repeat_delay
         else:
             pad.repeat_at = None
+
+    # ------------------------------------------------------------- triggers
+    def _trigger_pulled(self, pad: _Pad, i: int, latched: bool) -> bool:
+        _action, button, axis = TRIGGERS[i]
+        if button in pad.held:
+            return True
+        if axis not in pad.trig_axes:
+            return False
+        return pad.axes.get(axis, 0.0) >= (TRIGGER_RELEASE if latched else TRIGGER_PRESS)
+
+    def _update_triggers(self, pad: _Pad, now: float) -> None:
+        """One action per pull: the button or the axis latches, both must let go to re-arm."""
+        if not self.navigate:
+            return
+        for i, (action, _button, _axis) in enumerate(TRIGGERS):
+            pulled = self._trigger_pulled(pad, i, pad.trig_latched[i])
+            if pulled == pad.trig_latched[i]:
+                continue
+            pad.trig_latched[i] = pulled
+            if pulled:
+                self._emit(pad, action, False, now)
 
     def _emit(self, pad: _Pad, action: str, repeat: bool, now: float) -> None:
         last = self._last_action.get(action)

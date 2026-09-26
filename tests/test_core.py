@@ -2268,6 +2268,28 @@ class DaemonBarTest(unittest.TestCase):
         self.wait_until(lambda: len(self.timers) == 9)
         self.assertEqual(self.timers[-1][0], 1000)
 
+    def test_recycled_bar_restarts_at_once(self):
+        """A bar that exits with BAR_RECYCLE_EXIT (after the gallery) is replaced right away:
+        no backoff timer, no warning, and it doesn't count towards the crash backoff."""
+        from momento import config, daemon
+
+        self.d.start_bar()
+        with self.assertNoLogs("momento.daemon", "WARNING"):
+            for i in range(3):
+                self.procs[-1].exit(config.BAR_RECYCLE_EXIT)
+                self.wait_until(lambda: len(self.procs) == i + 2)
+                self.assertIs(self.d.bar_proc, self.procs[-1])
+        self.assertEqual(self.timers, [])
+        self.assertEqual(self.d._bar_backoff, daemon.BAR_BACKOFF_MIN)
+        self.procs[-1].exit(1)                      # a real crash still backs off from the start
+        self.wait_until(lambda: len(self.timers) == 1)
+        self.assertEqual(self.timers[0][0], 1000)
+        self.timers[0][1]()
+        self.d.stop()                               # stopping: a recycle exit starts nothing
+        self.procs[-1].exit(config.BAR_RECYCLE_EXIT)
+        time.sleep(0.1)
+        self.assertEqual(len(self.procs), 5)
+
     def test_not_restarted_while_stopping(self):
         self.d.start_bar()
         bar = self.procs[0]
