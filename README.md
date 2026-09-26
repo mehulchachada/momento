@@ -21,7 +21,7 @@ and one key saves what just happened, from the last 15 seconds up to the full ho
 
 ## What is it?
 
-Momento is the Linux version of the PS5's Create button or Xbox's "record that". It records in the background all the time, so you never have to remember to start recording. When something worth keeping happens, press **Super + Shift + G**. A slim bar slides in at the top of the screen. Pick how far back to go, and the clip is saved to your **Videos** folder.
+Momento is the Linux version of the PS5's Create button or Xbox's "record that". It records in the background all the time, so you never have to remember to start recording. When something worth keeping happens, press **Super + Shift + G**. A slim bar slides in at the bottom of the screen. Pick how far back to go, and the clip is saved to your **Videos** folder.
 
 <p align="center"><img src="assets/clip-bar.png" width="716" alt="The Momento clip bar: record dot, 12:34 buffered, and the lengths 15s 30s 1m 3m 5m 15m 30m 60m with 5m selected"></p>
 
@@ -44,7 +44,7 @@ It works with Steam games, emulators, browser games and anything else on your sc
 
 1. **Momento records quietly in the background.** It keeps only the most recent hour and deletes older footage as it goes, so disk use stays fixed.
 2. **Something happens that you want to keep.** Press **Super + Shift + G**.
-3. **The clip bar slides in at the top of the screen** with the eight lengths in a row. Pick one.
+3. **The clip bar slides in at the bottom of the screen** with the eight lengths in a row. Pick one.
 4. **The last X minutes, up to right now, are saved** to `~/Videos/Momento/`.
 
 ```
@@ -156,7 +156,7 @@ momento status
 
 | Do this | Result |
 |---|---|
-| **Super + Shift + G** | The clip bar slides in at the top of the screen |
+| **Super + Shift + G** | The clip bar slides in at the bottom of the screen |
 | Click or tap a length | Saves that much, ending right now |
 | **Left/Right** + **Enter**, or **1** to **8** | Picks a length with the keyboard |
 | **Esc**, or Super + Shift + G again | Closes the bar without saving |

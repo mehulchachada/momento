@@ -1,13 +1,13 @@
-"""The replay picker: a slim bar at the top of the screen.
+"""The replay picker: a slim bar at the bottom of the screen.
 
 Launched by the hotkey (or ``momento overlay``). Running it while another
 bar is open closes the open one instead, so the same key toggles it.
 
 On KDE/wlroots Wayland the bar is a wlr-layer-shell surface on the Overlay
-layer (drawn above fullscreen games), anchored to the top edge and sized to
+layer (drawn above fullscreen games), anchored to the bottom edge and sized to
 the bar itself so clicks elsewhere still reach the game. LayerShellQt has no
 Python bindings, so it is driven through ctypes. Anywhere that fails, the bar
-is a frameless always-on-top tool window at the top centre of the screen.
+is a frameless always-on-top tool window at the bottom centre of the screen.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ LAST_FILE = RUNTIME_DIR / "overlay.last"
 LAYER_SHELL_PLUGIN = "wayland-shell-integration/liblayer-shell.so"
 LAYER_SHELL_LIB = "libLayerShellQtInterface.so.6"
 
-TOP_MARGIN = 20
+BOTTOM_MARGIN = 24
 BAR_HEIGHT = 52
 OPTION_MIN_WIDTH = 56
 IDLE_CLOSE_MS = 10_000
@@ -160,10 +160,10 @@ def _layer_shell_available() -> bool:
 
 
 def _apply_layer_shell(widget) -> bool:
-    """Make ``widget``'s window a top-anchored Overlay-layer surface.
+    """Make ``widget``'s window a bottom-anchored Overlay-layer surface.
 
     Must run after the QWindow exists (winId()) and before the first show().
-    The surface size comes from the widget size; with only the top edge
+    The surface size comes from the widget size; with only the bottom edge
     anchored the compositor centres it horizontally.
     """
     import shiboken6
@@ -190,11 +190,11 @@ def _apply_layer_shell(widget) -> bool:
         fn(this, value)
 
     call("_ZN12LayerShellQt6Window8setLayerENS0_5LayerE", 3)                        # Overlay
-    call("_ZN12LayerShellQt6Window10setAnchorsE6QFlagsINS0_6AnchorEE", 1)           # Top only
+    call("_ZN12LayerShellQt6Window10setAnchorsE6QFlagsINS0_6AnchorEE", 2)           # Bottom only
     call("_ZN12LayerShellQt6Window24setKeyboardInteractivityENS0_21KeyboardInteractivityE", 1)  # Exclusive
     try:
         # setMargins(const QMargins&); QMargins is {int left, top, right, bottom}.
-        margins = (ctypes.c_int * 4)(0, TOP_MARGIN, 0, 0)
+        margins = (ctypes.c_int * 4)(0, 0, 0, BOTTOM_MARGIN)
         call("_ZN12LayerShellQt6Window10setMarginsERK8QMargins", ctypes.addressof(margins), ctypes.c_void_p)
     except AttributeError:
         pass
@@ -555,8 +555,8 @@ def main(argv=None) -> int:
         bar.setAttribute(Qt.WA_TranslucentBackground)
         screen = app.primaryScreen()
         if screen is not None:
-            g = screen.geometry()
-            bar.move(g.x() + (g.width() - bar.width()) // 2, g.y() + TOP_MARGIN)
+            g = screen.availableGeometry()  # stays clear of a bottom taskbar
+            bar.move(g.x() + (g.width() - bar.width()) // 2, g.y() + g.height() - bar.height() - BOTTOM_MARGIN)
     bar.show()
     bar.activateWindow()
     bar.raise_()

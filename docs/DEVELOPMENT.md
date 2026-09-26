@@ -68,7 +68,7 @@ The daemon registers a `save-replay` shortcut (preferred trigger from `hotkey.tr
 
 ### Overlay
 
-A slim PySide6 bar that slides in at the top of the screen with the eight clip lengths in a row. On KDE Plasma and wlroots compositors it's a wlr-layer-shell surface on the Overlay layer, created through **LayerShellQt** (driven with ctypes, because there are no Python bindings), so it appears above fullscreen games. Anywhere that fails (GNOME, X11, ...) it falls back to a frameless, always-on-top window, which can't cover *exclusive* fullscreen games. In Steam Gaming Mode, gamescope only composites its own focus window, so the overlay doesn't show there (roadmap).
+A slim PySide6 bar that slides in at the bottom of the screen with the eight clip lengths in a row. On KDE Plasma and wlroots compositors it's a wlr-layer-shell surface on the Overlay layer, created through **LayerShellQt** (driven with ctypes, because there are no Python bindings), so it appears above fullscreen games. Anywhere that fails (GNOME, X11, ...) it falls back to a frameless, always-on-top window, which can't cover *exclusive* fullscreen games. In Steam Gaming Mode, gamescope only composites its own focus window, so the overlay doesn't show there (roadmap).
 
 ### IPC
 
