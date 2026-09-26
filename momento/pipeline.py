@@ -17,6 +17,12 @@ mid-stream: it is scaled (with black bars) to the configured resolution, and
 with ``native`` the output size is locked to the first size of the session, so
 the encoder output never changes inside a session.
 
+Never upscaled: the captured picture's size (``source_size``, from the first
+caps on the source pad) caps the resolution. A preset taller than the source
+(``quality.fits_source``) records at the source's own size instead, as if
+``native`` were set, with the bitrate of that size (``resolution_effective``
+says which was used). The config is left alone.
+
 Everything here runs on the GLib main loop of the caller.
 """
 
@@ -143,6 +149,10 @@ def resolve_source(requested: str) -> str:
 
 
 class Recorder:
+    # The "test" source's picture size (a stand-in for a 1080p screen); tests set
+    # another one on an instance to stand in for a smaller screen or a window.
+    test_size = (1920, 1080)
+
     def __init__(
         self,
         cfg: dict,
@@ -161,6 +171,12 @@ class Recorder:
         self.buffer_dir = Path(cfg["buffer"]["dir"])
         self.fps = quality.fps(cfg["capture"])
         self.size = quality.resolution(cfg["capture"])
+        self.size_name = str(cfg["capture"].get("resolution", quality.DEFAULT_RESOLUTION)).lower()
+        # The captured picture's size, from the first caps of the current (or last)
+        # session, and the resolution actually recorded (the configured one, or
+        # "native" when that is taller than the source). None until known.
+        self.source_size: tuple[int, int] | None = None
+        self.resolution_effective: str | None = None
         self.target = config.capture_target(cfg["capture"])
         self.window_mode = False  # target "window" on a source that can do it (set by start())
 
@@ -436,8 +452,9 @@ class Recorder:
         src = self.source_name
         if src == "test":
             # Named caps so a test can change the "window" size mid-stream.
+            w, h = self.test_size
             return ("videotestsrc name=src is-live=true pattern=ball ! "
-                    "capsfilter name=testcaps caps=video/x-raw,width=1280,height=720")
+                    f"capsfilter name=testcaps caps=video/x-raw,width={w},height={h}")
         if src == "x11":
             return f"ximagesrc name=src use-damage=false show-pointer={'true' if cap.get('show_cursor') else 'false'}"
         if src == "gamescope":
@@ -550,14 +567,28 @@ class Recorder:
             # segment splitting) keeps going; error out when the stream dies.
             _set(src, keepalive_time=250, on_disconnect="error")
         self._locked_size = None
-        if self._lock_size():
-            src.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._pin_size,
-                                                pipeline.get_by_name("size"))
+        self._source_seen = False
+        self.source_size = self.resolution_effective = None
+        # Sees the source's caps before they travel on: learns its size, and pins
+        # the output size when the preset is taller (or native in window mode).
+        src.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._pin_size,
+                                            (pipeline.get_by_name("size"), pipeline.get_by_name("enc"),
+                                             v.encoder))
 
-        kbps = quality.bitrate_kbps(self.cfg["capture"])
         enc = pipeline.get_by_name("enc")
+        self._encoder_settings(enc, v.encoder, quality.bitrate_kbps(self.cfg["capture"]))
+
+        aenc = pipeline.get_by_name("aenc")
+        if aenc is not None:
+            _set(aenc, bitrate=int(self.cfg["audio"].get("bitrate_kbps", 160)) * 1000)
+
+        # Pin the monotonic system clock so running-time -> wall-clock stays a
+        # fixed offset (audio devices would otherwise provide a drifting clock).
+        pipeline.use_clock(Gst.SystemClock.obtain())
+        return pipeline
+
+    def _encoder_settings(self, enc: Gst.Element, name: str, kbps: int) -> None:
         gop = self.fps
-        name = v.encoder
         if name in VA_ENCODERS:
             _set(enc, bitrate=kbps, key_int_max=gop, b_frames=0)
         elif name == "vaapih264enc":
@@ -569,21 +600,17 @@ class Recorder:
         elif name == "openh264enc":
             _set(enc, bitrate=kbps * 1000, gop_size=gop)
 
-        aenc = pipeline.get_by_name("aenc")
-        if aenc is not None:
-            _set(aenc, bitrate=int(self.cfg["audio"].get("bitrate_kbps", 160)) * 1000)
-
-        # Pin the monotonic system clock so running-time -> wall-clock stays a
-        # fixed offset (audio devices would otherwise provide a drifting clock).
-        pipeline.use_clock(Gst.SystemClock.obtain())
-        return pipeline
-
-    def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, capsfilter: Gst.Element):
-        """Streaming thread: fix the output size to the window's first size.
+    def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, data: tuple):
+        """Streaming thread: learn the source's size from its first caps; pin the output size.
 
         Runs before the caps event travels on, so the first negotiation already
-        carries the pinned size; later window resizes are scaled into it.
+        carries the pinned size; later resizes (a window) are scaled into it. The
+        output is pinned to the source's own size (even numbers) when the preset
+        is taller than the source (never upscale; the encoder gets the bitrate of
+        the size really recorded), and in window mode with ``native`` (the size
+        of a session never changes).
         """
+        capsfilter, enc, encoder = data
         event = info.get_event()
         if event is None or event.type != Gst.EventType.CAPS:
             return Gst.PadProbeReturn.OK
@@ -592,14 +619,26 @@ class Recorder:
         ok_h, h = st.get_int("height")
         if not (ok_w and ok_h and w > 0 and h > 0):
             return Gst.PadProbeReturn.OK
-        if self._locked_size is None:
-            size = (max(2, w - w % 2), max(2, h - h % 2))  # H.264 wants even sizes
-            self._locked_size = size
-            capsfilter.set_property("caps", Gst.Caps.from_string(
-                f"{self._size_caps},width={size[0]},height={size[1]}"))
-            log.info("window capture: output size locked to %dx%d for this session", *size)
-        elif (w, h) != self._locked_size:
-            log.info("window resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
+        if not self._source_seen:
+            self._source_seen = True
+            self.source_size = (w, h)
+            capped = self.size is not None and not quality.fits_source(self.size_name, (w, h))
+            self.resolution_effective = "native" if capped else self.size_name
+            if capped or self._lock_size():
+                size = (max(2, w - w % 2), max(2, h - h % 2))  # H.264 wants even sizes
+                self._locked_size = size
+                capsfilter.set_property("caps", Gst.Caps.from_string(
+                    f"{self._size_caps},width={size[0]},height={size[1]}"))
+            if capped:
+                kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h))
+                if enc is not None:
+                    self._encoder_settings(enc, encoder, kbps)
+                log.info("source is %dx%d, smaller than %s: recording at %dx%d, %d kbps (never upscaled)",
+                         w, h, self.size_name, *self._locked_size, kbps)
+            elif self._locked_size is not None:
+                log.info("window capture: output size locked to %dx%d for this session", *self._locked_size)
+        elif self._locked_size is not None and (w, h) != self._locked_size:
+            log.info("source resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
         return Gst.PadProbeReturn.OK
 
     # --- bus ------------------------------------------------------------------------
@@ -696,8 +735,8 @@ class Recorder:
             if fps is None and ok_f and num > 0 and den > 0:
                 fps = round(num / den, 3)
                 fps = int(fps) if fps == int(fps) else fps
-        if width is None and self.size:
-            width, height = self.size
+        if width is None and (self._locked_size or self.size):
+            width, height = self._locked_size or self.size
         if fps is None:
             fps = self.fps
         params = {"width": width, "height": height, "fps": fps, "codec": "h264",

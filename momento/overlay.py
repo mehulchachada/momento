@@ -20,7 +20,9 @@ in the picture; the daemon's desktop notification confirms it. Settings
 open in the same bar, which grows upward into a row of tabs (General, Video,
 Audio, Controller, Misc) over a few segmented rows; one Apply sends the
 changes of every tab through the daemon's ``configure`` IPC, or straight to
-the config file when the daemon is off.
+the config file when the daemon is off. Resolutions taller than the recorded
+picture (the daemon's ``source_size``, else the largest screen) are shown
+disabled, since Momento would record them at the picture's own size.
 
 Window mode (settings: Record -> Window): while stopped (the picked window
 closed, or nothing picked yet) the bar says "Press play to pick a window";
@@ -110,6 +112,7 @@ RED = "#FF4D2E"
 PILL_REST = "#1C1C1C"    # a resting pill: just enough to see the shape
 PILL_ON = "#F2F2F2"      # hover and keyboard focus
 PILL_SEL = "#CFCFCF"     # the chosen value in a settings row, when not focused
+SEL_OFF = "#3A3A3A"      # a chosen value that can't apply here (a resolution above the screen)
 TAB_SEL = "#262626"      # the open settings tab, when not focused
 ROW_LINE = "#212121"     # the hairline between two settings rows
 ON_TEXT = "#111111"      # text on a white pill
@@ -119,6 +122,10 @@ YELLOW = "#F5C542"
 
 # Builds the bar's controller hub (momento.gamepad.Gamepads); tests swap in fakes.
 PAD_FACTORY = None
+# Returns the largest connected screen's size in physical pixels, (w, h) or None:
+# what caps the Resolution choices until the daemon knows the recorded picture's
+# size. None here means "ask Qt"; tests swap in a fake.
+SCREEN_SIZE = None
 
 PAUSED_HINT = "Paused · saving uses the footage so far"
 # Stopped (by Stop, or the recorded window closed): what play does next.
@@ -746,6 +753,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             data["online"] = True
         return data
 
+    def largest_screen():
+        """The largest connected screen in physical pixels (QScreen size x device pixel ratio)."""
+        if SCREEN_SIZE is not None:
+            return quality.source_size(SCREEN_SIZE())
+        best = None
+        for screen in QGuiApplication.screens():
+            g, dpr = screen.geometry(), screen.devicePixelRatio() or 1.0
+            size = (round(g.width() * dpr), round(g.height() * dpr))
+            if best is None or (size[1], size[0]) > (best[1], best[0]):
+                best = size
+        return quality.source_size(best)
+
     def ui_font(tabular=False):
         f = QFont()
         f.setPixelSize(15)
@@ -1024,6 +1043,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.setProperty("sel", on)
                 self.sync()
 
+        def target(self):
+            if not self.isEnabled() and self.selected():
+                # the saved value, which can't apply here: still shown as chosen, dimmed
+                return "capped", (QColor(SEL_OFF), QColor(MUTED), 0.0)
+            return super().target()
+
         def set_nofit(self, on):
             if self.property("nofit") != on:
                 self.setProperty("nofit", on)
@@ -1150,7 +1175,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class SettingRow(QWidget):
         """A label and a segmented choice. Long lists collapse to ‹ current ›."""
 
-        def __init__(self, bar, key, title, choices, value, avail, cycle=False):
+        def __init__(self, bar, key, title, choices, value, avail, cycle=False, disabled=()):
             super().__init__()
             self.bar, self.key = bar, key
             self.tab = 0              # index of the settings tab the row is on
@@ -1158,6 +1183,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.labels = [c[1] for c in choices]
             self.idx = self.values.index(value) if value in self.values else 0
             self.cycle = cycle
+            # Values shown but not choosable (greyed, skipped by keys and controllers).
+            # The saved value may be one of them: it stays selected, dimmed.
+            self.disabled = set() if cycle else set(disabled)
             self.setFixedHeight(ROW_PITCH)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(16, 0, 12, 0)
@@ -1203,9 +1231,19 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     b = SegButton(text, lbl if text != lbl else None)
                     b.setFixedWidth(fm.horizontalAdvance(text) + pad)
                     b.clicked.connect(lambda _=False, i=i: self.select(i))
+                    b.setEnabled(self.values[i] not in self.disabled)
                     lay.addWidget(b)
                     self.buttons.append(b)
             lay.addStretch(1)
+            # A short note at the row's end (Resolution: "Your screen is 1080p").
+            self.note = QLabel("")
+            self.note.setObjectName("muted")
+            nf = ui_font()
+            nf.setPixelSize(TAB_PX)
+            self.note.setFont(nf)
+            self.note.hide()
+            lay.addWidget(self.note)
+            lay.addSpacing(6)                # ends where the tab row's note does
             self.refresh()
 
         @property
@@ -1242,8 +1280,25 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.icon.kind = icons.get(self.value, ROW_ICONS.get(self.key, "sliders"))
                 self.icon.update()
 
+        def set_note(self, text):
+            self.note.setText(text or "")
+            self.note.setHidden(not text)
+
+        def enabled(self, i):
+            return self.values[i] not in self.disabled
+
         def focus(self):
-            (self.cur if self.cycle else self.buttons[self.idx]).setFocus(Qt.TabFocusReason)
+            if self.cycle:
+                self.cur.setFocus(Qt.TabFocusReason)
+                return
+            i = self.idx
+            if not self.enabled(i):
+                # the saved value can't be chosen here: focus the nearest choice that can
+                near = [j for j in range(len(self.values)) if self.enabled(j)]
+                if not near:
+                    return
+                i = min(near, key=lambda j: (abs(j - self.idx), j))
+            self.buttons[i].setFocus(Qt.TabFocusReason)
 
         def select(self, i):
             changed = i != self.idx
@@ -1255,8 +1310,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def step(self, d):
             n = len(self.values)
-            i = (self.idx + d) % n if self.cycle else max(0, min(n - 1, self.idx + d))
-            self.select(i)
+            if self.cycle:
+                self.select((self.idx + d) % n)
+                return
+            # From the chosen value, even one that can't apply here (focus then sits on
+            # the nearest choice that can, and the step toward it lands there).
+            i = self.idx + d
+            while 0 <= i < n and not self.enabled(i):
+                i += d                                   # disabled choices are skipped
+            if 0 <= i < n:
+                self.select(i)
+            else:
+                self.focus()                             # at the end: stay
 
     class Bar(QWidget):
         def __init__(self):
@@ -2117,8 +2182,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                        for r in choices.get("record", list(RECORD_TEXT))]
                 return SettingRow(self, key, title, rec, value, avail)
             if key == "resolution":
+                source, _window = self.res_source()
+                allowed = quality.allowed_resolutions(source)
                 return SettingRow(self, key, title, [(r, RES_LABELS.get(r, r)) for r in choices["resolution"]],
-                                  value, avail)
+                                  value, avail, disabled=[r for r in choices["resolution"] if r not in allowed])
             if key == "fps":
                 return SettingRow(self, key, title, [(f, f"{f} fps") for f in choices.get("fps", [60])],
                                   vals.get("fps", quality.FPS), avail)
@@ -2228,6 +2295,37 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 micdev.setHidden(mic.value != "on")
             self.show_tab(self.tab_names.index(self.last_tab) if self.last_tab in self.tab_names else 0)
             self.update_fit()
+            self.update_res_note()
+
+        # ---- the resolution cap
+        def res_source(self):
+            """(size, is_window) of the picture that caps Resolution: the daemon's source_size
+            (the screen, or the picked window), else the largest screen; (None, False) unknown."""
+            data = self.sdata or {}
+            source = quality.source_size(data.get("source_size"))
+            if source is not None:
+                return source, (data.get("values") or {}).get("record") == "window"
+            return largest_screen(), False
+
+        def res_note(self, value):
+            """"Your screen is 1080p", or "Recording at 1080p (your screen)" when ``value`` is
+            above it. Empty when nothing is capped (no clutter on a 4K screen)."""
+            row = self.row("resolution")
+            source, window = self.res_source()
+            if source is None or row is None or not row.disabled:
+                return ""
+            if window:
+                size = f"{source[0]}\u00d7{source[1]}"
+            else:
+                size = RES_LABELS.get(quality.height_label(source), quality.height_label(source))
+            if quality.effective_resolution(value, source) != str(value).lower():
+                return f"Recording at {size} ({'window size' if window else 'your screen'})"
+            return f"Window is {size}" if window else f"Your screen is {size}"
+
+        def update_res_note(self):
+            row = self.row("resolution")
+            if row is not None:
+                row.set_note(self.res_note(row.value))
 
         # ---- tabs
         def show_tab(self, i):
@@ -2283,7 +2381,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             cap = {"resolution": v["resolution"], "quality": v["quality"], "fps": v.get("fps", quality.FPS),
                    "bitrate_kbps": self.sdata["values"].get("bitrate", 0)}
             secs = int(self.sdata.get("max_seconds") or 3600)
-            gb = quality.buffer_gb(quality.bitrate_kbps(cap), secs)
+            # what is really recorded: a resolution above the picture costs the picture's size
+            gb = quality.buffer_gb(quality.bitrate_kbps(cap, self.res_source()[0]), secs)
             return f"{cap['fps']} fps · ~{gb:.1f} GB for {secs // 60} min"
 
         # storage: the settings reply carries free space and what each combination needs
@@ -2326,7 +2425,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if row is None or row.cycle:
                     continue
                 for val, b in zip(row.values, row.buttons):
-                    b.set_nofit(not self.fits({**v, key: val}))
+                    b.set_nofit(b.isEnabled() and not self.fits({**v, key: val}))
             ok = self.can_apply(v)
             if self.apply_btn.isEnabled() != ok:
                 had = self.apply_btn.hasFocus()
@@ -2345,6 +2444,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.foot.setText(f"<span style='color:{MUTED}'>{_esc(self.estimate())}</span>")
 
         def on_row_changed(self, row):
+            if row.key == "resolution":
+                self.update_res_note()
             if row.key == "mic" and self.row("mic_device") is not None:
                 # the panel keeps its height (sized for the tallest tab): nothing moves
                 self.row("mic_device").setHidden(row.value != "on")

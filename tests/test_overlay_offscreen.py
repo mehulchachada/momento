@@ -32,6 +32,9 @@ from momento import config, gamepad, ipc, overlay, quality, settings  # noqa: E4
 
 SHOT_DIR = Path(os.environ.get("MOMENTO_SHOT_DIR", "/tmp/claude-1000"))
 REAL_REQUEST = ipc.request  # the resident bar's control socket is always reached for real
+# The offscreen screen is 800x600, which would cap every resolution: no screen size
+# unless a test sets one (the Resolution cap tests do).
+overlay.SCREEN_SIZE = lambda: None
 
 STATUS = {"ok": True, "state": "recording", "recording": True, "buffered": 754.0,
           "max_seconds": 3600, "source": "portal", "encoder": "vah264enc",
@@ -58,7 +61,7 @@ NEW_VALUES = {"keep_history": "off", "hour_warning": 10, "instant_bar": "on"}
 NEW_CHOICES = {"keep_history": ["off", "on"], "hour_warning": [10, 5, 3], "instant_bar": ["on", "off"]}
 
 
-def settings_reply(devices=DEVICES, free=None, **values):
+def settings_reply(devices=DEVICES, free=None, source=None, **values):
     cfg = config.load(Path("/nonexistent/momento-test.toml"))
     raw = {}
     for k, v in values.items():
@@ -67,7 +70,7 @@ def settings_reply(devices=DEVICES, free=None, **values):
                 cfg.setdefault(section, {})[key] = val
         except ValueError:
             raw[k] = v                   # a key this settings module does not know yet
-    data = settings.describe(cfg, devices=devices)
+    data = settings.describe(cfg, devices=devices, source=source)
     for k, v in NEW_VALUES.items():
         data["values"].setdefault(k, v)
         data["choices"].setdefault(k, list(NEW_CHOICES[k]))
@@ -102,7 +105,7 @@ SHORT_HISTORY = {**SHORT_SPAN, "ok": True, "free": 11_300_000_000, "needed": 15_
 
 class FakeDaemon:
     def __init__(self, running=True, fail=False, devices=DEVICES, paused=False, extra=None, free=None,
-                 resume_reply=None, values=None, configure_reply=None, storage=OK_STORAGE):
+                 resume_reply=None, values=None, configure_reply=None, storage=OK_STORAGE, source=None):
         self.running, self.fail, self.devices, self.paused = running, fail, devices, paused
         self.extra = dict(extra or {})   # merged into every status reply
         self.free = free                 # settings: free bytes for the storage check
@@ -110,6 +113,7 @@ class FakeDaemon:
         self.values = dict(values or {})  # settings: current config values
         self.configure_reply = configure_reply
         self.storage = storage           # status: the storage block (None = an older daemon)
+        self.source = source             # settings: the recorded picture's size (None: not known yet)
         self.stopped = False
         self.saves = []
         self.save_msgs = []
@@ -134,7 +138,7 @@ class FakeDaemon:
             st.update(self.extra)
             return st
         if msg["cmd"] == "settings":
-            return settings_reply(self.devices, free=self.free, **self.values)
+            return settings_reply(self.devices, free=self.free, source=self.source, **self.values)
         if msg["cmd"] == "configure":
             self.configures.append(msg["changes"])
             time.sleep(0.3)
@@ -861,6 +865,130 @@ class OverlayOffscreen(unittest.TestCase):
         self.wait_for(lambda: bar.mode == "clip", timeout=overlay.APPLY_CLOSE_MS / 1000 + 2)
         self.assertEqual(bar.view, "lowstorage")
         self.assertIn("needs 10.8 GB", bar.hintbar.text())
+
+    # ---------------------------------------------------------------- resolution cap
+
+    def screen(self, size):
+        self.addCleanup(setattr, overlay, "SCREEN_SIZE", overlay.SCREEN_SIZE)
+        overlay.SCREEN_SIZE = lambda: size
+
+    def open_video(self, daemon):
+        bar = self.make(daemon)
+        self.open_settings(bar)
+        bar.switch_tab(bar.tab_names.index("Video"), "row")
+        pump(self.app, 0.05)
+        return bar, bar.row("resolution")
+
+    def test_resolution_capped_by_the_screen(self):
+        self.screen((1920, 1080))                      # nothing recorded yet: the bar's own screen
+        daemon = FakeDaemon(True)
+        bar, res = self.open_video(daemon)
+        self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "1440p", "4K", "Native"])
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, True, False, False, True])
+        self.assertEqual([b.visual_state for b in res.buttons][2:4], ["disabled", "disabled"])
+        self.assertEqual(res.disabled, {"1440p", "2160p"})
+        self.assertFalse(res.note.isHidden())
+        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.assertTrue(res.buttons[1].hasFocus())     # 1080p, the saved value
+        self.assertIn("6.8 GB for 60 min", bar.foot.text())
+        pump(self.app, 0.05)
+        self.shot(bar, "resolution-1080p-screen", "rescap")
+        self.key(Qt.Key_Right)                          # 1440p and 4K are skipped
+        self.assertEqual(res.value, "native")
+        self.assertTrue(res.buttons[4].hasFocus())
+        self.key(Qt.Key_Right)                          # the end: stays
+        self.assertEqual(res.value, "native")
+        self.key(Qt.Key_Left)
+        self.assertEqual(res.value, "1080p")
+        self.key(Qt.Key_Left)
+        self.key(Qt.Key_Left)                           # the start: stays
+        self.assertEqual(res.value, "720p")
+        QTest.mouseClick(res.buttons[3], Qt.LeftButton)  # a click on 4K does nothing
+        self.assertEqual(res.value, "720p")
+        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.assertEqual(bar.changes(), {"resolution": "720p"})
+        self.assertFalse(any(b.property("nofit") for b in res.buttons))
+
+    def test_resolution_on_a_4k_screen(self):
+        self.screen((3840, 2160))
+        bar, res = self.open_video(FakeDaemon(True))
+        self.assertTrue(all(b.isEnabled() for b in res.buttons))
+        self.assertTrue(res.note.isHidden())            # nothing capped: no note
+        pump(self.app, 0.05)
+        self.shot(bar, "resolution-4k-screen", "rescap")
+        self.key(Qt.Key_Right)
+        self.key(Qt.Key_Right)
+        self.assertEqual(res.value, "2160p")
+        self.assertIn("20.2 GB for 60 min", bar.foot.text())
+
+    def test_daemon_source_wins_over_the_screen(self):
+        self.screen((1920, 1080))
+        _bar, res = self.open_video(FakeDaemon(True, source=[3840, 2160]))
+        self.assertTrue(all(b.isEnabled() for b in res.buttons))
+        self.screen((3840, 2160))
+        _bar, res = self.open_video(FakeDaemon(True, source=[2560, 1440], values={"record": "screen"}))
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, True, True, False, True])
+        self.assertEqual(res.note.text(), "Your screen is 1440p")
+
+    def test_resolution_saved_above_the_screen(self):
+        # an older config (or another monitor): 4K saved, a 1080p screen recorded
+        daemon = FakeDaemon(True, values={"resolution": "2160p", "record": "screen"}, source=[1920, 1080])
+        bar, res = self.open_video(daemon)
+        four_k = res.buttons[3]
+        self.assertEqual(res.value, "2160p")
+        self.assertFalse(four_k.isEnabled())
+        self.assertEqual(four_k.visual_state, "capped")  # still shown as chosen, dimmed
+        self.assertEqual(res.note.text(), "Recording at 1080p (your screen)")
+        self.assertTrue(res.buttons[4].hasFocus())      # the nearest choice that applies: Native
+        self.assertIn("6.8 GB for 60 min", bar.foot.text())   # what is really recorded, not 4K's 20 GB
+        self.assertEqual(bar.changes(), {})
+        pump(self.app, 0.05)
+        self.shot(bar, "resolution-4k-saved-1080p-screen", "rescap")
+        self.key(Qt.Key_Left)                           # from Native, past 4K and 1440p
+        self.assertEqual(res.value, "1080p")
+        self.assertEqual(four_k.visual_state, "disabled")
+        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.key(Qt.Key_Down)
+        self.key(Qt.Key_Up)                              # back on the row: the chosen value
+        self.assertTrue(res.buttons[1].hasFocus())
+        self.key(Qt.Key_Return)
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertEqual(daemon.configures, [{"resolution": "1080p"}])
+
+    def test_resolution_saved_above_the_screen_left_alone(self):
+        daemon = FakeDaemon(True, values={"resolution": "1440p", "record": "screen"}, source=[1920, 1080])
+        bar, res = self.open_video(daemon)
+        self.assertTrue(res.buttons[1].hasFocus())      # the nearest choice: 1080p (not chosen)
+        self.assertEqual(res.value, "1440p")
+        self.key(Qt.Key_Down)                           # other rows: the saved 1440p stays
+        self.key(Qt.Key_Right)                          # 120 fps
+        self.assertEqual(bar.changes(), {"fps": 120})
+        self.key(Qt.Key_Up)
+        self.key(Qt.Key_Right)                          # from the saved 1440p, past 4K: Native
+        self.assertEqual(res.value, "native")
+        self.assertEqual(res.note.text(), "Your screen is 1080p")
+
+    def test_resolution_capped_by_the_window(self):
+        daemon = FakeDaemon(True, values={"record": "window"}, source=[1280, 720], extra={"target": "window"})
+        bar, res = self.open_video(daemon)
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, False, False, True])
+        self.assertEqual(res.note.text(), "Recording at 1280\u00d7720 (window size)")   # 1080p saved
+        self.assertTrue(res.buttons[0].hasFocus())      # the nearest choice: 720p
+        self.key(Qt.Key_Left)                           # the step toward it chooses it
+        self.assertEqual(res.value, "720p")
+        self.assertEqual(res.note.text(), "Window is 1280\u00d7720")
+        pump(self.app, 0.05)
+        self.shot(bar, "resolution-720p-window", "rescap")
+
+    def test_resolution_note_fits_the_row(self):
+        daemon = FakeDaemon(True, values={"resolution": "2160p", "record": "window"}, source=[3440, 1439])
+        bar, res = self.open_video(daemon)
+        self.assertEqual(res.note.text(), "Recording at 3440\u00d71439 (window size)")
+        pump(self.app, 0.05)
+        right = res.note.mapTo(bar, res.note.rect().topRight()).x()
+        self.assertLessEqual(right, bar.width())
+        self.assertGreaterEqual(res.note.x(), res.buttons[-1].x() + res.buttons[-1].width())
+        self.assertEqual(res.note.width(), res.note.sizeHint().width())   # not squeezed
 
     # ---------------------------------------------------------------- pills / focus / hints
 
@@ -2045,6 +2173,23 @@ class ControllerBar(unittest.TestCase):
         self.assertIn("controller updated", bar.foot.text())
         self.shot(bar, "settings-controller-saved", "v6")
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
+
+    def test_settings_resolution_skips_what_the_screen_cannot_show(self):
+        daemon = FakeDaemon(True, source=[1920, 1080], values={"record": "screen"})
+        bar = self.open(daemon)
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+        pump(self.app, 0.05)
+        self.press(self.RB)                            # Video
+        res = bar.row("resolution")
+        self.assertTrue(res.buttons[1].hasFocus())     # 1080p
+        self.right()                                   # 1440p and 4K are skipped
+        self.assertEqual(res.value, "native")
+        self.assertTrue(res.buttons[4].hasFocus())
+        self.left()
+        self.left()
+        self.assertEqual(res.value, "720p")
+        self.assertEqual(res.note.text(), "Your screen is 1080p")
 
     def test_settings_back(self):
         daemon = FakeDaemon(True, values={"record": "window"}, extra={"target": "window"})

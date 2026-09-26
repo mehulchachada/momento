@@ -123,7 +123,7 @@ def check(tmp_path: Path) -> dict:
         size = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
              "-of", "csv=p=0", str(closed[1].path)], capture_output=True, text=True).stdout.split()[0].strip(",")
-        assert size == "1920,1080", size  # 720p test pattern scaled to the 1080p preset
+        assert size == "1920,1080", size  # the 1080p test "screen" at the 1080p preset
     return r
 
 
@@ -153,6 +153,7 @@ def check_window(tmp_path: Path) -> dict:
     states = []
     loop = GLib.MainLoop()
     rec = Recorder(cfg, ring, lambda s, m: states.append((s, m)))
+    rec.test_size = (1280, 720)  # a window smaller than the screen
 
     def resize():
         caps = Gst.Caps.from_string("video/x-raw,width=1001,height=701")
@@ -197,6 +198,98 @@ def check_window(tmp_path: Path) -> dict:
 
 def test_window_mode_live(tmp_path):
     check_window(tmp_path)
+
+
+CAP_SECONDS = 3
+
+
+def frame_sizes(path: Path) -> set:
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                          "frame=width,height", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True).stdout.split()
+    return set(out)
+
+
+def record_capped(tmp_path: Path, name: str, source: tuple, copy_path=False, **capture) -> dict:
+    """Record CAP_SECONDS from a test source of size ``source``; what came out.
+
+    ``copy_path``: the VA encoder fed through videoconvert instead of zero-copy vapostproc.
+    """
+    from momento import config, quality
+    from momento.pipeline import Recorder, _Variant
+    from momento.ringbuffer import RingBuffer
+
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg["capture"].update(source="test", bitrate_kbps=0, quality="high", **capture)
+    cfg["audio"]["desktop"] = False
+    cfg["buffer"].update(segment_seconds=1, dir=str(tmp_path / name))
+    ring = RingBuffer(max_seconds=3600)
+    states = []
+    loop = GLib.MainLoop()
+    rec = Recorder(cfg, ring, lambda s, m: states.append((s, m)))
+    rec.test_size = source
+    if copy_path:
+        plan = rec._plan_variants
+        rec._plan_variants = lambda: [_Variant(v.encoder, False) for v in plan() if v.zero_copy][:1] or plan()
+    result = {}
+
+    def look():
+        enc = rec._pipeline.get_by_name("enc")
+        rate = enc.get_property("bitrate")
+        result["kbps"] = rate // 1000 if rec.encoder_name == "openh264enc" else rate
+        loop.quit()
+        return False
+
+    GLib.timeout_add(CAP_SECONDS * 1000, look)
+    GLib.timeout_add((CAP_SECONDS + 10) * 1000, lambda: (loop.quit(), False)[1])
+    rec.start(interactive=True)
+    loop.run()
+    result.update(states=[s for s, _ in states], source=rec.source_size, effective=rec.resolution_effective,
+                  locked=rec._locked_size, want_kbps=quality.bitrate_kbps(cfg["capture"], source))
+    rec.stop()
+    with ring._lock:
+        result["segments"] = [s for s in ring._segments if s.closed]
+    assert result["states"][:2] == ["starting", "recording"], result["states"]
+    assert result["segments"], result
+    return result
+
+
+def check_capped(tmp_path: Path) -> list:
+    """A preset taller than the source records at the source's own size (never upscaled),
+    with the bitrate of that size; a preset that fits is left as it is."""
+    out = []
+    # A 16:10 1920x1200 screen set to 4K: recorded at 1920x1200 with the 1440p class bitrate.
+    r = record_capped(tmp_path, "cap4k", (1920, 1200), resolution="2160p", target="screen")
+    assert (r["source"], r["effective"], r["locked"]) == ((1920, 1200), "native", (1920, 1200)), r
+    assert r["want_kbps"] == 24_000 and r["kbps"] == 24_000, r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1920, 1200)}, r["segments"]
+    out.append(r)
+    # A 1271x713 window at 1080p: its own size, rounded down to even numbers, 720p class bitrate.
+    r = record_capped(tmp_path, "capwin", (1271, 713), resolution="1080p", target="window")
+    assert (r["source"], r["effective"], r["locked"]) == ((1271, 713), "native", (1270, 712)), r
+    assert r["kbps"] == r["want_kbps"] == 10_000, r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1270, 712)}, r["segments"]
+    out.append(r)
+    # The same through videoconvert (the VA encoder's copy path).
+    r = record_capped(tmp_path, "capcopy", (1271, 713), copy_path=True, resolution="1080p", target="window")
+    assert (r["effective"], r["locked"], r["kbps"]) == ("native", (1270, 712), 10_000), r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1270, 712)}, r["segments"]
+    out.append(r)
+    # 720p on a 1920x1200 screen fits: scaled down to the preset, bitrate unchanged.
+    r = record_capped(tmp_path, "fits", (1920, 1200), resolution="720p", target="screen")
+    assert (r["source"], r["effective"], r["locked"]) == ((1920, 1200), "720p", None), r
+    assert r["kbps"] == r["want_kbps"] == 10_000, r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1280, 720)}, r["segments"]
+    out.append(r)
+    if shutil.which("ffprobe"):
+        for r, want in zip(out, ("1920,1200", "1270,712", "1270,712", "1280,720")):
+            seg = r["segments"][-1]
+            assert frame_sizes(seg.path) == {want}, (seg, frame_sizes(seg.path))
+    return out
+
+
+def test_resolution_capped_live(tmp_path):
+    check_capped(tmp_path)
 
 
 SHOT_AFTER = 2.0
@@ -305,6 +398,8 @@ if __name__ == "__main__":
         w = check_window(Path(d))
         print(f"window mode: states={[s for s, _ in w['states']]} locked={w['locked']} "
               f"segments={len(w['segments'])} ({sum(s.end - s.start for s in w['segments']):.2f}s kept)")
+        for c in check_capped(Path(d)):
+            print(f"capped: source {c['source']} -> {c['effective']} {c['locked'] or ''} at {c['kbps']} kbps")
         sh = check_screenshot(Path(d))
         print(f"screenshot: {sh['memory']} frame {sh['wait'] * 1000:.0f} ms after the request, "
               f"PNG {sh['bytes'] // 1000} kB in {sh['encode'] * 1000:.0f} ms -> {sh['path'].name}")

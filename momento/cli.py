@@ -101,6 +101,44 @@ def low_storage_line(r: dict) -> str | None:
     return storage.low_message(sto, r.get("max_seconds") or 3600)
 
 
+def picture_size(source, target: str | None) -> str | None:
+    """The recorded picture in words: "1080p" for a screen, "1280×720" for a window."""
+    src = quality.source_size(source)
+    if src is None:
+        return None
+    return f"{src[0]}\u00d7{src[1]}" if target == "window" else quality.height_label(src)
+
+
+def capped(resolution, source, target: str | None) -> str | None:
+    """When ``resolution`` is taller than the recorded picture: what is recorded instead
+    ("1080p (your screen's size)"); None when the setting is recorded as it is."""
+    if quality.effective_resolution(str(resolution), quality.source_size(source)) != "native" \
+            or str(resolution).lower() == "native":
+        return None
+    whose = "the window's size" if target == "window" else "your screen's size"
+    return f"{picture_size(source, target)} ({whose})"
+
+
+def capped_note(resolution, source, target: str | None) -> str | None:
+    """One line for `momento set resolution`: the setting is above the picture, so what happens."""
+    if capped(resolution, source, target) is None:
+        return None
+    size = picture_size(source, target)
+    what = f"The window is {size}" if target == "window" else f"Your screen is {size}"
+    return f"{what}, so this records at {size}; a bigger size would only waste space."
+
+
+def _status_quietly() -> dict | None:
+    """The daemon's status, or None (not running, or anything else): for extra detail only."""
+    from . import ipc
+
+    try:
+        r = ipc.request({"cmd": "status"}, timeout=5)
+    except Exception:  # noqa: BLE001 - optional detail, never an error
+        return None
+    return r if isinstance(r, dict) and r.get("ok") else None
+
+
 def controller_line(cfg: dict) -> str:
     """"hold View + Menu (0.3 s) to open or close the bar" / "press View + Menu ..." / "off"."""
     from . import gamepad
@@ -199,11 +237,16 @@ def main(argv: list[str] | None = None) -> int:
         record = settings.RECORD_LABELS.get(r.get("target") or "screen", r.get("target") or "-").lower()
         if r.get("target_name"):
             record += f": {r['target_name']}"
+        res = str(r.get("resolution", "?"))
+        instead = capped(res, r.get("source_size"), r.get("target")) \
+            if r.get("resolution_effective") == "native" else None
+        if instead:
+            res += f", recording at {instead},"
         rows = [
             ("state", state),
             ("buffered", f"{durations.clock(r.get('buffered', 0))} / {durations.clock(r.get('max_seconds', 0))}"),
             ("record", record),
-            ("video", f"{r.get('resolution', '?')} {r.get('fps', 60)} fps, {r.get('quality', '?')} "
+            ("video", f"{res} {r.get('fps', 60)} fps, {r.get('quality', '?')} "
                       f"({r.get('bitrate_kbps', 0) / 1000:g} Mbps)"),
             ("source", r.get("source") or "-"),
             ("encoder", r.get("encoder") or "-"),
@@ -221,13 +264,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "settings":
+        # A running daemon knows the recorded picture's size, which caps the resolution.
+        st = _status_quietly() or {}
+        source = quality.source_size(st.get("source_size"))
         try:
             cfg = config.load(args.config)
-            kbps = quality.bitrate_kbps(cfg["capture"])
+            kbps = quality.bitrate_kbps(cfg["capture"], source)
         except (OSError, ValueError) as e:
             print(f"momento: bad config {args.config}: {e}", file=sys.stderr)
             return 1
         cur = settings.current(cfg)
+        resolution = cur["resolution"]
+        instead = capped(resolution, source, cur["record"])
+        if instead:
+            resolution += f", records at {instead}"
         auto = "" if cur["bitrate"] else " (automatic)"
         devices = settings.list_audio_devices()
         labels = {d["name"]: d["label"] for d in devices["outputs"] + devices["inputs"]}
@@ -242,12 +292,12 @@ def main(argv: list[str] | None = None) -> int:
             record += " (only the window you pick, when you press play; the bar and notifications stay out)"
         rows = [
             ("record", record),
-            ("resolution", cur["resolution"]),
+            ("resolution", resolution),
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
-            ("disk use", f"about {storage.human(storage.buffer_bytes(cfg))} for the full buffer"),
-            ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg))))),
+            ("disk use", f"about {storage.human(storage.buffer_bytes(cfg, source))} for the full buffer"),
+            ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source))),
             ("sound", sound),
             ("mic", mic),
             ("controller", controller_line(cfg)),
@@ -308,6 +358,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("Recording restarted with the new setting.")
             else:
                 print("Saved (nothing changed).")
+            if "resolution" in clean:
+                # Above the recorded picture: saved as asked, but it records at the picture's size.
+                st = _status_quietly() or {}
+                note = capped_note(clean["resolution"], st.get("source_size"), st.get("target"))
+                if note:
+                    print(note)
             return 0
         # Daemon off: write the file; warn (non-fatal) if the new settings won't fit.
         try:

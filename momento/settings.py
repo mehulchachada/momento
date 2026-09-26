@@ -343,13 +343,24 @@ def preview(cfg: dict, changes: dict) -> dict:
     return out
 
 
-def describe(cfg: dict, devices: dict | None = None) -> dict:
-    """Everything a settings UI needs: current values, choices, tabs, audio devices."""
+def describe(cfg: dict, devices: dict | None = None, source=None) -> dict:
+    """Everything a settings UI needs: current values, choices, tabs, audio devices.
+
+    ``source`` is the size of the recorded picture when the daemon knows it (the
+    screen, or the picked window): resolutions taller than it are not worth
+    offering (``resolution_allowed``) and would record at its size
+    (``resolution_effective``). Unknown: every resolution is allowed.
+    """
     from . import gamepad
 
+    values = current(cfg)
+    source = quality.source_size(source)
     return {
         "ok": True,
-        "values": current(cfg),
+        "values": values,
+        "source_size": list(source) if source else None,
+        "resolution_allowed": quality.allowed_resolutions(source),
+        "resolution_effective": quality.effective_resolution(values["resolution"], source),
         "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
                     "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS],

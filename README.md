@@ -188,6 +188,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 <img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p to Native, Frame rate 60 or 120 fps, Quality Standard, High or Ultra">
 
 - **Resolution**: 720p, 1080p (default), 1440p, 4K, or Native (your screen's own).
+  Sizes bigger than your screen (or the window you record) aren't offered: they would only take more space, not look sharper.
 - **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
 - **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
 - The line at the bottom shows how much space a full hour will take. See [Video quality](#video-quality) for picks.
