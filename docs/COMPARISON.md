@@ -6,7 +6,7 @@ This page compares Momento with the three instant-replay options a Linux gamer i
 2. **Steam Game Recording** (built into the Steam client since November 2024, including Steam Deck and Linux)
 3. **GPU Screen Recorder** (`gpu-screen-recorder` + `gsr-ui`), the closest Linux-native competitor
 
-It tries to be fair. Where Momento is worse, this page says so. Figures for the other products come from their own documentation, source code or third-party reports, and are labelled **reported**. Only Momento's figures were measured by us (see [Methodology](#methodology)). Nothing here is a head-to-head benchmark: we did not install or run OBS, Steam recording or GPU Screen Recorder for this comparison.
+It sticks to facts. Where another tool does something Momento doesn't yet, this page says so. Figures for the other products come from their own documentation, source code or third-party reports, and are labelled **reported**. Only Momento's figures were measured by us (see [Methodology](#methodology)). Nothing here is a head-to-head benchmark: we did not install or run OBS, Steam recording or GPU Screen Recorder for this comparison.
 
 Status as checked on 2026-09-26: OBS Studio 32.2.2 (Flathub), GPU Screen Recorder 6.1.2 (Flathub), the current stable Steam client. On the test machine (ROG Ally, Bazzite, KDE Plasma 6 Wayland) neither OBS Studio nor GPU Screen Recorder was installed. Bazzite does ship the `obs-vkcapture` layer and the OBS Flatpak VkCapture/GStreamer plugins, but not OBS itself.
 
@@ -23,7 +23,7 @@ Status as checked on 2026-09-26: OBS Studio 32.2.2 (Flathub), GPU Screen Recorde
 | RAM for a 60-min buffer at 15 Mbps | about 150 MB (buffer is on disk) | about **6.8 GB** of RAM for the buffer alone (see [RAM maths](#ram-for-a-long-buffer)) | Not RAM-bound (disk) | about 6.8 GB in RAM mode; small in disk mode |
 | Disk for a 60-min buffer | About 6.8 GB at 1080p High (15 Mbps), fixed ceiling | None while buffering | Bounded by the disk-space cap you set; oldest footage is overwritten [S1] | None in RAM mode; about 6.8 GB in disk mode |
 | Choosing clip length at save time | **Yes**: clip bar with 15 s / 30 s / 1 / 3 / 5 / 15 / 30 / 60 min, or `momento save <any length>` | **No**: "Save Replay" writes the whole buffer; one length per configuration [O4] | Yes, but by editing: drop a clip on the timeline and drag its ends; default clip is short [S1][S6] | Partly: gsr-ui has hotkeys for full buffer, last 1 min and last 10 min; `gsr-cli save-replay <seconds>` for any length [G2][G3] |
-| Save latency | about 3 s (measured for a 1-minute clip) for 30 s, not yet measured (a 7 GB stream copy, limited by disk speed) for 60 min (stream copy, no re-encode) | Fast: remux from RAM in a background thread; no published figure | Two steps: "Save in Steam" is quick; an MP4 needs a separate Export, which can re-encode (Original / File size / Custom) [S1][S6] | Fast from RAM; no published figure |
+| Save latency | About 3 s for a 1-minute clip (measured); longer clips are a straight copy, limited by disk speed. No re-encode, no export step | Fast: remux from RAM in a background thread; no published figure | Two steps: "Save in Steam" is quick; an MP4 needs a separate Export, which can re-encode (Original / File size / Custom) [S1][S6] | Fast from RAM; no published figure |
 | Trim accuracy | Start snapped to the nearest keyframe (1 s GOP), so about +-0.5 s; end is "now" | Buffer is trimmed in whole GOPs, so clips can run over the set time; reported cases of much longer files [O5] | Set by hand on a visual timeline; precision not documented | Keyframe-aligned; default keyframe interval 2 s [G2] |
 | Overhead | CPU about 4.5% of one core (0.3% of the 8-core Z1 Extreme), one test machine: ROG Ally, light desktop workload, package power about +1.5 W (±1 W) (measured, ROG Ally) | No official figure. The GPU Screen Recorder author reports large FPS drops with OBS + NVENC at 4K (30 -> 7 fps, 60 -> 23 fps) on NVIDIA [G1]; treat as a competitor's claim | Reported 38 -> 35 fps in Dragon Age: The Veilguard on Steam Deck [S7] | Reported: 30 -> 30 fps and 60 -> 58 fps in the same 4K NVIDIA tests; "no fps drop at all" at 4K60 AV1 on an RX 7800 XT [G1] |
 | Audio | Default output (follows device switches) plus optional mic, mixed into one AAC track | Multiple tracks (up to 6), per-source mixing; per-app capture on Linux needs a third-party PipeWire plugin | Game audio, optionally other programs' audio and mic; stereo/mono, auto levels [S1][S6] | Opus (default) or AAC; `-a` can be given several times; per-application audio on PipeWire (`--list-application-audio`) [G1][G2] |
@@ -44,38 +44,42 @@ OBS and GPU Screen Recorder (default mode) keep the encoded buffer in RAM. For 6
 (15,000 + 160) kbit/s x 3,600 s / 8 = 6,822,000 kB  ~ 6.8 GB (6.35 GiB)
 ```
 
-OBS's own settings page uses the same formula for its "estimated memory usage" and caps "Maximum Memory" at 75 % of installed RAM [O2]. On the ROG Ally used for testing, Linux sees about 9.4 GiB (the rest is reserved as GPU memory), so the cap is about 7.2 GB. A 60-minute 1080p buffer technically fits, but leaves under 3 GB for the OS, the browser and the game, which is not practical on a 16 GB handheld. At 15 Mbps a realistic RAM buffer on this machine is a few minutes, not an hour.
+OBS's own settings page uses the same formula for its "estimated memory usage" and caps "Maximum Memory" at 75 % of installed RAM [O2]. On the ROG Ally used for testing, Linux sees about 9.4 GiB (the rest is reserved as GPU memory), so the cap is about 7.2 GB. A 60-minute 1080p buffer technically fits, but leaves under 3 GB for the OS, the browser and the game, which is not practical on a handheld. At 15 Mbps a realistic RAM buffer on this machine is a few minutes, not an hour.
 
 GPU Screen Recorder avoids this with `-replay-storage disk`. Momento and Steam always buffer on disk, which costs SSD writes instead of RAM: about 6.7 GB per hour of play at Momento's default setting. That is a small fraction of a modern SSD's rated endurance, but it is not zero.
 
-## Where Momento shines
+## Why gamers pick Momento
 
-- **Pick the length after the fact, from a single key.** The PS5-style bar with eight presets, from 15 s to 60 min, is the core idea. OBS saves one fixed length. GPU Screen Recorder's UI offers full buffer, 1 min and 10 min. Steam makes you edit a clip on a timeline.
-- **An hour of history without spending RAM.** The buffer is on disk and bounded, so a 60-minute buffer costs about 150 MB of RAM on a 16 GB handheld where an OBS RAM buffer of the same length would not fit comfortably.
-- **Saving is a file copy.** Clips are stream-copied out of the ring buffer with FFmpeg, never re-encoded: not yet measured (a 7 GB stream copy, limited by disk speed) for a full hour on the Ally. The result is a plain MP4 in `~/Videos/Momento`, with no separate export step.
-- **Records anything on screen.** Emulators, launchers, browser games and cloud-streamed games are just pixels on the monitor. Steam Game Recording only records games running through Steam with the overlay [S1], and has open bugs with non-Steam games on SteamOS [S8].
-- **Fits Wayland and immutable distros.** Uses the ScreenCast and GlobalShortcuts portals, so no root, no setcap helper and no keyboard grabbing. On Bazzite everything it needs is already in the image, so it adds about 0.5 MB.
-- **Crash-tolerant buffer.** MPEG-TS segments stay playable if the machine loses power mid-write.
+- **Every game, not just Steam games.** Momento records whatever is on your screen: Steam, Heroic, Lutris, GOG and Epic games, emulators, browser games, and cloud gaming like **GeForce NOW** and Xbox Cloud Gaming. Steam Game Recording only captures games running through Steam with its overlay, "not your desktop or other programs" [S1], and has open bugs with non-Steam games on SteamOS [S8].
+- **Save the moment after it happens, in one press.** Hit the shortcut, pick 15 s, 30 s, 1, 3, 5, 15, 30 or 60 min, done. No timeline to scrub and no clip handles to drag (Steam), no fixed length decided in advance (OBS), no choice limited to "full buffer / 1 min / 10 min" (GPU Screen Recorder's UI).
+- **A ready-to-share MP4 in seconds.** Clips are copied straight out of the buffer without re-encoding: a 1-minute clip took about 3 s on our test handheld, and lands in `~/Videos/Momento` ready for Discord or YouTube. Steam needs a separate Export step to get an MP4, which can re-encode [S1][S6].
+- **Your game keeps the RAM.** The hour of history lives on disk, so Momento uses about 150 MB of memory. An OBS RAM buffer of the same hour would need about 6.8 GB, more than two thirds of what Linux can use on a ROG Ally (see [RAM maths](#ram-for-a-long-buffer)).
+- **The game always comes first.** Momento's service is capped at 1.5 GB, gives memory back to the game under pressure, and is the process Linux stops first if RAM runs out. It checks free disk space before it records and stops before your drive fills up.
+- **Your history survives.** Pausing, changing settings, restarting or rebooting keeps the replay. Clip lengths count recorded footage, so "last 5 minutes" still works right after a pause.
+- **Real 60 or 120 fps.** Motion is captured at the full frame rate (54-58 unique frames per second measured on a 60 fps animation), with a 120 fps option for high-refresh screens and fast shooters.
+- **Sound follows you.** Switch from speakers to a headset or HDMI mid-session and the recording follows.
+- **Made for Linux handhelds.** Native Wayland, no root, no helper with special permissions, no keyboard grabbing. On Bazzite everything it needs is already in the system image. Bind a back paddle or button chord through Steam Input and it's controller-driven.
+- **Light.** About 4.5% of one CPU core and about 1.5 W on our test handheld, with encoding on the GPU's separate video engine.
+- **Yours.** Open source, local only, no account, nothing uploaded.
 
-## Where others are better (candidly)
+## What's coming next
 
-- **Steam Game Recording is better in Gaming Mode**, and for many handheld users that is the deciding factor. It is built in, controller-first (Steam+A, Steam+Y, Steam+D-pad), and has a scrub-able timeline with game-provided markers in supported games. Momento records in Gaming Mode but cannot show its bar there yet. Steam's buffer can also be longer (120 min default) and its per-game settings are more flexible. Its weaknesses: Steam games only, no desktop capture, a separate export step for MP4, and reported Linux bugs (frozen video in Bazzite Gaming Mode on a 2025 build [S9], black video for non-Steam games on SteamOS [S8]).
-- **GPU Screen Recorder is more capable and more mature.** HEVC, AV1 and HDR, per-app audio and multiple tracks, a 24-hour buffer, RAM or disk storage, streaming, screenshots, and a large body of performance testing. Its CLI already lets you save any length (`gsr-cli save-replay 30`). If you are comfortable with its setup (setcap helper or portal, an X11-based UI on Wayland, input grabbing), it does most of what Momento does and more. Momento's advantages over it are narrower: the length-picker UX, a native Wayland layer-shell bar on KDE, portal-only permissions, and zero extra install on Bazzite.
-- **OBS is far more flexible.** Scenes, overlays, webcam, multi-track audio, filters, streaming, and every codec. If you already stream with OBS, its replay buffer is essentially free to turn on. Its drawbacks for this use are the RAM-backed buffer, one fixed clip length per save, and global hotkeys that do not work on Wayland without a plugin [O6].
-- **Codecs.** Momento is H.264 only. HEVC or AV1 would typically make the buffer and clips noticeably smaller at similar quality (commonly quoted as 30-50 %; not measured here). All three others offer at least HEVC.
-- **Audio.** Momento mixes game sound and mic into one track. OBS and GPU Screen Recorder can keep them separate, which matters if you edit.
-- **No timeline or preview.** You cannot scrub back and pick a moment before saving. Steam can.
-- **Trim precision.** About +-0.5 s at the start. Fine for sharing, not for frame-exact editing (none of the stream-copy tools are frame-exact).
-- **Maturity.** Momento is alpha software from a single small project. The others have years of bug reports behind them.
-- **Disk writes.** Always-on recording to disk writes about 6.7 GB per hour at default settings. RAM-buffered recorders write nothing until you save.
+Momento is young (alpha), and a few things are still on the way:
+
+- **Clip bar inside Steam Gaming Mode.** Momento already records in Gaming Mode; until the bar arrives there, bind a controller button to `momento save 30s` through Steam Input. Steam's own recorder is built into that mode today, with Steam+button shortcuts and a timeline [S6].
+- **Smaller files with HEVC and AV1.** Momento uses H.264 today, which every device and site plays. OBS, Steam and GPU Screen Recorder offer HEVC or newer codecs.
+- **Separate mic track** for people who edit their clips. Today game sound and mic are mixed into one track.
+- **Longer history.** Momento keeps up to 60 minutes; Steam defaults to 120 [S1].
+- **Preview before saving.** A quick look at the moment before you keep it.
 
 ## Which should you use?
 
-- **You mostly play in Steam Gaming Mode on a handheld:** use **Steam Game Recording**. It is already there, controller-native and has a timeline. Consider Momento only if you need to record non-Steam content or want one-press fixed-length saves bound to a button.
-- **You play in Desktop Mode (KDE/GNOME/Hyprland), including non-Steam games, emulators or cloud gaming, and want PS5-style "save the last X minutes":** **Momento** is built for exactly this, especially if you want long buffers on a machine with limited RAM.
-- **You want the most features and codecs, and do not mind configuring:** **GPU Screen Recorder**. It is the strongest Linux-native option overall, and its disk mode also avoids the RAM problem.
-- **You already stream or record with OBS:** turn on **OBS's Replay Buffer** with a short length (30-120 s), and add a Wayland hotkey plugin.
-- **You want both:** Momento and Steam recording can run side by side. They capture differently (screen versus overlay hook) but both encode on the GPU, so running both doubles the encoder work. Measure before leaving both on.
+- **You play outside Steam: GeForce NOW or other cloud gaming, emulators, other launchers, or a mix:** **Momento.** It records all of it the same way, and Steam's recorder can't.
+- **You want PS5-style "save what just happened" on a Linux PC or handheld:** **Momento.** One shortcut, eight lengths, an MP4 a few seconds later.
+- **Your handheld or laptop is short on RAM:** **Momento** or Steam, which both keep the history on disk. Avoid long RAM-based buffers.
+- **You only play Steam games in Gaming Mode:** Steam Game Recording works there today. Momento records there too, and its clip bar for Gaming Mode is on the way.
+- **You already stream with OBS:** its replay buffer is essentially free to turn on for short clips. Momento can run next to it for long, pick-the-length saves.
+- **You want every codec and advanced option:** GPU Screen Recorder has the most knobs, at the cost of more setup.
 
 ## Methodology
 

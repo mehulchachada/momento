@@ -68,16 +68,17 @@ Clips are ordinary MP4 files. They play in any video player and upload directly 
 
 ## How it compares
 
-| | Momento | OBS Replay Buffer | Steam Game Recording |
+| | **Momento** | Steam Game Recording | OBS Replay Buffer |
 |---|---|---|---|
-| Records | Anything on screen | Anything in your OBS scene | Only games running through Steam |
-| Buffer kept in | Disk, up to 60 min | RAM (60 min at 1080p is about 6.8 GB) | Disk, 120 min by default |
-| Pick clip length when saving | Yes: 15 s to 60 min from the clip bar | No: saves the whole buffer | Yes: trim on a timeline, then export |
-| Global hotkey on Wayland | Yes | Only with a plugin | Yes (Steam shortcuts) |
-| Steam Gaming Mode | Records; the bar doesn't show there yet | Not designed for it | Built in, controller-first |
-| Codecs | H.264 | H.264, HEVC, AV1 | H.264 (HEVC reported in newer clients) |
+| Records | **Any game or app: Steam, non-Steam, emulators, GeForce NOW and other cloud gaming** | Only games running through Steam | Whatever is in your OBS scene |
+| Saving a clip | **One shortcut, pick 15 s to 60 min, MP4 ready in seconds** | Trim on a timeline, then export to MP4 | Always saves the whole buffer |
+| Memory used for an hour of history | **About 150 MB** (history on disk) | History on disk | About 6.8 GB of RAM at 1080p |
+| History kept across restarts and reboots | **Yes** | Not documented | No (RAM) |
+| Protects your game | **Memory cap, gives way under pressure, never fills your disk** | Disk-space limit you set | Memory limit you set |
+| Hotkey on Wayland desktops | **Yes, no plugins** | Steam shortcuts | Needs a plugin |
+| Steam Gaming Mode | Records today; clip bar coming | Built in | Not designed for it |
 
-GPU Screen Recorder is also a strong Linux option. See [docs/COMPARISON.md](docs/COMPARISON.md) for the full comparison with sources, measured numbers and advice on which to use.
+Momento is built for one job: saving what just happened in any game, fast, without getting in the way. See [docs/COMPARISON.md](docs/COMPARISON.md) for the full comparison (including GPU Screen Recorder), sources and advice on which to use.
 
 ## Install
 
