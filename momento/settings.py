@@ -164,6 +164,17 @@ def apply(changes: dict, path: Path | str | None = None) -> dict:
     return {k: v for k, v in clean.items() if before.get(k) != v}
 
 
+def preview(cfg: dict, changes: dict) -> dict:
+    """A copy of a loaded config with ``changes`` applied in memory (nothing is written)."""
+    import copy
+
+    out = copy.deepcopy(cfg)
+    for key, value in validate(changes).items():
+        for section, name, val in writes(key, value):
+            out.setdefault(section, {})[name] = val
+    return out
+
+
 def describe(cfg: dict, devices: dict | None = None) -> dict:
     """Everything a settings UI needs: current values, choices, audio devices."""
     return {

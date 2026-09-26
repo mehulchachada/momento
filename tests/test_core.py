@@ -442,6 +442,40 @@ class CLITest(unittest.TestCase):
             self.assertEqual(cfg["capture"]["resolution"], "2160p")
             self.assertEqual(cfg["capture"]["quality"], "high")
 
+    def test_set_storage(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, config, ipc, storage
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            # daemon off: saved anyway, warning only
+            err = io.StringIO()
+            with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                    mock.patch.object(storage, "free_bytes", return_value=10), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["--config", str(path), "set", "quality", "ultra"]), 0)
+            self.assertIn("won't record", err.getvalue())
+            self.assertEqual(config.load(path)["capture"]["quality"], "ultra")
+            # daemon refuses: fatal, message shown
+            err = io.StringIO()
+            refusal = {"ok": False, "code": "no_storage", "error": "2160p Ultra needs 35.2 GB free, 9.4 GB available"}
+            with mock.patch.object(ipc, "request", return_value=refusal) as req, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "4k"]), 1)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "2160p"}}, timeout=30)
+            self.assertIn("35.2 GB", err.getvalue())
+
+    def test_storage_line(self):
+        from momento import cli
+
+        line = cli.storage_line({"ok": False, "free": 3_100_000_000, "required": 7_200_000_000, "reclaimable": 0})
+        self.assertEqual(line, "3.1 GB free, needs 7.2 GB \u2014 not enough")
+        line = cli.storage_line({"ok": True, "free": 3e9, "required": 7e9, "reclaimable": 5e9})
+        self.assertEqual(line, "3.0 GB free + 5.0 GB buffer, needs 7.0 GB \u2014 ok")
+
 
 SINKS_JSON = json.dumps([
     {"index": 36, "name": "ROG Ally", "description": "ROG Ally", "monitor_source": "ROG Ally.monitor",
@@ -607,8 +641,19 @@ class DaemonControlTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         FakeRecorder.instances = []
+        from momento import storage
+
+        self.free = 10**13  # plenty of disk unless a test says otherwise
+        fb = mock.patch.object(storage, "free_bytes", side_effect=lambda path: self.free)
+        fb.start()
+        self.addCleanup(fb.stop)
+        self.notes = []
+        nt = mock.patch.object(daemon, "notify", side_effect=lambda bus, summary, body="", icon="": self.notes.append(summary))
+        nt.start()
+        self.addCleanup(nt.stop)
         cfg = config.load(self.path)
         cfg["buffer"]["dir"] = str(Path(self._tmp.name) / "buffer")
+        self.path.write_text(self.path.read_text() + f"\n[buffer]\ndir = \"{cfg['buffer']['dir']}\"\n")
         self.d = daemon.Daemon(cfg, loop=None)
         self.d.recorder = FakeRecorder(cfg, self.d.ring, self.d._on_state)
         self.d.recorder.start()
@@ -676,6 +721,498 @@ class DaemonControlTest(unittest.TestCase):
         self.assertEqual(self.d.status()["state"], "paused")
         self.call({"cmd": "resume"})
         self.assertEqual(self.d.recorder.started, 1)
+
+    # --- disk space -----------------------------------------------------------------
+
+    def _need(self, **capture):
+        from momento import storage
+
+        cfg = {**self.d.cfg, "capture": {**self.d.cfg["capture"], **capture}}
+        return storage.required_bytes(cfg)
+
+    def test_refuses_to_start_then_autostarts(self):
+        from momento import storage
+
+        need = self._need()
+        self.d.recorder.stop()
+        self.d.state = "stopped"
+        rec = FakeRecorder(self.d.cfg, self.d.ring, self.d._on_state)
+        self.d.recorder = rec
+        self.free = need - 1
+        self.assertFalse(self.d._start_recorder(reclaimable=0))
+        self.assertEqual(rec.started, 0)
+        st = self.d.status()
+        self.assertEqual(st["state"], "no_storage")
+        self.assertFalse(st["recording"])
+        self.assertIn("Not enough free space: needs", st["error"])
+        self.assertEqual(st["storage"]["required"], need)
+        self.assertFalse(st["storage"]["ok"])
+        self.assertEqual(set(st["storage"]), {"ok", "free", "required", "reclaimable", "path"})
+        self.assertEqual(len(self.notes), 1)
+        # resume while blocked: refused with a code, no second notification
+        r = self.call({"cmd": "resume"})
+        self.assertEqual((r["ok"], r["code"], r["state"]), (False, "no_storage", "no_storage"))
+        self.assertIn("needs", r["error"])
+        self.d._storage_tick()
+        self.assertEqual((rec.started, len(self.notes)), (0, 1))
+        # space appears -> the next tick starts capture
+        self.free = need
+        self.assertTrue(self.d._storage_tick())
+        self.assertEqual(rec.started, 1)
+        st = self.d.status()
+        self.assertEqual(st["state"], "recording")
+        self.assertNotIn("error", st)
+        self.assertTrue(st["storage"]["ok"])
+
+    def test_own_buffer_counts_as_reclaimable(self):
+        need = self._need()
+        buf = Path(self.d.cfg["buffer"]["dir"])
+        buf.mkdir(parents=True, exist_ok=True)
+        (buf / "seg00001.ts").write_bytes(b"x" * 5000)
+        self.free = need - 4000
+        self.call({"cmd": "pause"})
+        r = self.call({"cmd": "resume"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.d.status()["storage"]["reclaimable"], 5000)
+
+    def test_stops_when_disk_runs_low(self):
+        from momento import storage
+
+        rec = self.d.recorder
+        self.free = storage.LOW_WATER
+        self.d._storage_tick()
+        self.assertEqual(rec.stopped, 0)
+        self.free = storage.LOW_WATER - 1
+        self.d._storage_tick()
+        self.assertEqual(rec.stopped, 1)
+        st = self.d.status()
+        self.assertEqual(st["state"], "no_storage")
+        self.assertIn("Disk almost full", st["error"])
+        self.assertEqual(len(self.notes), 1)
+        self.d._storage_tick()
+        self.assertEqual(len(self.notes), 1)  # notified once
+        # A restart would delete the kept footage, so buffer bytes don't count here.
+        buf = Path(self.d.cfg["buffer"]["dir"])
+        buf.mkdir(parents=True, exist_ok=True)
+        (buf / "seg00001.ts").write_bytes(b"x" * 10_000)
+        self.free = self._need() - 5000
+        self.d._storage_tick()
+        self.assertEqual(rec.started, 1)
+        self.free = self._need()
+        self.d._storage_tick()
+        self.assertEqual(rec.started, 2)
+        self.assertEqual(self.d.status()["state"], "recording")
+
+    def test_paused_is_left_alone(self):
+        self.call({"cmd": "pause"})
+        self.free = 0
+        self.d._storage_tick()
+        self.assertEqual(self.d.status()["state"], "paused")
+        self.assertEqual(self.notes, [])
+
+    def test_save_refused_without_space(self):
+        from momento import storage
+
+        buf = Path(self.d.cfg["buffer"]["dir"])
+        buf.mkdir(parents=True, exist_ok=True)
+        seg = buf / "seg00001.ts"
+        seg.write_bytes(b"x" * 1000)
+        now = time.time()
+        self.d.ring.opened(seg, now - 20)
+        self.d.ring.closed(seg, now - 10)
+        self.d.recorder.recording = False  # no flush round trip
+        self.free = storage.SAVE_MARGIN + 999
+        r = self.call({"cmd": "save", "seconds": 30})
+        self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
+        self.assertIn("Not enough space to save this clip", r["error"])
+        self.assertEqual(self.d.ring._segments[0].pins, 0)  # released
+        self.assertEqual(len(self.notes), 1)
+
+    def test_configure_refuses_what_does_not_fit(self):
+        from momento import config, storage
+
+        self.free = self._need(resolution="1440p", quality="ultra") - 1
+        before = self.path.read_text()
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
+        self.assertTrue(r["error"].startswith("1440p Ultra needs "), r["error"])
+        self.assertIn(" available", r["error"])
+        self.assertEqual(self.path.read_text(), before)
+        self.assertEqual(self.d.recorder.started, 1)
+        # force writes anyway; the daemon then sits in no_storage
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}, "force": True})
+        self.assertTrue(r["ok"])
+        self.assertEqual((r["restarted"], r["state"]), (False, "no_storage"))
+        self.assertIn("warning", r)
+        self.assertEqual(config.load(self.path)["capture"]["quality"], "ultra")
+        # a change that doesn't raise the requirement always goes through
+        r = self.call({"cmd": "configure", "changes": {"mic_device": "default"}})
+        self.assertTrue(r["ok"])
+        r = self.call({"cmd": "configure", "changes": {"quality": "high"}})
+        self.assertTrue(r["ok"])
+        self.assertEqual((r["restarted"], r["state"]), (True, "recording"))
+        self.assertEqual(self.d.status()["storage"]["required"],
+                         storage.required_bytes(self.d.cfg))
+
+    def test_settings_reports_requirements(self):
+        from momento import settings, storage
+        from unittest import mock
+
+        with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}):
+            r = self.call({"cmd": "settings"})
+        st = r["storage"]
+        self.assertEqual(st["free"], self.free)
+        self.assertEqual(st["current"], "1080p/high/60")
+        self.assertEqual(len(st["required"]), 5 * 3 * 2)
+        self.assertEqual(st["required"]["1080p/high/60"], storage.required_bytes(self.d.cfg))
+
+
+class StorageTest(unittest.TestCase):
+    def cfg(self, **capture):
+        from momento import config
+
+        cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
+        cfg["capture"].update(capture)
+        return cfg
+
+    def test_buffer_math(self):
+        from momento import storage
+
+        cfg = self.cfg(resolution="1080p", quality="high", fps=60)
+        video = 15_000 * 1000 / 8 * 3600
+        self.assertAlmostEqual(video / 1e9, 6.75)
+        audio = 160 * 1000 / 8 * 3600
+        self.assertEqual(storage.buffer_bytes(cfg), int((video + audio) * 1.05))
+        self.assertEqual(storage.required_bytes(cfg), storage.buffer_bytes(cfg) + (1 << 30))
+        self.assertEqual(storage.human(storage.buffer_bytes(cfg)), "7.2 GB")
+        cfg["audio"]["desktop"] = cfg["audio"]["microphone"] = False
+        self.assertEqual(storage.buffer_bytes(cfg), int(video * 1.05))
+        cfg["audio"]["microphone"] = True
+        self.assertEqual(storage.audio_kbps(cfg), 160)
+        cfg["buffer"]["max_seconds"] = 1800
+        self.assertEqual(storage.buffer_bytes(cfg), int((video + audio) / 2 * 1.05))
+        # 120 fps costs 1.5x the video bits
+        self.assertGreater(storage.buffer_bytes(self.cfg(fps=120)), storage.buffer_bytes(self.cfg(fps=60)))
+
+    def test_human_and_label(self):
+        from momento import storage
+
+        self.assertEqual(storage.human(7_200_000_000), "7.2 GB")
+        self.assertEqual(storage.human(512 << 20), "536.9 MB")
+        self.assertEqual(storage.human(1.5e12), "1.5 TB")
+        self.assertEqual(storage.human(12), "12 B")
+        self.assertEqual(storage.label(self.cfg(resolution="1440p", quality="ultra")), "1440p Ultra")
+        self.assertEqual(storage.label(self.cfg(fps=120)), "1080p High 120 fps")
+        self.assertEqual(storage.label(self.cfg(bitrate_kbps=50000)), "1080p at 50 Mbps")
+
+    def test_check_and_requirements(self):
+        from unittest import mock
+
+        from momento import storage
+
+        cfg = self.cfg()
+        need = storage.required_bytes(cfg)
+        with mock.patch.object(storage, "free_bytes", return_value=need - 100):
+            chk = storage.check(cfg)
+            self.assertFalse(chk["ok"])
+            self.assertEqual((chk["free"], chk["required"], chk["reclaimable"]), (need - 100, need, 0))
+            self.assertEqual(chk["path"], cfg["buffer"]["dir"])
+            self.assertTrue(storage.check(cfg, reclaimable=100)["ok"])
+            req = storage.requirements(cfg, reclaimable=7)
+        self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/high/60"))
+        self.assertEqual(req["required"]["1080p/high/60"], need)
+        self.assertLess(req["required"]["720p/standard/60"], req["required"]["2160p/ultra/120"])
+        self.assertEqual(len(req["required"]), 30)
+        self.assertEqual(cfg["capture"]["resolution"], "1080p")  # not mutated
+
+    def test_free_bytes_uses_existing_parent(self):
+        from momento import storage
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertGreater(storage.free_bytes(Path(d) / "a" / "b" / "c"), 0)
+            (Path(d) / "x.ts").write_bytes(b"12345")
+            self.assertEqual(storage.dir_bytes(d), 5)
+            self.assertEqual(storage.dir_bytes(Path(d) / "missing"), 0)
+
+
+# --- persistent ring buffer / multi-session export --------------------------------
+
+P240 = {"width": 320, "height": 240, "fps": 30, "codec": "h264", "audio": True}
+P360 = {"width": 640, "height": 360, "fps": 30, "codec": "h264", "audio": True}
+
+
+def _feed(ring: RingBuffer, paths, session: str, t0: float, length: float = 10.0, params=None,
+          write: bool = True) -> float:
+    """Report paths to ring as one capture session starting at wall-clock t0; returns the end."""
+    t = t0
+    for p in paths:
+        if write:
+            Path(p).write_bytes(b"x" * 188)
+        ring.opened(p, t, session=session, **(params or P240))
+        t += length
+        ring.closed(p, t)
+    return t
+
+
+def _index_lines(d: Path) -> list[dict]:
+    return [json.loads(line) for line in (d / "index.jsonl").read_text().splitlines()]
+
+
+class PersistentRingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="momento-ring-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def seg(self, n: int) -> Path:
+        return self.tmp / f"seg{n:08d}.ts"
+
+    def test_index_written_and_reloaded(self):
+        ring = RingBuffer(3600, directory=self.tmp)
+        self.assertEqual(ring.recover(), 0)
+        end = _feed(ring, [self.seg(i) for i in range(3)], "s1", 1000.0)
+        _feed(ring, [self.seg(i) for i in range(3, 5)], "s2", end + 500, params=P360)
+        lines = _index_lines(self.tmp)
+        self.assertEqual([d["file"] for d in lines], [self.seg(i).name for i in range(5)])
+        self.assertEqual(lines[0], {"file": self.seg(0).name, "start": 1000.0, "end": 1010.0, "session": "s1",
+                                    "width": 320, "height": 240, "fps": 30, "codec": "h264", "audio": True})
+        self.assertEqual((lines[4]["session"], lines[4]["width"]), ("s2", 640))
+
+        again = RingBuffer(3600, directory=self.tmp)  # "service restart"
+        self.assertEqual(again.recover(), 5)
+        self.assertAlmostEqual(again.buffered_seconds(), 50.0)
+        sel = again.select_last(3600)
+        self.assertEqual([s.path for s in sel.segments], [self.seg(3), self.seg(4)])  # newest compatible tail
+        self.assertEqual(sel.segments[0].session, "s2")
+        again.release(sel)
+
+    def test_recover_after_crash(self):
+        ring = RingBuffer(3600, directory=self.tmp)
+        ring.recover()
+        _feed(ring, [self.seg(i) for i in range(4)], "s1", 1000.0)
+        ring.opened(self.seg(4), 1040.0, session="s1", **P240)  # being written when we "crash"
+        self.seg(4).write_bytes(b"partial")
+        self.seg(1).unlink()  # missing file
+        self.seg(2).write_bytes(b"")  # zero-sized file
+        (self.tmp / "seg00000099.ts").write_bytes(b"stray")
+        with open(self.tmp / "index.jsonl", "a") as f:
+            f.write('{"file": "seg0000')  # torn last line
+
+        again = RingBuffer(3600, directory=self.tmp)
+        self.assertEqual(again.recover(), 4)  # numbering continues after seg3
+        self.assertEqual(sorted(p.name for p in self.tmp.glob("*.ts")), [self.seg(0).name, self.seg(3).name])
+        self.assertEqual([d["file"] for d in _index_lines(self.tmp)], [self.seg(0).name, self.seg(3).name])
+        self.assertAlmostEqual(again.buffered_seconds(), 20.0)
+
+        # An unfinished segment left by a pipeline that died in this process is dropped too.
+        again.opened(self.seg(4), 1040.0, session="s2", **P240)
+        self.seg(4).write_bytes(b"partial")
+        self.assertEqual(again.recover(), 4)
+        self.assertFalse(self.seg(4).exists())
+
+    def test_retention_by_footage_not_wall_clock(self):
+        ring = RingBuffer(max_seconds=30, margin=0, directory=self.tmp)
+        ring.recover()
+        _feed(ring, [self.seg(i) for i in range(3)], "old", 1000.0)
+        # Two days later: the wall-clock window would have dropped all of "old".
+        _feed(ring, [self.seg(i) for i in range(3, 5)], "new", 1000.0 + 2 * 86400)
+        alive = sorted(p.name for p in self.tmp.glob("*.ts"))
+        # 20 s of "new" + seg2 (10 s, straddles the 30 s limit) + seg1 (footage newer than it = 30 s).
+        self.assertEqual(alive, [self.seg(i).name for i in range(1, 5)])
+        self.assertEqual([d["file"] for d in _index_lines(self.tmp)], alive)  # index compacted
+        self.assertAlmostEqual(ring.buffered_seconds(), 30.0)
+        _feed(ring, [self.seg(5)], "new2", 1000.0 + 3 * 86400)
+        self.assertFalse(self.seg(1).exists())
+        self.assertEqual(len(_index_lines(self.tmp)), 4)
+
+    def test_select_last_across_gap(self):
+        ring = RingBuffer(3600)
+        a = [self.seg(i) for i in range(3)]
+        b = [self.seg(i) for i in range(3, 5)]
+        _feed(ring, a, "a", 1000.0)  # footage 1000-1030
+        _feed(ring, b, "b", 5000.0)  # footage 5000-5020 (paused in between)
+        sel = ring.select_last(25)
+        self.assertEqual([s.path for s in sel.segments], [a[2]] + b)
+        self.assertAlmostEqual(sel.offset, 5.0)
+        self.assertAlmostEqual(sel.duration, 25.0)
+        self.assertAlmostEqual(sel.start, 1025.0)
+        self.assertAlmostEqual(sel.end, 5020.0)
+        self.assertIsNone(sel.note)
+        runs = [(r.segments[0].session, len(r.segments), r.offset, r.duration) for r in sel.runs()]
+        self.assertEqual(runs, [("a", 1, 5.0, 5.0), ("b", 2, 0.0, 20.0)])
+        ring.release(sel)
+        # More than recorded: everything, across the gap.
+        sel = ring.select_last(3600)
+        self.assertAlmostEqual(sel.duration, 50.0)
+        self.assertEqual(len(sel.segments), 5)
+        ring.release(sel)
+        # `until` ignores newer footage and cuts the newest segment.
+        sel = ring.select_last(12, until=5015.0)
+        self.assertEqual([s.path for s in sel.segments], b)
+        self.assertEqual((sel.offset, sel.duration, sel.end), (3.0, 12.0, 5015.0))
+        self.assertEqual([(r.offset, r.duration) for r in sel.runs()], [(3.0, 12.0)])
+        ring.release(sel)
+        self.assertIsNone(RingBuffer(60).select_last(10))
+
+    def test_select_last_stops_at_param_change(self):
+        ring = RingBuffer(3600)
+        _feed(ring, [self.seg(i) for i in range(3)], "a", 1000.0, params=P240)
+        _feed(ring, [self.seg(i) for i in range(3, 5)], "b", 2000.0, params=P360)
+        sel = ring.select_last(40)
+        self.assertEqual([s.session for s in sel.segments], ["b", "b"])
+        self.assertAlmostEqual(sel.duration, 20.0)
+        self.assertEqual(sel.note, "earlier footage used a different resolution")
+        ring.release(sel)
+        sel = ring.select_last(15)  # fits in the newest session: nothing left out
+        self.assertIsNone(sel.note)
+        ring.release(sel)
+
+    def test_clear(self):
+        ring = RingBuffer(3600, directory=self.tmp)
+        ring.recover()
+        _feed(ring, [self.seg(i) for i in range(3)], "a", 1000.0)
+        ring.clear()
+        self.assertEqual(list(self.tmp.iterdir()), [])
+        self.assertEqual(ring.buffered_seconds(), 0.0)
+
+    def test_page_cache_dropped_for_old_segments(self):
+        from unittest import mock
+
+        dropped = []
+
+        def fake_fadvise(fd, offset, length, advice):
+            self.assertEqual((offset, length, advice), (0, 0, os.POSIX_FADV_DONTNEED))
+            dropped.append(Path(os.readlink(f"/proc/self/fd/{fd}")).name)
+
+        ring = RingBuffer(3600)
+        paths = [self.seg(i) for i in range(6)]
+        with mock.patch.object(os, "posix_fadvise", fake_fadvise, create=True):
+            _feed(ring, paths, "a", 1000.0)  # newest closes at 1060
+            # Closed >= 30 s before the newest close, each advised once.
+            self.assertEqual(dropped, [p.name for p in paths[:3]])
+            paths[3].unlink()  # gone by the time it is due: ignored
+            _feed(ring, [self.seg(6)], "a", 1060.0)
+            self.assertEqual(dropped, [p.name for p in paths[:3]])
+
+
+@unittest.skipUnless(_have("ffmpeg", "ffprobe"), "ffmpeg/ffprobe not installed")
+class MultiSessionExportTest(unittest.TestCase):
+    """Real footage from three capture runs: a, b (same parameters) and c (another resolution)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="momento-multi-"))
+        cls.sessions = {}
+        try:
+            for name, (w, h, pattern) in {"a": (320, 240, "ball"), "b": (320, 240, "smpte"),
+                                          "c": (640, 360, "ball")}.items():
+                d = cls.tmp / name
+                d.mkdir()
+                # Drop the possibly ragged last segment, like a closed buffer.
+                cls.sessions[name] = make_segments(d, w, h, pattern)[:SEG_COUNT - 1]
+        except (subprocess.SubprocessError, OSError) as e:
+            raise unittest.SkipTest(f"cannot generate fixture footage: {e}")
+        if any(len(v) < 4 for v in cls.sessions.values()):
+            raise unittest.SkipTest("fixture generation produced too few segments")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def ring(self, *names) -> RingBuffer:
+        ring = RingBuffer(3600)
+        t = 1_000_000.0
+        for name in names:
+            params = P360 if name == "c" else P240
+            t = _feed(ring, self.sessions[name], name, t, length=SEG_SECONDS, params=params, write=False)
+            t += 600  # ten minutes paused
+        return ring
+
+    def test_two_sessions_same_params(self):
+        from unittest import mock
+
+        from momento import exporter
+
+        ring = self.ring("a", "b")
+        per_session = len(self.sessions["b"]) * SEG_SECONDS
+        want = per_session + 3.0  # 3 s from the end of "a", then all of "b"
+        sel = ring.select_last(want)
+        self.assertEqual(len(sel.runs()), 2)
+        dropped = []
+        real = os.posix_fadvise
+        with mock.patch.object(os, "posix_fadvise",
+                               lambda fd, *a: (dropped.append(os.readlink(f"/proc/self/fd/{fd}")), real(fd, *a))):
+            out = exporter.export(sel, self.tmp / "out" / "joined.mp4")
+        self.assertEqual(sorted(Path(p) for p in dropped), sorted(s.path.resolve() for s in sel.segments))
+        ring.release(sel)
+        ExporterTest._check(self, out, want)
+        info = probe(out)
+        durs = [float(s["duration"]) for s in info["streams"]]
+        self.assertLess(abs(durs[0] - durs[1]), 0.1, f"audio/video lengths drift apart: {durs}")
+
+    def test_mismatched_params_keep_newest_tail(self):
+        from momento import exporter
+
+        ring = self.ring("a", "c")
+        sel = ring.select_last(3600)
+        self.assertEqual(sel.note, "earlier footage used a different resolution")
+        self.assertEqual({s.session for s in sel.segments}, {"c"})
+        out = exporter.export(sel, self.tmp / "out" / "tail.mp4")
+        ring.release(sel)
+        expected = len(self.sessions["c"]) * SEG_SECONDS
+        ExporterTest._check(self, out, expected)
+        size = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                               "stream=width,height", "-of", "csv=p=0", str(out)],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(size, "640,360")
+
+    def test_export_refuses_mixed_selection(self):
+        from momento import exporter
+
+        a, c = self.sessions["a"], self.sessions["c"]
+        segs = [Segment(a[0], 0.0, 2.0, session="a", **P240), Segment(c[0], 10.0, 12.0, session="c", **P360)]
+        with self.assertRaises(exporter.ExportError):
+            exporter.export(Selection(segs, 0.0, 4.0, 0.0, 12.0), self.tmp / "out" / "mixed.mp4")
+        self.assertFalse((self.tmp / "out" / "mixed.mp4").exists())
+
+
+class DaemonBufferTest(unittest.TestCase):
+    """The buffer survives shutdown/restart; only an explicit quit clears it."""
+
+    setUp = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def fill(self) -> Path:
+        buf = Path(self.d.cfg["buffer"]["dir"])
+        self.d.ring.recover()
+        _feed(self.d.ring, [buf / f"seg{i:08d}.ts" for i in range(3)], "s1", 1000.0)
+        return buf
+
+    def test_shutdown_keeps_buffer_for_next_start(self):
+        from momento import daemon
+
+        buf = self.fill()
+        self.d.stop()  # SIGTERM / service restart / reboot
+        self.assertEqual(len(list(buf.glob("*.ts"))), 3)
+        again = daemon.Daemon(self.d.cfg, loop=None)
+        self.assertEqual(again.ring.recover(), 3)
+        self.assertAlmostEqual(again.status()["buffered"], 30.0)
+
+    @unittest.skipUnless(_gi_available(), "PyGObject not available")
+    def test_quit_clears_unless_keep_buffer(self):
+        from unittest import mock
+
+        from gi.repository import GLib
+
+        buf = self.fill()
+        with mock.patch.object(GLib, "timeout_add", lambda ms, fn: fn()):
+            self.assertEqual(self.call({"cmd": "quit", "keep_buffer": True}), {"ok": True, "buffer_cleared": False})
+            self.assertEqual(len(list(buf.glob("*.ts"))), 3)
+            self.d._stopping = False  # same daemon object, second shutdown
+            self.assertEqual(self.call({"cmd": "quit"}), {"ok": True, "buffer_cleared": True})
+        self.assertFalse(buf.exists())
 
 
 if __name__ == "__main__":

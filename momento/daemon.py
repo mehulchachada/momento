@@ -12,9 +12,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import config, durations, quality, settings
+from . import config, durations, quality, settings, storage
 
 log = logging.getLogger(__name__)
+
+STORAGE_CHECK_SECONDS = 30
 
 
 def notify(bus, summary: str, body: str = "", icon: str = config.APP_ID) -> None:
@@ -70,6 +72,11 @@ class Daemon:
         self.shortcut = None
         self.paused = False
         self._stopping = False
+        # Disk-space guard: set while capture is blocked (state "no_storage").
+        self.storage_error: str | None = None
+        self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
+        self._storage_notified = False
+        self._storage_timer = 0
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -88,7 +95,10 @@ class Daemon:
 
             register_app_id(self.bus, config.APP_ID)
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
-        self.recorder.start()
+        self._start_recorder()  # our own buffer (if any is left) counts as reclaimable
+        from gi.repository import GLib
+
+        self._storage_timer = GLib.timeout_add_seconds(STORAGE_CHECK_SECONDS, self._storage_tick)
         if self.cfg["hotkey"].get("enabled") and self.bus is not None:
             try:
                 from .hotkey import GlobalShortcut
@@ -101,11 +111,18 @@ class Daemon:
             except Exception as e:  # noqa: BLE001
                 log.warning("global shortcut unavailable: %s", e)
 
-    def stop(self) -> None:
+    def stop(self, clear_buffer: bool = False) -> None:
+        """Shut down. The buffer is kept (SIGTERM, service restart, reboot) unless
+        clear_buffer is set, which only the explicit quit/stop command does."""
         if self._stopping:
             return
         self._stopping = True
-        log.info("shutting down")
+        log.info("shutting down%s", " and clearing the replay buffer" if clear_buffer else "")
+        if self._storage_timer:
+            from gi.repository import GLib
+
+            GLib.source_remove(self._storage_timer)
+            self._storage_timer = 0
         if self.recorder is not None:
             try:
                 self.recorder.stop()
@@ -128,6 +145,71 @@ class Daemon:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
         self.state = state
         self.error = detail if state == "error" else None
+
+    # --- disk space ---------------------------------------------------------------
+
+    def storage_check(self, cfg: dict | None = None, reclaimable: int | None = None) -> dict:
+        """storage.check for ``cfg`` (default: the running one); our own buffer counts as reclaimable."""
+        if reclaimable is None:
+            reclaimable = storage.dir_bytes(self.buffer_dir)
+        return storage.check(cfg or self.cfg, reclaimable)
+
+    def _start_recorder(self, reclaimable: int | None = None) -> bool:
+        """Start capture if a full buffer fits on disk; otherwise enter "no_storage"."""
+        chk = self.storage_check(reclaimable=reclaimable)
+        if not chk["ok"]:
+            self._block(storage.start_error(chk), "start")
+            return False
+        self._unblock()
+        self.recorder.start()
+        return True
+
+    def _block(self, message: str, reason: str) -> None:
+        self.state = "no_storage"
+        self.error = None
+        self.storage_error = message
+        self._storage_reason = reason
+        log.warning("capture blocked: %s", message)
+        if not self._storage_notified:
+            self._storage_notified = True
+            body = message + ("\nRecording stopped; what was buffered can still be saved." if reason == "low"
+                              else "\nFree up space; Momento starts by itself once it fits.")
+            notify(self.bus, "Momento: not enough disk space", body, "dialog-warning")
+
+    def _unblock(self) -> None:
+        if self.state == "no_storage":
+            self.state = "starting"
+        self.storage_error = None
+        self._storage_reason = None
+        self._storage_notified = False
+
+    def _storage_tick(self) -> bool:
+        """Every STORAGE_CHECK_SECONDS: auto-start once space appears; stop when it runs low."""
+        try:
+            if self.paused or self.recorder is None or self._stopping:
+                return True
+            if self.state == "no_storage":
+                # After a low-space stop, only restart once real free space is back:
+                # the kept footage stays on disk, so it can't be counted as room to grow.
+                reclaimable = 0 if self._storage_reason == "low" else None
+                if self.storage_check(reclaimable=reclaimable)["ok"]:
+                    log.info("enough disk space again; starting capture")
+                    self._start_recorder(reclaimable=reclaimable)
+                return True
+            free = storage.free_bytes(self.buffer_dir)
+            if free < storage.LOW_WATER:
+                try:
+                    self.recorder.stop()  # keeps the ring: saves still work
+                except Exception:  # noqa: BLE001
+                    log.exception("recorder stop failed")
+                self._block(f"Disk almost full: {storage.human(free)} free", "low")
+        except Exception:  # noqa: BLE001 - the timer must keep running
+            log.exception("storage check failed")
+        return True
+
+    def _storage_status(self) -> dict:
+        chk = self.storage_check()
+        return {k: chk[k] for k in ("ok", "free", "required", "reclaimable", "path")}
 
     # --- requests (main loop) ----------------------------------------------------
 
@@ -178,9 +260,14 @@ class Daemon:
             self.recorder.stop()
         self.cfg = cfg
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
+        started = False
         if not self.paused:
-            self.recorder.start()
-        reply({"ok": True, "restarted": not self.paused, "paused": self.paused})
+            started = self._start_recorder()
+        result = {"ok": True, "restarted": started, "paused": self.paused,
+                  "state": "paused" if self.paused else self.state, "storage": self._storage_status()}
+        if self.state == "no_storage" and not self.paused:
+            result["warning"] = self.storage_error
+        reply(result)
 
     def settings(self, reply) -> None:
         """Current settings + choices + audio devices (pactl runs off the main loop)."""
@@ -194,6 +281,7 @@ class Daemon:
                 except (OSError, ValueError):
                     cfg = fallback
                 result = settings.describe(cfg)
+                result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)))
             except Exception as e:  # noqa: BLE001
                 log.exception("settings failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -208,12 +296,29 @@ class Daemon:
             reply({"ok": False, "error": "changes must be a non-empty object"})
             return
         try:
+            saved = config.load(self._cfg_path())
+            new = settings.preview(saved, changes)
+            quality.bitrate_kbps(new["capture"])
+            chk = storage.check(new, storage.dir_bytes(self.buffer_dir))
+        except (OSError, ValueError) as e:
+            reply({"ok": False, "error": str(e)})
+            return
+        # Refuse settings that need more room than there is. A change that doesn't
+        # raise the requirement (a smaller size, another mic) always goes through.
+        if (not chk["ok"] and not msg.get("force")
+                and storage.required_bytes(new) > storage.required_bytes(saved)):
+            reply({"ok": False, "code": "no_storage", "storage": chk,
+                   "error": f"{storage.label(new)} needs {storage.human(chk['required'])} free, "
+                            f"{storage.human(chk['free'] + chk['reclaimable'])} available"})
+            return
+        try:
             changed = settings.apply(changes, self._cfg_path())
         except (OSError, ValueError) as e:
             reply({"ok": False, "error": str(e)})
             return
         if not changed:
-            reply({"ok": True, "changed": {}, "restarted": False, "paused": self.paused})
+            reply({"ok": True, "changed": {}, "restarted": False, "paused": self.paused,
+                   "state": "paused" if self.paused else self.state, "storage": self._storage_status()})
             return
         self.reload(lambda r: reply({**r, "changed": changed}))
 
@@ -226,11 +331,13 @@ class Daemon:
         reply({"ok": True, "state": "paused"})
 
     def resume(self, reply) -> None:
-        """Start capturing again. Recorder.start() clears the ring: a fresh replay."""
-        if self.paused:
+        """Start capturing again as a new session; the footage from before the pause stays."""
+        if self.paused or self.state == "no_storage":
             self.paused = False
-            if self.recorder is not None:
-                self.recorder.start()
+            if self.recorder is not None and not self._start_recorder():
+                reply({"ok": False, "code": "no_storage", "error": self.storage_error,
+                       "state": self.state, "storage": self._storage_status()})
+                return
         reply({"ok": True, "state": self.state})
 
     def status(self) -> dict:
@@ -248,8 +355,11 @@ class Daemon:
             "quality": self.cfg["capture"]["quality"],
             "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"]),
             "fps": quality.fps(self.cfg["capture"]),
+            "storage": self._storage_status(),
         }
-        if self.error:
+        if self.state == "no_storage" and not self.paused and self.storage_error:
+            result["error"] = self.storage_error
+        elif self.error:
             result["error"] = self.error
         return result
 
@@ -289,6 +399,20 @@ class Daemon:
             result = {"ok": False, "error": "nothing recorded yet"}
             notify(self.bus, "Momento: nothing to save", "Nothing has been recorded yet.", "dialog-warning")
             reply(result)
+            return
+        need = sum(_size(s.path) for s in sel.segments) + storage.SAVE_MARGIN
+        try:
+            free = storage.free_bytes(self.cfg["output"]["dir"])
+        except OSError as e:
+            log.warning("cannot check free space for the clip: %s", e)
+            free = need
+        if free < need:
+            self.ring.release(sel)
+            error = (f"Not enough space to save this clip: needs {storage.human(need)}, "
+                     f"{storage.human(free)} free")
+            log.warning("%s", error)
+            notify(self.bus, "Momento: not enough disk space", error, "dialog-warning")
+            reply({"ok": False, "error": error, "code": "no_storage"})
             return
 
         def work() -> None:

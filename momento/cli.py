@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, config, durations, quality, settings
+from . import __version__, config, durations, quality, settings, storage
 
 
 def _duration(text: str) -> int:
@@ -37,8 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("key", choices=list(settings.KEYS))
     st.add_argument("value")
     sub.add_parser("pause", help="pause recording (what is buffered can still be saved)")
-    sub.add_parser("resume", help="resume recording (starts a fresh replay buffer)")
-    sub.add_parser("quit", aliases=["stop"], help="stop the daemon")
+    sub.add_parser("resume", help="resume recording (earlier footage stays in the replay buffer)")
+    q = sub.add_parser("quit", aliases=["stop"], help="stop the daemon and clear the replay buffer")
+    q.add_argument("--keep-buffer", action="store_true",
+                   help="keep the recorded footage on disk; it is saveable again after the next start")
     return p
 
 
@@ -57,6 +59,15 @@ def _request(msg: dict, timeout: float = 120) -> dict | None:
     except (ipc.IPCError, OSError, ValueError) as e:
         print(f"momento: {e}", file=sys.stderr)
     return None
+
+
+def storage_line(st: dict) -> str:
+    """'3.1 GB free, needs 8.2 GB - not enough' (+ the buffer a restart would free, if any)."""
+    free = f"{storage.human(st.get('free', 0))} free"
+    if st.get("reclaimable"):
+        free += f" + {storage.human(st['reclaimable'])} buffer"
+    verdict = "ok" if st.get("ok") else "not enough"
+    return f"{free}, needs {storage.human(st.get('required', 0))} \u2014 {verdict}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             ("encoder", r.get("encoder") or "-"),
             ("output", r.get("output_dir") or "-"),
         ]
+        if isinstance(r.get("storage"), dict):
+            rows.append(("storage", storage_line(r["storage"])))
         for key, value in rows:
             print(f"{key:>9}: {value}")
         return 0
@@ -139,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
-            ("disk use", f"about {quality.buffer_gb(kbps, cfg['buffer']['max_seconds']):.1f} GB for the full buffer"),
+            ("disk use", f"about {storage.human(storage.buffer_bytes(cfg))} for the full buffer"),
+            ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg))))),
             ("sound", sound),
             ("mic", mic),
             ("clips", cfg["output"]["dir"]),
@@ -159,27 +173,48 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "set":
         try:
             clean = settings.validate({args.key: args.value})
+        except ValueError as e:
+            print(f"momento: {e}", file=sys.stderr)
+            return 1
+        from . import ipc
+
+        # With the daemon running, it validates storage and writes the config itself.
+        try:
+            r = ipc.request({"cmd": "configure", "changes": clean}, timeout=30)
+        except ipc.DaemonNotRunning:
+            r = None
+        except (ipc.IPCError, OSError) as e:
+            print(f"momento: could not reach the daemon (nothing saved): {e}", file=sys.stderr)
+            return 1
+        if r is not None:
+            if not r.get("ok"):
+                print(f"momento: {r.get('error', 'not saved')}", file=sys.stderr)
+                return 1
+            print(f"{args.key} = {clean[args.key]}")
+            if r.get("warning"):
+                print(f"momento: warning: {r['warning']}. Recording stays off until there is room.",
+                      file=sys.stderr)
+            elif r.get("paused"):
+                print("Saved. Recording is paused; the new setting applies when you resume.")
+            elif r.get("restarted"):
+                print("Recording restarted with the new setting.")
+            else:
+                print("Saved (nothing changed).")
+            return 0
+        # Daemon off: write the file; warn (non-fatal) if the new settings won't fit.
+        try:
             settings.apply(clean, args.config)
+            cfg = config.load(args.config)
+            # The daemon empties its buffer dir on start, so that space counts as free.
+            chk = storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg)))
         except (OSError, ValueError) as e:
             print(f"momento: {e}", file=sys.stderr)
             return 1
         print(f"{args.key} = {clean[args.key]}  (saved to {args.config})")
-        from . import ipc
-
-        try:
-            r = ipc.request({"cmd": "reload"}, timeout=30)
-        except ipc.DaemonNotRunning:
-            return 0  # applies next time the daemon starts
-        except (ipc.IPCError, OSError) as e:
-            print(f"momento: saved, but could not reach the daemon: {e}", file=sys.stderr)
-            return 1
-        if not r.get("ok"):
-            print(f"momento: {r.get('error')}", file=sys.stderr)
-            return 1
-        if r.get("paused"):
-            print("Saved. Recording is paused; the new setting applies when you resume.")
-        else:
-            print("Recording restarted with the new setting.")
+        if not chk["ok"]:
+            print(f"momento: warning: {storage.label(cfg)} needs {storage.human(chk['required'])} free, "
+                  f"{storage.human(chk['free'] + chk['reclaimable'])} available; "
+                  "Momento won't record until there is room.", file=sys.stderr)
         return 0
 
     if args.command in ("pause", "resume"):
