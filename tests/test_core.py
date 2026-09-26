@@ -3844,8 +3844,10 @@ class HistorySettingsTest(unittest.TestCase):
             self.assertEqual(cli.main(["--config", str(self.path), "set", "hour_warning", "5"]), 0)
             self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
         text = out.getvalue()
-        self.assertIn("history: kept when recording stops", text)
-        self.assertIn("hour mark: warn 5 min before the 15m mark", text)
+        self.assertIn("history: kept when recording stops; every 15 min of recording is saved to the clips folder",
+                      text)
+        self.assertIn("warning: 5 min before the 15 min replay is full", text)
+        self.assertNotIn("hour", text.split("record:", 1)[1])      # (the key hour_warning aside)
         self.assertIn("clip bar: kept loaded", text)
         # daemon running: a live setting says so instead of "restarted"/"paused"
         out = io.StringIO()
@@ -4164,6 +4166,48 @@ class DaemonHourTest(unittest.TestCase):
         self.call({"cmd": "reload"})
         self.assertEqual(self.d.status()["max_seconds"], 600)
         self.assertAlmostEqual(self.d.status()["buffered"], 600.0)
+
+    def use_length(self, minutes):
+        r = self.call({"cmd": "configure", "changes": {"replay_length": minutes}})
+        self.assertEqual((r["ok"], self.d.status()["max_seconds"]), (True, minutes * 60))
+
+    def test_15_minute_warning_says_15_minutes(self):
+        self.use_length(15)
+        self.record(4)
+        self.assertEqual(self.sent, [])
+        self.record(1)                            # a 10-minute warning on a 15-minute replay
+        self.assertEqual(self.sent, [("Momento: 15 minutes almost full",
+                                      "In 10 min the start of this session starts being replaced. "
+                                      "Save anything you want from it now.")])
+        self.record(30)
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(any("hour" in text for pair in self.sent for text in pair))
+
+    def test_15_minutes_saved_with_history(self):
+        self.use_length(15)
+        self.call({"cmd": "configure", "changes": {"keep_history": "on", "hour_warning": 5}})
+        self.record(10)
+        self.assertEqual(self.sent, [("Momento: 15 minutes almost full",
+                                      "In 5 min the last 15 minutes are saved to Videos and a new stretch starts.")])
+        self.record(5)                            # the mark
+        self.wait_for(lambda: len(self.sent) == 2)
+        duration, _pins, out = self.exports[0]
+        self.assertAlmostEqual(duration, 900.0)
+        self.assertTrue(out.name.endswith("_15m.mp4"), out.name)
+        self.assertEqual(self.sent[1][0], "Saved the last 15 minutes to Videos")
+        self.free = 0                             # the next one doesn't fit
+        self.record(15)
+        self.assertEqual(self.sent[-1][0], "Momento: couldn't save the last 15 minutes — disk full")
+        self.assertFalse(any("hour" in text for pair in self.sent for text in pair))
+
+    def test_30_minute_warning(self):
+        self.use_length(30)
+        self.record(19)
+        self.assertEqual(self.sent, [])
+        self.record(1)
+        self.assertEqual(self.sent, [("Momento: 30 minutes almost full",
+                                      "In 10 min the start of this session starts being replaced. "
+                                      "Save anything you want from it now.")])
 
     def test_pauses_continue_the_session_and_stop_starts_a_new_one(self):
         self.record(30)

@@ -12,8 +12,13 @@ from . import __version__, config, durations, quality, settings, storage
 
 # status.stop_reason -> why, for `momento status`.
 STOP_WHY = {"user": "stopped by you", "window_closed": "the recorded window closed"}
-HISTORY_LINE = {True: "kept when recording stops; every full hour is saved to the clips folder",
-                False: "cleared when recording stops"}
+def history_line(keep: bool, max_seconds) -> str:
+    """keep_history in words: "kept when recording stops; every 15 min of recording is saved ..."."""
+    if not keep:
+        return "cleared when recording stops"
+    seconds = int(max_seconds or config.DEFAULTS["buffer"]["max_seconds"])
+    span = "hour" if seconds == 3600 else storage.span(seconds)
+    return f"kept when recording stops; every {span} of recording is saved to the clips folder"
 
 
 def _duration(text: str) -> int:
@@ -262,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             ("output", r.get("output_dir") or "-"),
         ]
         if isinstance(r.get("keep_history"), bool):
-            rows.insert(3, ("history", HISTORY_LINE[r["keep_history"]]))
+            rows.insert(3, ("history", history_line(r["keep_history"], r.get("max_seconds"))))
         if isinstance(r.get("storage"), dict):
             rows.append(("storage", storage_line(r["storage"])))
         warning = low_storage_line(r)
@@ -311,9 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             ("sound", sound),
             ("mic", mic),
             ("controller", controller_line(cfg)),
-            ("history", HISTORY_LINE[cur["keep_history"] == "on"]),
-            ("hour mark", f"warn {cur['hour_warning']} min before the "
-                          f"{durations.label(cfg['buffer']['max_seconds'])} mark"),
+            ("history", history_line(cur["keep_history"] == "on", cfg["buffer"]["max_seconds"])),
+            ("warning", f"{cur['hour_warning']} min before the "
+                        f"{storage.span(cfg['buffer']['max_seconds'])} replay is full"),
             ("clip bar", "kept loaded (opens instantly)" if cur["instant_bar"] == "on"
                          else "started on every press"),
             ("clips", cfg["output"]["dir"]),

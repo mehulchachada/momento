@@ -353,7 +353,7 @@ SETTING_VALUES = {
     # "tap" (hold_ms = 0, the default: opens on press) | "hold" ([controller] hold_ms above 0, 300 when chosen)
     "controller_open": (("string",), False),
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
-    "hour_warning": (("integer",), False),  # minutes before the hour mark to warn: 3-10 (UI: 10, 5, 3)
+    "hour_warning": (("integer",), False),  # minutes before the replay is full to warn: 3-10 (UI: 10, 5, 3)
     "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
 }
 

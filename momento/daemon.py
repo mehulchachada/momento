@@ -119,7 +119,7 @@ class HourMarks:
 
 
 def span_label(seconds: float) -> str:
-    """3600 -> "60 minutes", 60 -> "1 minute", 90 -> "1m30s"."""
+    """3600 -> "60 minutes", 900 -> "15 minutes", 60 -> "1 minute", 90 -> "1m30s"."""
     seconds = int(round(seconds))
     if seconds % 60:
         return durations.label(seconds)
@@ -633,7 +633,8 @@ class Daemon:
         sel = self.ring.select_last(length, until=until)
         if sel is None:
             return
-        what = "hour" if length == 3600 else span_label(length)
+        # "Saved the last hour to Videos" / "Saved the last 15 minutes to Videos"
+        what = "last hour" if length == 3600 else f"last {span_label(length)}"
         need = sum(_size(s.path) for s in sel.segments) + storage.SAVE_MARGIN
         try:
             free = storage.free_bytes(self.cfg["output"]["dir"])
@@ -648,7 +649,7 @@ class Daemon:
                    "dialog-warning")
             return
         when = datetime.now()
-        log.info("saving the last %s (%.0f s of footage)", what, sel.duration)
+        log.info("saving the %s (%.0f s of footage)", what, sel.duration)
 
         def work() -> None:
             try:
@@ -667,7 +668,7 @@ class Daemon:
 
     def _finish_hour(self, result: dict, what: str) -> bool:
         if result.get("ok"):
-            notify(self.bus, f"Saved the last {what} to Videos", result["path"], "media-record")
+            notify(self.bus, f"Saved the {what} to Videos", result["path"], "media-record")
         else:
             notify(self.bus, f"Momento: couldn't save the {what}", result.get("error", ""), "dialog-error")
         return False

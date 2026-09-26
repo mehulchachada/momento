@@ -36,9 +36,9 @@ KEYS = {
     "controller_exclusive": "on, off (take the controller over while the bar is open)",
     "controller_open": "hold, tap (tap, the default, opens the bar the instant the buttons are "
                        "down; hold waits until they have been held for 0.3 s)",
-    "keep_history": "off, on (keep the replay when recording stops, and save every full hour "
-                    "to your clips folder)",
-    "hour_warning": "10, 5, 3 (minutes before the hour mark to warn; any whole number 3-10)",
+    "keep_history": "off, on (keep the replay when recording stops, and save every full replay "
+                    "length to your clips folder)",
+    "hour_warning": "10, 5, 3 (minutes before the replay is full to warn; any whole number 3-10)",
     "instant_bar": "on, off (keep the clip bar loaded so it opens instantly; uses ~80-120 MB)",
 }
 
