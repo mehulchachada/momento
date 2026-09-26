@@ -14,14 +14,15 @@ Two ways to run it:
 
 Besides the clip lengths the bar has three painted glyph buttons: settings
 (gear, key S), pause/resume (key P) and stop (asks inline first). Settings
-open in the same bar, which grows upward into a few segmented rows; applying
-goes through the daemon's ``configure`` IPC, or straight to the config file
-when the daemon is off.
+open in the same bar, which grows upward into a row of tabs (General, Video,
+Audio, Controller, Misc) over a few segmented rows; one Apply sends the
+changes of every tab through the daemon's ``configure`` IPC, or straight to
+the config file when the daemon is off.
 
-Window mode (settings: Record -> Game window): when the picked window closes
-the daemon reports "no_window"; the bar then shows "No window" and its play
-button asks the daemon to open the window picker (``pick_window``). The bar
-hides itself right after, so the desktop's picker dialog is usable.
+Window mode (settings: Record -> Window): while stopped (the picked window
+closed, or nothing picked yet) the bar says "Press play to pick a window";
+play sends ``resume`` and the daemon opens the window picker itself. The bar
+hides right after the reply, so the desktop's picker dialog is usable.
 
 On KDE/wlroots Wayland the bar is a wlr-layer-shell surface on the Overlay
 layer (drawn above fullscreen games), anchored to the bottom edge and sized to
@@ -72,11 +73,15 @@ TICK_MS = 250            # the recording timer ticks locally between the 1 s sta
 DEFAULT_SECONDS = 60
 ICON_W = PILL_H + 2 * PILL_INSET   # gear / pause / stop: circles
 HINT_H = 30              # the "Paused" line above the bar
-HEADER_H = 34            # settings: title line
+TABS_H = 40              # settings: the tab row
+TAB_PILL_H = 26          # a tab is a smaller pill than a value
+TAB_PAD = 11             # text padding inside a tab
+TAB_PX = 13
 ROW_H = 40               # settings: one row
-PANEL_PAD_T = 6
+PANEL_PAD_T = 4
 PANEL_PAD_B = 6
-LABEL_W = 96             # settings: row label column
+LABEL_W = 110            # settings: row label column
+NAME_PX = 12             # the small label next to the time ("Recording Elden Ring")
 SEG_PAD = 12
 SEG_SPACING = 0          # pills carry their own gap (PILL_INSET)
 ARROW_W = PILL_H + 2 * PILL_INSET
@@ -97,6 +102,8 @@ RED = "#FF4D2E"
 PILL_REST = "#1C1C1C"    # a resting pill: just enough to see the shape
 PILL_ON = "#F2F2F2"      # hover and keyboard focus
 PILL_SEL = "#CFCFCF"     # the chosen value in a settings row, when not focused
+TAB_SEL = "#262626"      # the open settings tab, when not focused
+ROW_LINE = "#212121"     # the hairline between two settings rows
 ON_TEXT = "#111111"      # text on a white pill
 RING = "#EDEDED"         # keyboard focus ring around a white pill
 GREEN = "#4CC38A"
@@ -106,7 +113,19 @@ YELLOW = "#F5C542"
 PAD_FACTORY = None
 
 PAUSED_HINT = "Paused · saving uses the footage so far"
-NO_WINDOW_HINT = "Game closed · press play to pick a window"
+# Stopped (by Stop, or the recorded window closed): what play does next.
+STOPPED_TEXT = {"window": "Press play to pick a window", "screen": "Press play to record full screen"}
+# What is being recorded, after "Recording" / "Paused" ("Recording Full Screen").
+SUBJECT = {"screen": "Full Screen", "window": "Window"}
+# The Record row's choices (the bar's own words; settings.RECORD_LABELS is the CLI's).
+RECORD_TEXT = {"screen": "Full screen", "window": "Window"}
+# Settings tabs: (name, keys). The daemon's settings reply ("tabs") wins; this is
+# for an older daemon / settings module without them.
+DEFAULT_TABS = (("General", ("record", "keep_history")),
+                ("Video", ("resolution", "fps", "quality")),
+                ("Audio", ("audio_source", "mic", "mic_device")),
+                ("Controller", ("controller", "controller_exclusive")),
+                ("Misc", ("hour_warning", "instant_bar")))
 
 
 def _gb(n) -> str:
@@ -271,6 +290,29 @@ def _mmss(seconds: float) -> str:
 
 def _esc(text) -> str:
     return html.escape(str(text))
+
+
+def _clean_title(text) -> str | None:
+    """A window title fit for one line: no control characters, runs of spaces collapsed."""
+    if not isinstance(text, str):
+        return None
+    text = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+    return text or None
+
+
+def _tabs(data, fallback=DEFAULT_TABS) -> list[tuple[str, list[str]]]:
+    """[(name, [keys])] from a settings reply's "tabs" ([[name, keys]] or [{name, keys}])."""
+    out = []
+    for t in (data.get("tabs") if isinstance(data, dict) else None) or fallback:
+        if isinstance(t, dict):
+            name, keys = t.get("name") or t.get("title"), t.get("keys") or t.get("settings")
+        elif isinstance(t, (list, tuple)) and len(t) == 2:
+            name, keys = t
+        else:
+            continue
+        if isinstance(name, str) and isinstance(keys, (list, tuple)):
+            out.append((name, [str(k) for k in keys]))
+    return out or [(n, list(k)) for n, k in fallback]
 
 
 # --------------------------------------------------------------------------
@@ -527,12 +569,51 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.setBrush(QColor(color))
         p.drawEllipse(P(x + 3.8, y - 1.6), 0.95, 0.95)
         p.drawEllipse(P(x + 2.4, y + 0.6), 0.95, 0.95)
+    elif kind == "history":
+        # a clock face whose rim turns back on itself: footage that is kept
+        r = 6.5
+        p.drawArc(QRectF(x - r, y - r, 2 * r, 2 * r), 200 * 16, -290 * 16)
+        a = math.radians(200)
+        ex, ey = x + r * math.cos(a), y - r * math.sin(a)
+        p.drawPolyline(QPolygonF([P(ex - 2.6, ey - 1.2), P(ex, ey), P(ex + 0.9, ey - 2.7)]))
+        p.drawPolyline(QPolygonF([P(x, y - 3.5), P(x, y), P(x + 2.5, y + 1.6)]))
+    elif kind == "hourglass":
+        p.drawLine(P(x - 5, y - 7), P(x + 5, y - 7))
+        p.drawLine(P(x - 5, y + 7), P(x + 5, y + 7))
+        p.drawPolyline(QPolygonF([P(x - 3.8, y - 7), P(x - 3.8, y - 4.6), P(x - 0.8, y),
+                                  P(x - 3.8, y + 4.6), P(x - 3.8, y + 7)]))
+        p.drawPolyline(QPolygonF([P(x + 3.8, y - 7), P(x + 3.8, y - 4.6), P(x + 0.8, y),
+                                  P(x + 3.8, y + 4.6), P(x + 3.8, y + 7)]))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawPolygon(QPolygonF([P(x - 2.4, y + 5.6), P(x + 2.4, y + 5.6), P(x, y + 3)]))
+    elif kind == "bolt":
+        p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
+                                 P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
+    elif kind == "lock":
+        p.drawRoundedRect(QRectF(x - 5.5, y - 1.5, 11, 8.5), 2, 2)
+        shackle = QPainterPath(P(x - 3.3, y - 1.5))
+        shackle.lineTo(x - 3.3, y - 3.8)
+        shackle.arcTo(QRectF(x - 3.3, y - 7.1, 6.6, 6.6), 180, -180)
+        shackle.lineTo(x + 3.3, y - 1.5)
+        p.drawPath(shackle)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(P(x, y + 2.6), 1.2, 1.2)
     p.restore()
 
 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
-             "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad"}
+             "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
+             "controller_exclusive": "lock", "keep_history": "history", "hour_warning": "hourglass",
+             "instant_bar": "bolt"}
+# Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
+ROW_TITLES = {"record": "Record", "keep_history": "Keep history", "resolution": "Resolution",
+              "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
+              "mic_device": "Mic device", "controller": "Controller", "controller_exclusive": "Exclusive",
+              "hour_warning": "Hour warning", "instant_bar": "Instant bar"}
+ON_OFF_KEYS = ("mic", "controller_exclusive", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
@@ -815,7 +896,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         """gear / pause / play / stop in a circle, painted so it never depends on a font."""
 
         TIPS = {"gear": "Settings (S)", "pause": "Pause recording (P)", "play": "Resume recording (P)",
-                "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a game window"}
+                "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a window (P)"}
 
         def __init__(self, kind):
             super().__init__("")
@@ -890,6 +971,41 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             p.setBrush(QColor(RED))
             p.drawEllipse(QPointF(r.center().x() + tw / 2 + 5, r.center().y() - 4), 2.25, 2.25)
 
+    class TabButton(Pill):
+        """A settings tab: a small pill. Muted text at rest, a quiet fill while open,
+        white on hover / keyboard focus like every other pill."""
+
+        def __init__(self, text):
+            super().__init__(text, TABS_H)
+            self.setObjectName("tab")
+            self.setProperty("sel", False)
+            f = ui_font()
+            f.setPixelSize(TAB_PX)
+            self.setFont(f)
+            self.setFixedWidth(self.fontMetrics().horizontalAdvance(text) + 2 * (TAB_PAD + PILL_INSET))
+            self.setAccessibleName(f"{text} settings")
+            self.sync(animate=False)
+
+        def selected(self):
+            return bool(self.property("sel"))
+
+        def set_sel(self, on):
+            if self.property("sel") != on:
+                self.setProperty("sel", on)
+                self.sync()
+
+        def target(self):
+            state, style = super().target()
+            if state == "rest":
+                return state, (QColor(0, 0, 0, 0), QColor(MUTED), 0.0)
+            if state == "selected":
+                return state, (QColor(TAB_SEL), QColor(TEXT), 0.0)
+            return state, style
+
+        def pill_rect(self):
+            h = min(TAB_PILL_H, self.height())
+            return QRectF(PILL_INSET, (self.height() - h) / 2, self.width() - 2 * PILL_INSET, h)
+
     class Logo(QWidget):
         """The Momento mark (assets/logo.svg), redrawn so an install needs no file."""
 
@@ -963,10 +1079,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class SettingRow(QWidget):
         """A label and a segmented choice. Long lists collapse to ‹ current ›."""
 
-        def __init__(self, bar, key, title, choices, value, avail, cycle=False, extra=None):
+        def __init__(self, bar, key, title, choices, value, avail, cycle=False):
             super().__init__()
             self.bar, self.key = bar, key
-            self.extra = extra        # a button at the end of the row (Record: "Change window")
+            self.tab = 0              # index of the settings tab the row is on
             self.values = [c[0] for c in choices]
             self.labels = [c[1] for c in choices]
             self.idx = self.values.index(value) if value in self.values else 0
@@ -1019,13 +1135,26 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     lay.addWidget(b)
                     self.buttons.append(b)
             lay.addStretch(1)
-            if extra is not None:
-                lay.addWidget(extra)
             self.refresh()
 
         @property
         def value(self):
             return self.values[self.idx]
+
+        def has_divider(self):
+            """A hairline above every row of a tab but its first (visible) one."""
+            if self.isHidden():
+                return False
+            first = next((r for r in self.bar.rows if r.tab == self.tab and not r.isHidden()), None)
+            return first is not None and first is not self
+
+        def paintEvent(self, ev):
+            if not self.has_divider():
+                return
+            p = QPainter(self)
+            p.setPen(QPen(QColor(ROW_LINE), 1))
+            p.drawLine(16, 0, self.width() - 12, 0)   # from the icon column to the row's end
+            p.end()
 
         def refresh(self):
             if self.cycle:
@@ -1041,9 +1170,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.icon.kind = RECORD_ICONS.get(self.value, "fullscreen")
                 self.icon.update()
 
-        def extra_shown(self):
-            return self.extra is not None and not self.extra.isHidden()
-
         def focus(self):
             (self.cur if self.cycle else self.buttons[self.idx]).setFocus(Qt.TabFocusReason)
 
@@ -1056,15 +1182,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.bar.on_row_changed(self)
 
         def step(self, d):
-            if self.extra_shown():
-                # the row's extra button sits right of the last value
-                if self.extra.hasFocus():
-                    if d < 0:
-                        self.focus()
-                    return
-                if d > 0 and not self.cycle and self.idx == len(self.values) - 1:
-                    self.extra.setFocus(Qt.TabFocusReason)
-                    return
             n = len(self.values)
             i = (self.idx + d) % n if self.cycle else max(0, min(n - 1, self.idx + d))
             self.select(i)
@@ -1072,13 +1189,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class Bar(QWidget):
         def __init__(self):
             super().__init__()
-            self.shown_at = None  # wall-clock time the bar last appeared
             self.saving = False
             self.done = False
             self.online = None
             self.running = False      # daemon reachable
             self.paused = False
             self.buffered = 0.0
+            # From the status: what is recorded ("screen" | "window"), the window's
+            # title, and whether a stop keeps the footage (keep_history).
+            self.target = "screen"
+            self.target_name = None
+            self.keep_history = False
+            self.resume_picks = False  # play from stopped in window mode: the picker opens
             self.status_inflight = False
             self.last_status = None
             self.mode = "clip"        # clip | settings | confirm
@@ -1098,7 +1220,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.live = (0.0, 0.0)
             self.live_ticking = False
             self.max_seconds = 3600.0
-            self.change_btn = None    # settings: "Change window" (window mode)
+            self.tab_btns = []        # settings: the tab row
+            self.tab_names = []
+            self.tabstack = None      # settings: one page of rows per tab
+            self.tab = 0
+            self.panel_rows = 0       # rows of the tallest tab: the panel keeps that height
+            self.last_tab = None      # the tab settings reopen on (for as long as the process lives)
             self.applied = None       # settings: the changes the last Apply sent
             self.pads = None          # game controllers while the bar is on screen
             self.pads_handle = None
@@ -1169,14 +1296,20 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.logo = Logo()
             hrow.addWidget(self.logo)
             hrow.addSpacing(12)
+            # the dot and the gap after it hide together (stopped: the sentence says it all)
+            self.dotbox = QWidget()
+            self.dotbox.setFixedSize(16, 8)
+            dl = QHBoxLayout(self.dotbox)
+            dl.setContentsMargins(0, 0, 8, 0)
             self.dot = QLabel()
             self.dot.setFixedSize(8, 8)
-            hrow.addWidget(self.dot)
-            hrow.addSpacing(8)
-            self.name = QLabel("")        # empty (hidden) while recording: the dot says it
+            dl.addWidget(self.dot)
+            hrow.addWidget(self.dotbox)
+            self.name = QLabel("")        # "Recording Elden Ring", "Paused Full Screen", ...
             self.name.setObjectName("muted")
+            self.name.setTextFormat(Qt.PlainText)   # a window title is never markup
             nf = ui_font()
-            nf.setPixelSize(13)            # a quiet secondary word next to the time
+            nf.setPixelSize(NAME_PX)       # a quiet secondary label next to the time
             self.name.setFont(nf)
             self.name.setContentsMargins(0, 0, 8, 0)
             hrow.addWidget(self.name)
@@ -1187,12 +1320,17 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.storage_hint = StorageHint()
             hrow.addWidget(self.storage_hint)
             nfm, tfm = self.name.fontMetrics(), QFontMetrics(ui_font(tabular=True))
-            head.setFixedWidth(LOGO_SIZE + 12 + 8 + 8 + 2 + max(
-                (nfm.horizontalAdvance(n) + 8 if n else 0) + tfm.horizontalAdvance(t)
-                for n, t in (("", "00:00"), ("Paused", "00:00"), ("Starting", "00:00"),
-                             ("Off", "—"), ("Error", "00:00"), ("Low storage", "00:00"),
-                             ("No window", "00:00")))
-                + 16 + self.storage_hint.width())
+            # The label's room next to the time: "Recording Full Screen" fits whole, a
+            # window title is elided to it. Stopped has no dot and no time, so its
+            # sentence may use their room as well.
+            self.name_w = nfm.horizontalAdvance(f"Recording {SUBJECT['screen']}")
+            block = max([self.name_w + 8 + tfm.horizontalAdvance("00:00"),
+                         max(nfm.horizontalAdvance(t) for t in STOPPED_TEXT.values()) + 8 - 16]
+                        + [nfm.horizontalAdvance(n) + 8 + tfm.horizontalAdvance(t)
+                           for n, t in (("Starting", "00:00"), ("Off", "—"), ("Error", "00:00"),
+                                        ("Low storage", "00:00"))])
+            self.stopped_w = block + 16 - 8   # the stopped sentence's room (the name's margin aside)
+            head.setFixedWidth(LOGO_SIZE + 12 + 16 + 2 + block + 16 + self.storage_hint.width())
             row.addWidget(head)
             row.addSpacing(12)
             row.addWidget(divider())
@@ -1247,9 +1385,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             crow = QHBoxLayout(conf)
             crow.setContentsMargins(18, 0, 0, 0)
             crow.setSpacing(0)
-            self.confirm = QLabel(f"Stop recording?&nbsp;&nbsp;<span style='color:{MUTED}'>"
-                                  "The replay history is cleared.</span>")
-            self.confirm.setTextFormat(Qt.RichText)
+            self.confirm = QLabel(self.confirm_text())   # set again on every ask (keep_history)
+            self.confirm.setTextFormat(Qt.PlainText)
             self.confirm.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             crow.addWidget(self.confirm, 1)
             self.stop_yes = TextButton("Stop", glyph="stopsq")
@@ -1343,16 +1480,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     hint = f"<span style='color:{RED}'>{_esc(text)}</span>"
                 elif self.paused and self.running:
                     hint = PAUSED_HINT
-                elif self.view == "nowindow" and self.running:
-                    hint = NO_WINDOW_HINT
             if hint is not None and self.hintbar.text() != hint:
                 self.hintbar.setText(hint)
             self.hintbar.setHidden(hint is None)
             if hint is not None:
                 top += HINT_H
             if self.mode == "settings":
-                n = sum(1 for r in self.rows if not r.isHidden())
-                ph = PANEL_PAD_T + HEADER_H + n * ROW_H + PANEL_PAD_B
+                # every tab gets the tallest tab's height, so switching tabs never moves the bar
+                ph = PANEL_PAD_T + TABS_H + self.panel_rows * ROW_H + PANEL_PAD_B
                 self.panel.setFixedHeight(ph)
                 self.panel.show()
                 top += ph
@@ -1379,19 +1514,38 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if w is None or w is self or w.isHidden():
                     focus.setFocus(Qt.OtherFocusReason)
 
-        NAMES = {"rec": "", "paused": "Paused", "starting": "Starting", "off": "Off",
-                 "error": "Error", "lowstorage": "Low storage", "nowindow": "No window"}
+        NAMES = {"rec": "Recording", "paused": "Paused", "starting": "Starting", "off": "Off",
+                 "error": "Error", "lowstorage": "Low storage", "stopped": "Stopped"}
+
+        def subject(self):
+            """What is recorded, for "Recording …" / "Paused …"."""
+            if self.target == "window":
+                return self.target_name or SUBJECT["window"]
+            return SUBJECT["screen"]
+
+        def view_label(self, view):
+            if view in ("rec", "paused"):
+                return f"{self.NAMES[view]} {self.subject()}"
+            if view == "stopped":
+                return STOPPED_TEXT[self.target]
+            return self.NAMES[view]
 
         def set_view(self, view, opts_on):
             """One bar for every state: only the dot, label, time and enablement change."""
             self.view = view
             running = self.running
-            dot = RED if view in ("rec", "lowstorage") else MUTED if view in ("paused", "nowindow") else DIM
+            dot = RED if view in ("rec", "lowstorage") else MUTED if view == "paused" else DIM
             self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
-            self.dot.show()
-            self.name.setText(self.NAMES[view])
-            self.name.setHidden(not self.NAMES[view])
-            self.dot.setAccessibleName("Recording" if view == "rec" else self.NAMES[view])
+            self.dotbox.setHidden(view == "stopped")
+            label = self.view_label(view)
+            room = self.stopped_w if view == "stopped" else self.name_w
+            fm = self.name.fontMetrics()
+            shown = label if fm.horizontalAdvance(label) <= room else fm.elidedText(label, Qt.ElideRight, room)
+            if self.name.text() != shown:
+                self.name.setText(shown)
+            self.name.setAccessibleName(label)
+            self.name.setHidden(not label)
+            self.dot.setAccessibleName(self.NAMES[view])
             for c in self.controls:
                 pb = c["pause"]
                 if view == "off" or (view == "starting" and not running):
@@ -1400,13 +1554,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 elif view in ("paused", "lowstorage"):
                     pb.set_kind("play" if view == "paused" else "start")
                     pb.setEnabled(True)
-                elif view == "nowindow":
-                    pb.set_kind("pick")          # play = pick a game window
+                elif view == "stopped":
+                    # window mode: play has the daemon open the window picker
+                    pb.set_kind("pick" if self.target == "window" else "start")
                     pb.setEnabled(True)
                 else:
                     pb.set_kind("pause")
                     pb.setEnabled(True)
-                c["stop"].setEnabled(running and view != "off")
+                c["stop"].setEnabled(running and view not in ("off", "stopped"))
                 for b in c.values():
                     b.show()
             for o in self.options:
@@ -1502,32 +1657,39 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 view = "off"
             else:
                 self.running = True
-                self.stopped = st.get("state") == "stopped"
-                self.paused = st.get("state") == "paused"
-                self.buffered = 0.0 if self.stopped else float(st.get("buffered") or 0.0)
+                state = st.get("state")
+                self.target = "window" if st.get("target") == "window" else "screen"
+                self.target_name = _clean_title(st.get("target_name"))
+                # "no_window" (an older daemon: the picked window closed) is shown as stopped
+                self.stopped = state in ("stopped", "no_window")
+                kept = st.get("keep_history")
+                # an older daemon kept the footage in no_window and cleared it on stop
+                self.keep_history = bool(kept) if kept is not None else state == "no_window"
+                self.paused = state == "paused"
+                buffered = float(st.get("buffered") or 0.0)
+                # stopped: the footage is saveable only while the history is kept
+                self.buffered = 0.0 if self.stopped and not self.keep_history else buffered
                 if "storage" in st or st.get("state") == "no_storage":
                     self.warn = _status_warning(st)
                 # else: an older daemon without storage info; keep any warning a reply gave
                 self.storage_hint.set_storage(st.get("storage"))
                 if self.stopped:
-                    view = "off"      # the service keeps running (hotkey), recording does not
-                elif st.get("state") == "no_storage":
+                    view = "stopped"  # the service keeps running (hotkey), recording does not
+                elif state == "no_storage":
                     view = "lowstorage"
                 elif self.paused:
                     view = "paused"
-                elif st.get("state") == "no_window":
-                    view = "nowindow"     # window mode: the game window closed
                 elif st.get("recording"):
                     view = "rec"
                 elif st.get("state") == "error":
                     view = "error"
                 else:
                     view = "starting"
-                self.set_view(view, self.buffered > 0 and not self.stopped)
+                self.set_view(view, self.buffered > 0)
                 self.set_live({} if self.stopped else st, view == "rec")
                 shown = self.live_seconds()
-                if view == "off":
-                    self.set_time("—", DIM)
+                if view == "stopped":
+                    self.set_time("", MUTED)   # the sentence takes the time's place
                 elif view == "lowstorage":
                     # the numbers are in the warning strip right above; keep the head compact
                     self.set_time(_mmss(shown) if shown > 0 else "", MUTED)
@@ -1564,7 +1726,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         # ---------------- save
         def showEvent(self, ev):
-            self.shown_at = time.time()
             if self.live_ticking:
                 self.ticker.start()   # the timer only runs while the bar is on screen
             self.after(0, self.pads_open)  # after the first paint: opening devices takes a few ms
@@ -1587,16 +1748,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.relayout()
             secs = opt.seconds
             gen = self.gen
-            until = self.shown_at
 
             def work():
                 try:
-                    msg = {"cmd": "save", "seconds": secs}
-                    if not CAPTURE_EXCLUDED and until is not None:
-                        # The bar shows up in the recording on this desktop: end the
-                        # clip at the moment it was opened so it isn't in the clip.
-                        msg["until"] = until
-                    r = ipc.request(msg, timeout=120)
+                    # The clip runs up to now. In full screen mode the bar itself may be
+                    # in it; recording a window instead keeps it out.
+                    r = ipc.request({"cmd": "save", "seconds": secs}, timeout=120)
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
                 self.bridge.saved.emit(gen, r)
@@ -1631,13 +1788,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if self.view == "off":
                     self.start_recorder()
                 return
-            if self.view == "nowindow":
-                self.pick_window()
-                return
             if self.view == "lowstorage" or (self.paused and _storage_short(self.last_status) is not None):
                 self.show_storage_warning()  # resuming would fail: say why instead
                 return
             cmd = "resume" if self.paused or self.stopped else "pause"
+            # From stopped in window mode the daemon opens the window picker on resume.
+            self.resume_picks = cmd == "resume" and self.stopped and self.target == "window"
             self.control_busy = True
             gen = self.gen
 
@@ -1649,29 +1805,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.bridge.control.emit(gen, cmd, r)
             threading.Thread(target=work, daemon=True).start()
 
-        def pick_window(self):
-            """Ask the daemon to open the window picker (play in "No window", "Change window").
-
-            The bar hides once the daemon has answered, so the picker dialog can
-            take the keyboard; a one-shot bar must not quit before the request is out.
-            """
-            if self.control_busy or self.saving or self.done:
-                return
-            self.control_busy = True
-            gen = self.gen
-
-            def work():
-                try:
-                    r = ipc.request({"cmd": "pick_window"}, timeout=30)
-                except Exception as e:  # noqa: BLE001
-                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
-                self.bridge.control.emit(gen, "pick_window", r)
-            threading.Thread(target=work, daemon=True).start()
+        def confirm_text(self):
+            """The stop question: without keep_history a stop deletes the replay, so it says so."""
+            return "Stop recording?" if self.keep_history else "Stop and clear replay?"
 
         def ask_stop(self):
             if (not self.running or self.stopped or self.control_busy or self.saving or self.done
                     or self.mode != "clip"):
                 return
+            self.confirm.setText(self.confirm_text())
             self.mode = "confirm"
             self.stack.setCurrentIndex(3)
             self.relayout()
@@ -1713,16 +1855,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def on_control(self, cmd, r):
             self.control_busy = False
-            if cmd == "pick_window":
-                if r.get("ok"):
-                    self.close_bar()            # out of the way of the picker dialog
-                    return
-                if self.mode == "settings":
-                    fm = self.foot.fontMetrics()
-                    err = fm.elidedText(str(r.get("error") or "Could not pick a window"), Qt.ElideRight,
-                                        max(120, self.foot.width()))
-                    self.foot.setText(f"<span style='color:{RED}'>{_esc(err)}</span>")
-                    return
+            picks, self.resume_picks = self.resume_picks and cmd == "resume", False
+            if picks and r.get("ok"):
+                # The daemon opens the window picker now; the bar hides once the request
+                # is answered (a one-shot bar must not quit before it is out), so the
+                # dialog can take the keyboard.
+                self.close_bar()
+                return
             if not r.get("ok"):
                 if r.get("code") == "no_storage":
                     self.show_storage_warning(_storage_warning(r.get("storage") or {}, r.get("error")))
@@ -1732,8 +1871,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.show_line(f"<span style='color:{RED}'>{_esc(r.get('error') or cmd + ' failed')}</span>")
                 return
             if cmd == "stop":
-                self.apply_status({**(self.last_status or {}), "ok": True, "state": "stopped",
-                                   "recording": False, "buffered": 0, "buffered_live": 0})
+                st = {**(self.last_status or {}), "ok": True, "state": "stopped", "recording": False}
+                if r.get("buffer_cleared") is not False:   # with keep_history the footage stays
+                    st.update(buffered=0, buffered_live=0)
+                self.apply_status(st)
                 self.idle.stop()
                 self.after(STOP_CLOSE_MS, self.close_bar)  # show Off briefly, then get out of the way
             elif cmd == "quit":
@@ -1827,14 +1968,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.stack.setCurrentIndex(2)
             self.update_foot()
             self.relayout()
-            self.rows[0].focus()
+            self.focus_line(1)                  # the open tab's first row
             self.idle.setInterval(SETTINGS_IDLE_MS)
             self.idle.start()
 
         def clear_rows(self):
-            """Delete the settings rows (rebuilt on every open of the settings)."""
+            """Delete the settings tabs and rows (rebuilt on every open of the settings)."""
             self.rows = []
-            self.change_btn = None
+            self.tab_btns, self.tab_names, self.tabstack = [], [], None
+            self.panel_rows = 0
             old = self.panel_lay.takeAt(0)
             while old is not None:
                 if old.widget() is not None:
@@ -1842,94 +1984,169 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     old.widget().deleteLater()
                 old = self.panel_lay.takeAt(0)
 
+        def make_row(self, key, avail):
+            """The settings row for ``key``, or None when the reply does not offer it."""
+            data = self.sdata
+            vals, choices = data["values"], data.get("choices") or {}
+            if key not in vals:
+                return None
+            title = ROW_TITLES.get(key) or key.replace("_", " ").capitalize()
+            value = vals[key]
+            if key == "record":
+                rec = [(r, RECORD_TEXT.get(r, settings.RECORD_LABELS.get(r, r)))
+                       for r in choices.get("record", list(RECORD_TEXT))]
+                return SettingRow(self, key, title, rec, value, avail)
+            if key == "resolution":
+                return SettingRow(self, key, title, [(r, RES_LABELS.get(r, r)) for r in choices["resolution"]],
+                                  value, avail)
+            if key == "fps":
+                return SettingRow(self, key, title, [(f, f"{f} fps") for f in choices.get("fps", [60])],
+                                  vals.get("fps", quality.FPS), avail)
+            if key == "quality":
+                return SettingRow(self, key, title, [(q, q.capitalize()) for q in choices["quality"]],
+                                  value, avail)
+            dev = data.get("devices") or {}
+            if key == "audio_source":
+                sound = [("default", "Default output")] + [(d["name"], d["label"], True)
+                                                           for d in dev.get("outputs") or []]
+                if value not in [c[0] for c in sound] + ["off"]:
+                    sound.append((value, value, True))  # an unplugged device
+                sound.append(("off", "Off"))
+                return SettingRow(self, key, title, sound, value, avail, cycle=len(sound) - 2 > CYCLE_OVER)
+            if key == "mic_device":
+                micdev = [("default", "Default mic")] + [(d["name"], d["label"], True)
+                                                         for d in dev.get("inputs") or []]
+                if value not in [c[0] for c in micdev]:
+                    micdev.append((value, value, True))
+                return SettingRow(self, key, title, micdev, value, avail, cycle=len(micdev) - 1 > CYCLE_OVER)
+            if key == "controller":
+                if not data.get("controller_available", True):
+                    return None             # no python-evdev: the controller settings do nothing
+                ctl = [("off", "Off")] + [(k, label) for k, label, _b in gamepad.CHORD_PRESETS]
+                if value not in [c[0] for c in ctl]:
+                    ctl.append((value, settings.controller_label(value), True))
+                return SettingRow(self, key, title, ctl, value, avail)
+            if key == "controller_exclusive" and not data.get("controller_available", True):
+                return None
+            opts = list(choices.get(key) or (("off", "on") if key in ON_OFF_KEYS else ()))
+            if key == "hour_warning":
+                if value not in opts:
+                    opts.append(value)      # set by hand to another whole number of minutes
+                return SettingRow(self, key, title, [(m, f"{m} min") for m in opts], value, avail)
+            if not opts:
+                return None
+            if value not in opts:
+                opts.append(value)
+            return SettingRow(self, key, title,
+                              [(c, c.capitalize() if isinstance(c, str) else str(c)) for c in opts], value, avail)
+
         def build_rows(self):
             self.clear_rows()
             data = self.sdata
             vals = data["values"]
-            dev = data.get("devices") or {}
-            outs, ins = dev.get("outputs") or [], dev.get("inputs") or []
+            for k in ON_OFF_KEYS:         # a daemon may send booleans
+                if isinstance(vals.get(k), bool):
+                    vals[k] = "on" if vals[k] else "off"
             avail = self.bar_w - 2 - 16 - GLYPH_W - GLYPH_GAP - LABEL_W - SEG_SPACING - 12
 
+            tabs, seen = [], set()
+            for name, keys in _tabs(data, getattr(settings, "TABS", None) or DEFAULT_TABS):
+                rows = []
+                for k in keys:
+                    r = None if k in seen else self.make_row(k, avail)
+                    if r is not None:
+                        seen.add(k)
+                        rows.append(r)
+                if rows:
+                    tabs.append((name, rows))
+
+            # the tab row, with the note on the right
             header = QWidget()
-            header.setFixedHeight(HEADER_H)
+            header.setFixedHeight(TABS_H)
             hl = QHBoxLayout(header)
-            hl.setContentsMargins(18, 0, 18, 0)
-            title = QLabel("Settings")
-            hl.addWidget(title)
+            hl.setContentsMargins(12, 0, 18, 0)   # the first pill lines up with the row icons
+            hl.setSpacing(0)
+            for i, (name, _rows) in enumerate(tabs):
+                b = TabButton(name)
+                b.clicked.connect(lambda _=False, i=i: self.switch_tab(i, None))
+                hl.addWidget(b)
+                self.tab_btns.append(b)
             hl.addStretch(1)
             self.note = QLabel("Applying restarts recording · your replay is kept" if data.get("online")
                                else "Momento is off — changes apply when it starts")
             self.note.setObjectName("dim")
+            nf = ui_font()
+            nf.setPixelSize(TAB_PX)
+            self.note.setFont(nf)
             hl.addWidget(self.note)
             self.panel_lay.addWidget(header)
 
-            res = [(r, RES_LABELS.get(r, r)) for r in data["choices"]["resolution"]]
-            qual = [(q, q.capitalize()) for q in data["choices"]["quality"]]
-            sound = [("default", "Default output")] + [(d["name"], d["label"], True) for d in outs]
-            if vals["audio_source"] not in [c[0] for c in sound] + ["off"]:
-                sound.append((vals["audio_source"], vals["audio_source"], True))  # unplugged device
-            sound.append(("off", "Off"))
-            micdev = [("default", "Default mic")] + [(d["name"], d["label"], True) for d in ins]
-            if vals["mic_device"] not in [c[0] for c in micdev]:
-                micdev.append((vals["mic_device"], vals["mic_device"], True))
-            self.rows = []
-            if "record" in vals:
-                # What to record. In window mode a "Change window" pill sits at the end of the row.
-                rec = [(r, settings.RECORD_LABELS.get(r, r))
-                       for r in data["choices"].get("record", list(settings.RECORD_LABELS))]
-                self.change_btn = TextButton("Change window", ROW_H, quiet=True)
-                self.change_btn.setAccessibleName("Change window: pick another game window")
-                self.change_btn.clicked.connect(self.change_window)
-                self.rows.append(SettingRow(self, "record", "Record", rec, vals["record"],
-                                            avail - self.change_btn.width(), extra=self.change_btn))
-            self.rows += [
-                SettingRow(self, "resolution", "Resolution", res, vals["resolution"], avail),
-                SettingRow(self, "fps", "Frame rate",
-                           [(f, f"{f} fps") for f in data["choices"].get("fps", [60])],
-                           vals.get("fps", quality.FPS), avail),
-                SettingRow(self, "quality", "Quality", qual, vals["quality"], avail),
-                SettingRow(self, "audio_source", "Sound", sound, vals["audio_source"], avail,
-                           cycle=len(sound) - 2 > CYCLE_OVER),
-                SettingRow(self, "mic", "Mic", [("off", "Off"), ("on", "On")], vals["mic"], avail),
-                SettingRow(self, "mic_device", "Mic device", micdev, vals["mic_device"], avail,
-                           cycle=len(micdev) - 1 > CYCLE_OVER),
-            ]
-            if "controller" in vals and data.get("controller_available", True):
-                ctl = [("off", "Off")] + [(k, label) for k, label, _b in gamepad.CHORD_PRESETS]
-                if vals["controller"] not in [c[0] for c in ctl]:
-                    ctl.append((vals["controller"], settings.controller_label(vals["controller"]), True))
-                self.rows.append(SettingRow(self, "controller", "Controller", ctl, vals["controller"], avail))
-            for r in self.rows:
-                self.panel_lay.addWidget(r)
-            self.row("mic_device").setHidden(vals["mic"] != "on")
-            self.update_change_btn()
+            # one page of rows per tab
+            self.tabstack = QStackedWidget()
+            for i, (_name, rows) in enumerate(tabs):
+                page = QWidget()
+                pl = QVBoxLayout(page)
+                pl.setContentsMargins(0, 0, 0, 0)
+                pl.setSpacing(0)
+                for r in rows:
+                    r.tab = i
+                    pl.addWidget(r)
+                pl.addStretch(1)
+                self.tabstack.addWidget(page)
+            self.panel_lay.addWidget(self.tabstack)
+            self.tab_names = [n for n, _r in tabs]
+            self.rows = [r for _n, rows in tabs for r in rows]
+            self.panel_rows = max((len(rows) for _n, rows in tabs), default=0)
+            mic, micdev = self.row("mic"), self.row("mic_device")
+            if mic is not None and micdev is not None:
+                micdev.setHidden(mic.value != "on")
+            self.show_tab(self.tab_names.index(self.last_tab) if self.last_tab in self.tab_names else 0)
             self.update_fit()
 
-        def update_change_btn(self):
-            """"Change window" shows while the daemon runs in window mode and the row still says so."""
-            if self.change_btn is None:
+        # ---- tabs
+        def show_tab(self, i):
+            self.tab = i
+            if not self.tab_btns:
                 return
-            vals = self.sdata["values"]
-            on = (bool(self.sdata.get("online")) and self.running and vals.get("record") == "window"
-                  and self.row("record").value == "window")
-            if self.change_btn.hasFocus() and not on:
-                self.row("record").focus()
-            self.change_btn.setHidden(not on)
+            self.last_tab = self.tab_names[i]
+            for j, b in enumerate(self.tab_btns):
+                b.set_sel(j == i)
+            self.tabstack.setCurrentIndex(i)
 
-        def change_window(self):
-            if self.mode != "settings" or self.apply_state in ("busy", "done"):
+        def switch_tab(self, i, focus):
+            """Open tab ``i``. ``focus``: "tab" (stay on the tab row), "row" (its first row),
+            "keep" (the footer keeps focus), None (a click: focus only if it was lost)."""
+            if not self.tab_btns or self.mode != "settings":
                 return
-            self.foot.setText(f"<span style='color:{MUTED}'>Opening the window picker…</span>")
-            self.pick_window()
+            i = max(0, min(len(self.tab_btns) - 1, i))
+            if i != self.tab:
+                self.show_tab(i)
+            if focus == "tab":
+                self.tab_btns[i].setFocus(Qt.TabFocusReason)
+            elif focus == "row":
+                self.focus_line(1)
+            else:
+                w = QApplication.focusWidget()
+                if w is None or w is self or not w.isVisible():
+                    self.tab_btns[i].setFocus(Qt.OtherFocusReason)
+
+        def step_tab(self, d):
+            """Bumpers / Page Up-Down: the previous / next tab, focus staying on its line."""
+            if self.apply_state in ("busy", "done"):
+                return
+            pos, _i = self.settings_pos()
+            self.switch_tab(self.tab + d, {"tabs": "tab", "foot": "keep"}.get(pos, "row"))
 
         def row(self, key):
-            return next(r for r in self.rows if r.key == key)
+            return next((r for r in self.rows if r.key == key), None)
 
         def visible_rows(self):
-            return [r for r in self.rows if not r.isHidden()]
+            """The open tab's rows that are showing (Mic device only with the mic on)."""
+            return [r for r in self.rows if r.tab == self.tab and not r.isHidden()]
 
         def pending(self):
-            return {r.key: r.value for r in self.rows}
+            """Every value as the rows (on all tabs) now say, over the reply's values."""
+            return {**self.sdata["values"], **{r.key: r.value for r in self.rows}}
 
         def changes(self):
             vals = self.sdata["values"]
@@ -1980,7 +2197,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             v = self.pending()
             for key in ("resolution", "quality", "fps"):
                 row = self.row(key)
-                if row.cycle:
+                if row is None or row.cycle:
                     continue
                 for val, b in zip(row.values, row.buttons):
                     b.set_nofit(not self.fits({**v, key: val}))
@@ -2002,11 +2219,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.foot.setText(f"<span style='color:{MUTED}'>{_esc(self.estimate())}</span>")
 
         def on_row_changed(self, row):
-            if row.key == "record":
-                self.update_change_btn()
-            if row.key == "mic":
+            if row.key == "mic" and self.row("mic_device") is not None:
+                # the panel keeps its height (sized for the tallest tab): nothing moves
                 self.row("mic_device").setHidden(row.value != "on")
-                self.relayout()
             if self.apply_state == "error":
                 self.apply_state = None
             self.update_fit()
@@ -2082,24 +2297,31 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                                     "recording": False, "error": r.get("warning")}
                 self.after(APPLY_CLOSE_MS, self.after_apply)
                 return
-            # Controller settings apply at once, without restarting the recording.
-            pads_only = bool(self.applied) and set(self.applied) <= set(settings.CONTROLLER_KEYS)
+            # Controller settings (and Keep history, Hour warning, Instant bar) apply at
+            # once, without restarting the recording.
+            applied = set(self.applied or ())
+            live_keys = set(getattr(settings, "LIVE_KEYS", ())) | set(settings.CONTROLLER_KEYS) | {
+                "keep_history", "hour_warning", "instant_bar"}
+            pads_only = bool(applied) and applied <= set(settings.CONTROLLER_KEYS)
+            live = (bool(applied) and applied <= live_keys) or r.get("restarted") is False
             if not r.get("online"):
                 tail = "takes effect when Momento starts"
             elif pads_only:
                 tail = "controller updated"
             elif r.get("paused"):
                 tail = "applies when you resume"
+            elif live:
+                tail = None
             else:
                 tail = "recording restarted"
-            self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— {tail}</span>")
-            if r.get("online") and not r.get("paused") and not pads_only:
+            self.foot.setText("Saved" if tail is None else f"Saved&nbsp;<span style='color:{MUTED}'>— {tail}</span>")
+            if r.get("online") and not r.get("paused") and not live:
                 # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
                                     "recording": False}
                 if (r.get("changed") or {}).get("record") == "window":
                     # the desktop's window picker opens now: get out of its way
-                    self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— pick the game window</span>")
+                    self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— pick a window</span>")
                     self.after(0, self.after_apply)
                     return
             self.after(APPLY_CLOSE_MS, self.after_apply)
@@ -2111,15 +2333,30 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.close_settings(focus_key=None)
                 self.close_bar()
 
-        def settings_row_index(self):
+        def settings_pos(self):
+            """Where focus is in settings: ("tabs", i), ("row", i) in visible_rows(), ("foot", 0)."""
             w = QApplication.focusWidget()
-            rows = self.visible_rows()
-            for i, r in enumerate(rows):
+            if w in self.tab_btns:
+                return "tabs", self.tab_btns.index(w)
+            for i, r in enumerate(self.visible_rows()):
                 if w is not None and r.isAncestorOf(w):
-                    return i
+                    return "row", i
             if w in (self.apply_btn, self.back_btn):
-                return len(rows)
-            return 0
+                return "foot", 0
+            return "row", 0
+
+        def focus_line(self, line):
+            """Settings are lines top to bottom: 0 the tabs, 1..n the open tab's rows, n+1 the footer."""
+            rows = self.visible_rows()
+            line = max(0, min(len(rows) + 1, line))
+            if line == 0 and self.tab_btns:
+                self.tab_btns[self.tab].setFocus(Qt.TabFocusReason)
+            elif 0 < line <= len(rows):
+                rows[line - 1].focus()
+            elif line == 0 and rows:
+                rows[0].focus()
+            else:
+                (self.apply_btn if self.apply_btn.isEnabled() else self.back_btn).setFocus(Qt.TabFocusReason)
 
         def settings_key(self, k):
             if k in (Qt.Key_Escape, Qt.Key_Backspace, Qt.Key_Back):
@@ -2128,27 +2365,30 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.apply_state in ("busy", "done"):
                 return True
             rows = self.visible_rows()
-            i = self.settings_row_index()
-            if k in (Qt.Key_Up, Qt.Key_Backtab, Qt.Key_Down, Qt.Key_Tab):
-                i = max(0, min(len(rows), i + (-1 if k in (Qt.Key_Up, Qt.Key_Backtab) else 1)))
-                if i < len(rows):
-                    rows[i].focus()
-                else:
-                    (self.apply_btn if self.apply_btn.isEnabled() else self.back_btn).setFocus(Qt.TabFocusReason)
+            pos, i = self.settings_pos()
+            if pos == "row" and not rows:
+                pos = "tabs"
+            line = {"tabs": 0, "row": 1 + i, "foot": 1 + len(rows)}[pos]
+            if k in (Qt.Key_PageUp, Qt.Key_PageDown):
+                self.step_tab(-1 if k == Qt.Key_PageUp else 1)
+            elif k in (Qt.Key_Up, Qt.Key_Backtab, Qt.Key_Down, Qt.Key_Tab):
+                self.focus_line(line + (-1 if k in (Qt.Key_Up, Qt.Key_Backtab) else 1))
             elif k in (Qt.Key_Left, Qt.Key_Right):
                 d = -1 if k == Qt.Key_Left else 1
-                if i < len(rows):
+                if pos == "tabs":
+                    self.switch_tab(self.tab + d, "tab")
+                elif pos == "row":
                     rows[i].step(d)
                 else:
                     tgt = self.apply_btn if d < 0 and self.apply_btn.isEnabled() else self.back_btn
                     tgt.setFocus(Qt.TabFocusReason)
             elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_Select):
-                if self.back_btn.hasFocus():
+                if pos == "tabs":
+                    self.focus_line(1)          # into the tab
+                elif self.back_btn.hasFocus():
                     self.close_settings()
-                elif self.change_btn is not None and self.change_btn.hasFocus():
-                    self.change_window()
                 else:
-                    self.apply_settings()
+                    self.apply_settings()       # one Apply for the changes on every tab
             return True
 
         def confirm_key(self, k):
@@ -2226,15 +2466,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.handle_key(_PadKey(k))
 
         def pad_section(self, d):
-            """Bumpers: jump between groups (clip lengths / buttons; first row / Apply)."""
+            """Bumpers: jump between groups (clip lengths / buttons) or settings tabs."""
             if self.mode == "settings":
-                if self.apply_state in ("busy", "done"):
-                    return
-                rows = self.visible_rows()
-                if d < 0 and rows:
-                    rows[0].focus()
-                elif d > 0:
-                    (self.apply_btn if self.apply_btn.isEnabled() else self.back_btn).setFocus(Qt.TabFocusReason)
+                self.step_tab(d)                # bumpers switch settings tabs
             elif self.mode == "confirm":
                 self.confirm_key(Qt.Key_Left)
             elif not (self.saving or self.done or self.control_busy):
@@ -2306,6 +2540,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.live_ticking = False
             self.saving = self.done = False
             self.control_busy = self.stopping = self.loading_settings = False
+            self.resume_picks = False
             self.status_inflight = False
             self.apply_state = None
             self.applied = None
@@ -2485,133 +2720,7 @@ def _init_app(argv):
     app.setStyle("Fusion")
     app.setApplicationName("Momento")
     app.setDesktopFileName("io.github.mehulchachada.Momento")
-    try:
-        _exclude_from_capture()
-    except Exception as e:  # noqa: BLE001 - never block the bar on this
-        log.debug("capture exclusion unavailable: %s", e)
     return app, use_layer_shell
-
-
-# Set once the compositor has agreed to leave the bar out of screen recordings.
-CAPTURE_EXCLUDED = False
-
-_KWIN_SCRIPT = """\
-// Momento: keep the clip bar out of screen recordings (KWin "exclude from capture").
-function mark(w) {
-  if (w && w.pid === %(pid)d && String(w.resourceClass).indexOf("python") === 0) {
-    w.excludeFromCapture = true;
-  }
-}
-workspace.stackingOrder.forEach(mark);
-workspace.windowAdded.connect(mark);
-"""
-
-
-# KWin gained the per-window "exclude from capture" property in 6.6.0; setting
-# it on an older KWin does nothing, so the bar would still be in clips.
-KWIN_EXCLUDE_MIN = (6, 6)
-
-
-def _kwin_script_name(pid: int) -> str:
-    return f"momento-exclude-{pid}"
-
-
-def _parse_kwin_version(text) -> tuple[int, int, int] | None:
-    """(6, 6, 0) from KWin's supportInformation ("KWin version: 6.6.0") or
-    ``kwin_wayland --version`` ("kwin 6.6.0"); None when there is no version."""
-    import re
-
-    m = re.search(r"(?:KWin version:|\bkwin(?:_wayland|_x11)?)\s+(\d+)\.(\d+)(?:\.(\d+))?",
-                  str(text or ""), re.IGNORECASE)
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
-
-
-def _kwin_can_exclude(version) -> bool:
-    return version is not None and tuple(version[:2]) >= KWIN_EXCLUDE_MIN
-
-
-def _kwin_version(bus=None) -> tuple[int, int, int] | None:
-    """The running KWin's version: D-Bus supportInformation, else ``kwin_wayland --version``."""
-    if bus is not None:
-        try:
-            from PySide6.QtDBus import QDBusInterface
-
-            kwin = QDBusInterface("org.kde.KWin", "/KWin", "org.kde.KWin", bus)
-            if kwin.isValid():
-                kwin.setTimeout(2000)
-                reply = kwin.call("supportInformation")
-                args = reply.arguments() if reply is not None else []
-                version = _parse_kwin_version(args[0]) if args else None
-                if version is not None:
-                    return version
-        except Exception as e:  # noqa: BLE001
-            log.debug("KWin supportInformation failed: %s", e)
-    try:
-        out = subprocess.run(["kwin_wayland", "--version"], capture_output=True, text=True, timeout=2)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return _parse_kwin_version(out.stdout or out.stderr)
-
-
-def _exclude_from_capture() -> bool:
-    """Ask KWin to hide this process's windows from screen capture.
-
-    KWin 6.6+ has a per-window "exclude from capture" switch that also keeps
-    a window out of full-monitor screencasts, which is what Momento records. The
-    bar is an unnamed layer surface, so a tiny KWin script matches it by our
-    PID. Returns False on other desktops (no KWin) and on older KWin, where the
-    bar falls back to ending clips at the moment it was opened.
-    """
-    global CAPTURE_EXCLUDED
-    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or os.environ.get("MOMENTO_TEST_SANDBOX"):
-        return False  # tests and headless runs must not touch the desktop's KWin
-    try:
-        from PySide6.QtDBus import QDBusConnection, QDBusInterface
-    except ImportError:
-        return False
-    bus = QDBusConnection.sessionBus()
-    if not bus.isConnected():
-        return False
-    kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
-    if not kwin.isValid():
-        return False
-    version = _kwin_version(bus)
-    if not _kwin_can_exclude(version):
-        log.info("KWin %s cannot hide the bar from capture (needs %d.%d+); clips end when the bar opens",
-                 ".".join(map(str, version)) if version else "(unknown version)", *KWIN_EXCLUDE_MIN)
-        return False
-    pid = os.getpid()
-    path = RUNTIME_DIR / f"{_kwin_script_name(pid)}.js"
-    try:
-        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        path.write_text(_KWIN_SCRIPT % {"pid": pid})
-    except OSError as e:
-        log.debug("cannot write the KWin script: %s", e)
-        return False
-    name = _kwin_script_name(pid)
-    kwin.call("unloadScript", name)
-    reply = kwin.call("loadScript", str(path), name)
-    args = reply.arguments() if reply is not None else []
-    if not args or not isinstance(args[0], int) or args[0] < 0:
-        log.debug("KWin refused the capture-exclusion script: %s", reply.errorMessage() if reply else "")
-        return False
-    kwin.call("start")
-    CAPTURE_EXCLUDED = True
-
-    def cleanup():
-        try:
-            kwin.call("unloadScript", name)
-            path.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001 - best effort at exit
-            pass
-
-    import atexit
-
-    atexit.register(cleanup)
-    log.info("clip bar hidden from screen capture (KWin)")
-    return True
 
 
 def _create_bar(app, use_layer_shell: bool, resident: bool = False):
