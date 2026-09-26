@@ -180,6 +180,8 @@ To change the shortcut, open settings (**Y**) and choose under **Controller**:
 
 Or in a terminal: `momento set controller left_paddle`. If a paddle seems swapped or a button does nothing, run `momento controller --watch` and press it to see what Momento gets.
 
+To open the bar with a quick tap instead of a hold, set **Open with** to **Tap** in settings under **Controller**. A tap can clash with emulators that use Select + Start.
+
 **Steam Gaming Mode:** the bar can't appear over the game there yet. Use Steam Input to bind a button to `momento save 30s` instead.
 
 ## Video quality
@@ -241,7 +243,7 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 | Microphone | `[audio] microphone` | `false` |
 | Clip folder | `[output] dir` | your Videos folder + `/Momento` |
 | Shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
-| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 300`. `enabled = false` turns controllers off |
+| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 300` (`0` = open on a tap). `enabled = false` turns controllers off |
 | History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
 | Instant bar | `[ui] keep_bar_loaded` | `true`: keeps the bar ready so it opens immediately; uses ~100 MB. Set `false` to save memory |
 

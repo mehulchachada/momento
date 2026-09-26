@@ -159,7 +159,9 @@ enabled = true
 # Examples: ["select", "start"], ["left_paddle"], ["thumbl", "thumbr"]
 open_chord = ["select", "start"]
 
-# How long to hold them, in milliseconds (0-5000).
+# How long to hold them, in milliseconds (0-5000). 0 opens the bar the instant
+# they are all down (a tap; "Open with: Tap" in the bar's settings). A tap can
+# clash with emulators that use Select + Start, so the default is a short hold.
 hold_ms = 300
 
 # While the bar is open, take the controller over so the game doesn't see the

@@ -392,7 +392,7 @@ class OverlayOffscreen(unittest.TestCase):
                          {"record": "window", "keep_history": "history", "resolution": "display",
                           "fps": "gauge", "quality": "sliders", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "controller_exclusive": "lock",
-                          "hour_warning": "hourglass", "instant_bar": "bolt"})
+                          "controller_open": "press_hold", "hour_warning": "hourglass", "instant_bar": "bolt"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
@@ -441,6 +441,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.tab_names[bar.tab], "Controller")
         self.assertTrue(bar.apply_btn.hasFocus())
         self.key(Qt.Key_Up)                      # the tab's last row
+        self.assertTrue(bar.row("controller_open").buttons[0].hasFocus())        # Hold
+        self.key(Qt.Key_Up)
         self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())   # On
         self.key(Qt.Key_Up)
         self.assertTrue(bar.row("controller").buttons[1].hasFocus())             # View + Menu
@@ -1048,7 +1050,8 @@ class OverlayOffscreen(unittest.TestCase):
             self.assertEqual(b.mapTo(bar, b.rect().topLeft()).y(), bar.tab_btns[0].mapTo(bar, b.rect().topLeft()).y())
         want = {"General": ["record", "keep_history"], "Video": ["resolution", "fps", "quality"],
                 "Audio": ["audio_source", "mic", "mic_device"],
-                "Controller": ["controller", "controller_exclusive"], "Misc": ["hour_warning", "instant_bar"]}
+                "Controller": ["controller", "controller_exclusive", "controller_open"],
+                "Misc": ["hour_warning", "instant_bar"]}
         heights = set()
         for i, name in enumerate(bar.tab_names):
             bar.switch_tab(i, "row")
@@ -1130,7 +1133,7 @@ class OverlayOffscreen(unittest.TestCase):
                          (["Off", "On"], "on", "lock"))
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Keep history", "Resolution", "Frame rate", "Quality", "Sound", "Mic",
-                          "Mic device", "Controller", "Exclusive", "Hour warning", "Instant bar"])
+                          "Mic device", "Controller", "Exclusive", "Open with", "Hour warning", "Instant bar"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
             self.assertLessEqual(lbl.fontMetrics().horizontalAdvance(lbl.text()), lbl.width())
@@ -1150,6 +1153,53 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(daemon.configures, [{"keep_history": "on", "hour_warning": 3, "instant_bar": "off"}])
         self.assertEqual(bar.foot.text(), "Saved")            # nothing restarted
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")
+
+    def test_settings_open_with_row(self):
+        """Controller tab: Open with (Hold / Tap), the third row; applies without a restart."""
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.move(100, 700)
+        h0, bottom0 = bar.height(), bar.y() + bar.height()
+        self.open_settings(bar)
+        bar.switch_tab(bar.tab_names.index("Controller"), "row")
+        pump(self.app, 0.05)
+        self.assertEqual([r.key for r in bar.visible_rows()], ["controller", "controller_exclusive", "controller_open"])
+        self.assertEqual(bar.panel_rows, 3)                       # still the tallest tab: no taller panel
+        self.assertEqual((bar.height(), bar.y() + bar.height()), (h0 + self.PANEL + 1, bottom0))
+        row = bar.row("controller_open")
+        self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.value, row.icon.kind),
+                         ("Open with", ["Hold", "Tap"], "hold", "press_hold"))
+        self.assertTrue(row.has_divider())
+        self.shot(bar, "settings-controller-hold", "controller")
+        self.key(Qt.Key_Down)
+        self.key(Qt.Key_Down)
+        self.assertTrue(row.buttons[0].hasFocus())
+        self.key(Qt.Key_Right)                                    # Tap
+        self.assertEqual((row.value, row.icon.kind), ("tap", "press_tap"))
+        self.assertEqual(bar.changes(), {"controller_open": "tap"})
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-controller-tap", "controller")
+        daemon.configure_reply = {"ok": True, "changed": {"controller_open": "tap"}, "restarted": False,
+                                  "paused": False}
+        self.key(Qt.Key_Return)
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertEqual(daemon.configures, [{"controller_open": "tap"}])
+        self.assertIn("controller updated", bar.foot.text())
+        self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
+
+    def test_settings_open_with_values(self):
+        daemon = FakeDaemon(True, values={"controller_open": "tap"})
+        bar = self.make(daemon)
+        self.open_settings(bar)
+        row = bar.row("controller_open")
+        self.assertEqual((row.value, row.icon.kind, row.buttons[1].selected()), ("tap", "press_tap", True))
+        bar.clear_rows()
+        data = settings_reply()                                   # no python-evdev: no controller rows
+        data["controller_available"] = False
+        bar.sdata = data
+        bar.build_rows()
+        self.assertEqual([r.key for r in bar.rows if r.key.startswith("controller")], [])
+        bar.clear_rows()
 
     def test_settings_tab_remembered(self):
         bar = self.make(FakeDaemon(True))
@@ -1919,6 +1969,8 @@ class ControllerBar(unittest.TestCase):
         self.assertEqual(bar.changes(), {"controller": "left_paddle"})
         self.down()
         self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())
+        self.down()
+        self.assertTrue(bar.row("controller_open").buttons[0].hasFocus())       # Hold
         self.down()                                    # the footer
         self.assertTrue(bar.apply_btn.hasFocus())
         self.right()

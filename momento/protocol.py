@@ -156,8 +156,9 @@ open bar reads the controllers itself and releases them when it hides.
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` /
-    ``controller_exclusive`` / ``keep_history`` / ``hour_warning`` /
-    ``instant_bar`` apply without a reload (``restarted: false``);
+    ``controller_exclusive`` / ``controller_open`` / ``keep_history`` /
+    ``hour_warning`` / ``instant_bar`` apply without a reload
+    (``restarted: false``);
     ``changed`` holds the value read back (``"on"`` -> the shortcut it enables). Refused with ``code: no_storage`` (nothing written) only
     when the new settings do not fit AND raise the requirement over the saved
     ones AND ``force`` is not true; so shrinking always works. With ``force``
@@ -283,6 +284,8 @@ SETTING_VALUES = {
     # joined with "+" ("select+mode"); configure also takes "on" (enable, keep the shortcut)
     "controller": (("string",), False),
     "controller_exclusive": (("string",), False),   # "on" | "off"
+    # "hold" ([controller] hold_ms above 0, default 300) | "tap" (hold_ms = 0: opens on press)
+    "controller_open": (("string",), False),
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
     "hour_warning": (("integer",), False),  # minutes before the hour mark to warn: 3-10 (UI: 10, 5, 3)
     "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
@@ -294,6 +297,7 @@ SETTING_CHOICES = {
     "quality": (("array",), True),
     "fps": (("array",), True),
     "controller": (("array",), False),     # ["off", <preset keys>]
+    "controller_open": (("array",), False),  # ["hold", "tap"]
     "keep_history": (("array",), False),   # ["off", "on"]
     "hour_warning": (("array",), False),   # [10, 5, 3]
     "instant_bar": (("array",), False),    # ["on", "off"]

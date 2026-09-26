@@ -31,6 +31,8 @@ KEYS = {
     "controller": "off, on, or the shortcut that opens the bar: view_menu, left_paddle, right_paddle, "
                   "l3_r3, or buttons joined with + (e.g. select+start)",
     "controller_exclusive": "on, off (take the controller over while the bar is open)",
+    "controller_open": "hold, tap (hold the shortcut for a moment to open the bar, or open it the "
+                       "instant the buttons are down)",
     "keep_history": "off, on (keep the replay when recording stops, and save every full hour "
                     "to your clips folder)",
     "hour_warning": "10, 5, 3 (minutes before the hour mark to warn; any whole number 3-10)",
@@ -38,7 +40,7 @@ KEYS = {
 }
 
 # Settings that only concern the controller: changing them never restarts recording.
-CONTROLLER_KEYS = ("controller", "controller_exclusive")
+CONTROLLER_KEYS = ("controller", "controller_exclusive", "controller_open")
 # Every setting that takes effect without restarting the recording.
 LIVE_KEYS = CONTROLLER_KEYS + ("keep_history", "hour_warning", "instant_bar")
 
@@ -48,7 +50,7 @@ TABS = (
     ("General", ("record", "keep_history")),
     ("Video", ("resolution", "fps", "quality")),
     ("Audio", ("audio_source", "mic", "mic_device")),
-    ("Controller", ("controller", "controller_exclusive")),
+    ("Controller", ("controller", "controller_exclusive", "controller_open")),
     ("Misc", ("hour_warning", "instant_bar")),
 )
 
@@ -58,6 +60,12 @@ _RECORD_ALIASES = {"screen": "screen", "full": "screen", "fullscreen": "screen",
                    "full-screen": "screen", "monitor": "screen", "display": "screen", "desktop": "screen",
                    "window": "window", "game": "window", "game window": "window", "game-window": "window",
                    "app": "window"}
+
+# How the controller shortcut opens the bar: user-facing value -> clip-bar label.
+# "hold" is [controller] hold_ms above 0 (the default, 0.3 s), "tap" is hold_ms = 0
+# (open the instant every button of the shortcut is down).
+CONTROLLER_OPEN_LABELS = {"hold": "Hold", "tap": "Tap"}
+_OPEN_ALIASES = {"hold": "hold", "long": "hold", "tap": "tap", "press": "tap", "instant": "tap"}
 
 _RES_ALIASES = {"4k": "2160p", "uhd": "2160p", "2k": "1440p", "qhd": "1440p", "fhd": "1080p", "hd": "720p"}
 _ON = {"on", "true", "yes", "1"}
@@ -158,6 +166,11 @@ def normalize(key: str, value):
         return _device(v)
     if key == "controller":
         return _controller(value)
+    if key == "controller_open":
+        v = _OPEN_ALIASES.get(" ".join(str(value).strip().lower().split()))
+        if v is None or isinstance(value, bool):
+            raise ValueError("choose one of: hold, tap")
+        return v
     raise ValueError(f"unknown setting {key!r} (choose: {', '.join(KEYS)})")
 
 
@@ -255,6 +268,9 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
                 ("controller", "open_chord", buttons or list(gamepad.normalize_chord(value)))]
     if key == "controller_exclusive":
         return [("controller", "exclusive", value == "on")]
+    if key == "controller_open":
+        hold = config.DEFAULTS["controller"]["hold_ms"] if value == "hold" else 0
+        return [("controller", "hold_ms", hold)]
     if key == "keep_history":
         return [("buffer", "keep_history", value == "on")]
     if key == "hour_warning":
@@ -281,10 +297,18 @@ def current(cfg: dict) -> dict:
         "mic_device": "default" if mic_dev == DEFAULT_SOURCE else mic_dev,
         "controller": _chord_value(ctl["chord"]) if ctl["enabled"] else "off",
         "controller_exclusive": "on" if ctl["exclusive"] else "off",
+        # any hold_ms above 0 (e.g. a hand-edited 500) is "hold"
+        "controller_open": "tap" if ctl["hold_ms"] == 0 else "hold",
         "keep_history": "on" if config.keep_history(cfg) else "off",
         "hour_warning": config.warn_minutes(cfg),
         "instant_bar": "on" if (cfg.get("ui") or {}).get("keep_bar_loaded", True) else "off",
     }
+
+
+# Settings that several config values read as (controller_open "hold" is any
+# hold_ms above 0): choosing the value they already have writes nothing, so a
+# hand-edited value behind it survives.
+_KEEP_IF_SAME = ("controller_open",)
 
 
 def apply(changes: dict, path: Path | str | None = None) -> dict:
@@ -297,6 +321,8 @@ def apply(changes: dict, path: Path | str | None = None) -> dict:
     path = Path(path) if path else config.default_path()
     before = current(config.load(path))
     for key, value in clean.items():
+        if key in _KEEP_IF_SAME and before.get(key) == value:
+            continue  # "hold" over a hand-edited hold_ms = 500 keeps the 500
         for section, name, val in writes(key, value):
             config.set_value(section, name, val, path)
     after = current(config.load(path))  # "controller": "on" reads back as the shortcut it enables
@@ -308,7 +334,10 @@ def preview(cfg: dict, changes: dict) -> dict:
     import copy
 
     out = copy.deepcopy(cfg)
+    before = current(cfg)
     for key, value in validate(changes).items():
+        if key in _KEEP_IF_SAME and before.get(key) == value:
+            continue
         for section, name, val in writes(key, value):
             out.setdefault(section, {})[name] = val
     return out
@@ -324,6 +353,7 @@ def describe(cfg: dict, devices: dict | None = None) -> dict:
         "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
                     "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS],
+                    "controller_open": list(CONTROLLER_OPEN_LABELS),
                     "keep_history": ["off", "on"], "hour_warning": list(config.WARN_MINUTES),
                     "instant_bar": ["on", "off"]},
         "tabs": [[name, list(keys)] for name, keys in TABS],

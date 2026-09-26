@@ -542,6 +542,35 @@ class CLITest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 cli.main(["set", "controllr", "on"])
 
+    def test_set_controller_open(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, config, ipc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            out = io.StringIO()
+            with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "set", "controller_open", "tap"]), 0)
+                self.assertEqual(cli.main(["--config", str(path), "settings"]), 0)
+            self.assertIn("controller_open = tap", out.getvalue())
+            self.assertIn("controller: press View + Menu to open or close the bar", out.getvalue())
+            self.assertEqual(config.load_controller(path)["hold_ms"], 0)
+            out = io.StringIO()
+            reply = {"ok": True, "changed": {"controller_open": "hold"}, "restarted": False, "paused": False}
+            config.set_value("controller", "hold_ms", 300, path)   # what the daemon writes
+            with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "set", "controller_open", "hold"]), 0)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"controller_open": "hold"}}, timeout=30)
+            self.assertIn("Saved. Hold View + Menu (0.3 s) to open or close the bar.", out.getvalue())
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["--config", str(path), "set", "controller_open", "double"]), 1)
+            self.assertIn("choose one of: hold, tap", err.getvalue())
+
     def test_storage_line(self):
         from momento import cli
 
@@ -2164,6 +2193,39 @@ class ControllerSettingTest(unittest.TestCase):
                          {"controller_exclusive": "off"})
         self.assertFalse(self.config.controller(self.config.load(self.path))["exclusive"])
 
+    def test_controller_open(self):
+        """Open with: hold (hold_ms > 0, default 300) or tap (hold_ms = 0)."""
+        cfg = self.config.load(self.path)
+        self.assertEqual(self.settings.current(cfg)["controller_open"], "hold")
+        d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["choices"]["controller_open"], ["hold", "tap"])
+        v = self.settings.validate
+        self.assertEqual(v({"controller_open": " Tap "}), {"controller_open": "tap"})
+        self.assertEqual(v({"controller_open": "instant"}), {"controller_open": "tap"})
+        self.assertEqual(v({"controller_open": "HOLD"}), {"controller_open": "hold"})
+        for bad in ("double", "", True, 0, 300):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                v({"controller_open": bad})
+            self.assertTrue(str(cm.exception).startswith("controller_open: choose one of: hold, tap"))
+        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {"controller_open": "tap"})
+        self.assertIn("# mine", self.path.read_text())
+        self.assertIn("hold_ms = 0", self.path.read_text())
+        self.assertEqual(self.config.load_controller(self.path)["hold_ms"], 0)
+        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {})
+        self.assertEqual(self.settings.apply({"controller_open": "hold"}, self.path), {"controller_open": "hold"})
+        self.assertEqual(self.config.load_controller(self.path)["hold_ms"],
+                         self.config.DEFAULTS["controller"]["hold_ms"])
+        # a hand-edited hold reads as "hold" and survives unless the row changes
+        self.config.set_value("controller", "hold_ms", 500, self.path)
+        cfg = self.config.load(self.path)
+        self.assertEqual(self.settings.current(cfg)["controller_open"], "hold")
+        self.assertEqual(self.settings.preview(cfg, {"controller_open": "hold"})["controller"]["hold_ms"], 500)
+        self.assertEqual(self.settings.apply({"controller_open": "hold", "controller_exclusive": "off"}, self.path),
+                         {"controller_exclusive": "off"})
+        self.assertEqual(self.config.load_controller(self.path)["hold_ms"], 500)
+        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {"controller_open": "tap"})
+        self.assertEqual(self.config.load_controller(self.path)["hold_ms"], 0)
+
     def test_example_config_matches_defaults(self):
         import tomllib
 
@@ -2245,6 +2307,26 @@ class DaemonControllerTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["changed"], r["restarted"]), (True, {}, False))
         self.assertIs(self.d.recorder, rec)
 
+    def test_tap_applies_live_and_opens_on_press(self):
+        self.d._sync_controller()
+        rec, hub = self.d.recorder, self.d.pads
+        self.assertAlmostEqual(hub.hold, 0.3)
+        r = self.call({"cmd": "configure", "changes": {"controller_open": "tap"}})
+        self.assertEqual((r["ok"], r["restarted"], r["changed"]), (True, False, {"controller_open": "tap"}))
+        self.assertIs(self.d.recorder, rec)                            # recording untouched
+        self.assertEqual(rec.stopped, 0)
+        self.assertIs(self.d.pads, hub)                                # same hub, no hold
+        self.assertEqual(hub.hold, 0)
+        g, dev = self.gamepad, self.devs[-1]
+        for code in (g.BTN_SELECT, g.BTN_START):
+            dev.push(g.EV_KEY, code, 1)
+        hub.process(dev.fileno())                                      # no tick: fires on press
+        self.assertEqual(self.opened, [100.0])
+        self.assertEqual(self.call({"cmd": "settings"})["values"]["controller_open"], "tap")
+        r = self.call({"cmd": "configure", "changes": {"controller_open": "hold"}})
+        self.assertEqual((r["restarted"], r["changed"]), (False, {"controller_open": "hold"}))
+        self.assertAlmostEqual(hub.hold, 0.3)
+
     def test_mixed_change_reloads_once(self):
         self.d._sync_controller()
         r = self.call({"cmd": "configure", "changes": {"controller": "right_paddle", "resolution": "720p"}})
@@ -2300,7 +2382,7 @@ class HistorySettingsTest(unittest.TestCase):
         self.assertEqual(d["tabs"], [["General", ["record", "keep_history"]],
                                      ["Video", ["resolution", "fps", "quality"]],
                                      ["Audio", ["audio_source", "mic", "mic_device"]],
-                                     ["Controller", ["controller", "controller_exclusive"]],
+                                     ["Controller", ["controller", "controller_exclusive", "controller_open"]],
                                      ["Misc", ["hour_warning", "instant_bar"]]])
         for _name, keys in self.settings.TABS:
             for key in keys:
@@ -2339,7 +2421,8 @@ class HistorySettingsTest(unittest.TestCase):
 
     def test_live_keys(self):
         self.assertEqual(set(self.settings.LIVE_KEYS),
-                         {"controller", "controller_exclusive", "keep_history", "hour_warning", "instant_bar"})
+                         {"controller", "controller_exclusive", "controller_open", "keep_history",
+                          "hour_warning", "instant_bar"})
 
     def test_example_config_documents_them(self):
         import tomllib

@@ -87,14 +87,17 @@ def storage_line(st: dict) -> str:
 
 
 def controller_line(cfg: dict) -> str:
-    """"hold View + Menu (0.3 s) to open or close the bar" / "off"."""
+    """"hold View + Menu (0.3 s) to open or close the bar" / "press View + Menu ..." / "off"."""
     from . import gamepad
 
     ctl = config.controller(cfg)
     if not ctl["enabled"]:
         return "off"
     label = settings.controller_label(settings.current(cfg)["controller"])
-    line = f"hold {label} ({ctl['hold_ms'] / 1000:g} s) to open or close the bar"
+    if ctl["hold_ms"]:
+        line = f"hold {label} ({ctl['hold_ms'] / 1000:g} s) to open or close the bar"
+    else:   # controller_open = tap
+        line = f"press {label} to open or close the bar"
     if not ctl["exclusive"]:
         line += "; the game also sees the presses"
     if not gamepad.available():

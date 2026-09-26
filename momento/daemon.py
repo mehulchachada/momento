@@ -422,7 +422,8 @@ class Daemon:
             self._pads_handle = hub.attach_glib()
         except Exception:  # noqa: BLE001 - no GLib main loop (tests)
             log.debug("controller hub not attached to a main loop", exc_info=True)
-        log.info("controller shortcut: %s held %.1f s", " + ".join(ctl["chord"]), ctl["hold_ms"] / 1000)
+        log.info("controller shortcut: %s %s", " + ".join(ctl["chord"]),
+                 f"held {ctl['hold_ms'] / 1000:g} s" if ctl["hold_ms"] else "tapped")
 
     def _close_controller(self) -> None:
         hub, self.pads = self.pads, None

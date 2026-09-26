@@ -422,6 +422,38 @@ class Chord(Base):
         self.push(hub, d, EV_KEY, BTN_THUMBR, 1)
         self.assertEqual(self.chords, [100.0])
 
+    def test_tap_fires_on_press(self):
+        """hold_ms = 0 (Open with: Tap): the chord fires the instant both buttons are down."""
+        hub = self.hub(hold_ms=300)
+        d = self.dev()
+        hub.add_device(d)
+        hub.set_chord(("select", "start"), 0)             # switched live, same hub
+        self.push(hub, d, EV_KEY, BTN_SELECT, 1)
+        self.assertEqual(self.chords, [])
+        self.clock.t = 100.05
+        self.push(hub, d, EV_KEY, BTN_START, 1)
+        self.assertEqual(self.chords, [100.05])            # no tick needed
+        self.assertIsNone(hub.next_timeout())              # and no timer left behind
+        self.at(hub, 103.0)                                # still held: once
+        self.assertEqual(len(self.chords), 1)
+        self.push(hub, d, EV_KEY, BTN_START, 0)
+        self.clock.t = 103.1
+        self.push(hub, d, EV_KEY, BTN_START, 1)            # tapped again
+        self.assertEqual(self.chords, [100.05, 103.1])
+
+    def test_tap_held_when_opened_needs_release(self):
+        """A bar opened by a tap sees the chord still down: it doesn't close at once."""
+        hub = self.hub(hold_ms=0)
+        d = self.dev()
+        d.held |= {BTN_SELECT, BTN_START}
+        hub.add_device(d)
+        self.at(hub, 100.1)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_KEY, BTN_SELECT, 0)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_KEY, BTN_SELECT, 1)
+        self.assertEqual(self.chords, [100.1])
+
     def test_disabled(self):
         hub = self.hub(chord=None)
         d = self.dev()

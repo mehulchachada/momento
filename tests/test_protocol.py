@@ -380,6 +380,16 @@ class DaemonContractTest(_DaemonCase):
         self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"]),
                          ("on", 5, "off"))
 
+    def test_controller_open(self):
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual((r["values"]["controller_open"], r["choices"]["controller_open"]), ("hold", ["hold", "tap"]))
+        r = self.check({"cmd": "configure", "changes": {"controller_open": "tap"}}, ok=True)
+        self.assertEqual((r["changed"], r["restarted"], r["state"]), ({"controller_open": "tap"}, False, "recording"))
+        self.assertIn("hold_ms = 0", self.path.read_text())
+        self.assertEqual(self.check({"cmd": "settings"}, ok=True)["values"]["controller_open"], "tap")
+        r = self.check({"cmd": "configure", "changes": {"controller_open": "double"}}, ok=False)
+        self.assertTrue(r["error"].startswith("controller_open:"), r)
+
     def test_settings_tabs(self):
         from momento import settings
 
