@@ -1,0 +1,415 @@
+"""Core tests: python3 -m unittest discover -s tests (or python3 -m unittest tests.test_core)."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from momento import durations  # noqa: E402
+from momento.ringbuffer import RingBuffer, Segment, Selection  # noqa: E402
+
+
+class DurationsTest(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(durations.parse("15s"), 15)
+        self.assertEqual(durations.parse("5m"), 300)
+        self.assertEqual(durations.parse("1h"), 3600)
+        self.assertEqual(durations.parse("90"), 90)
+        self.assertEqual(durations.parse(" 2 min "), 120)
+        for bad in ("", "abc", "5x", "0s", "2h", "-5s"):
+            with self.assertRaises(ValueError, msg=bad):
+                durations.parse(bad)
+
+    def test_presets_parse_to_their_seconds(self):
+        for seconds, lab in durations.PRESETS:
+            self.assertEqual(durations.parse(lab), seconds)
+            self.assertEqual(durations.label(seconds), lab if lab != "60m" else "60m")
+
+    def test_label_and_clock(self):
+        self.assertEqual(durations.label(15), "15s")
+        self.assertEqual(durations.label(60), "1m")
+        self.assertEqual(durations.label(200), "3m20s")
+        self.assertEqual(durations.label(299.6), "5m")
+        self.assertEqual(durations.clock(75), "1:15")
+        self.assertEqual(durations.clock(3600), "1:00:00")
+
+
+def _fill(ring: RingBuffer, d: Path, n: int, length: float = 10.0, base: float = 1000.0) -> list[Path]:
+    paths = []
+    for i in range(n):
+        p = d / f"seg{i:05d}.ts"
+        p.write_bytes(b"x")
+        ring.opened(p, base + i * length)
+        ring.closed(p, base + (i + 1) * length)
+        paths.append(p)
+    return paths
+
+
+class RingBufferTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="momento-test-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_select_offsets(self):
+        ring = RingBuffer(max_seconds=3600)
+        paths = _fill(ring, self.tmp, 6)  # [1000, 1060)
+        sel = ring.select(1023.0, 1047.0)
+        self.assertEqual([s.path for s in sel.segments], paths[2:5])
+        self.assertAlmostEqual(sel.offset, 3.0)
+        self.assertAlmostEqual(sel.duration, 24.0)
+        self.assertAlmostEqual(sel.start, 1023.0)
+        self.assertAlmostEqual(sel.end, 1047.0)
+        ring.release(sel)
+
+    def test_select_clamps_to_available(self):
+        ring = RingBuffer(max_seconds=3600)
+        _fill(ring, self.tmp, 3)  # [1000, 1030)
+        sel = ring.select(1030.0 - 300, 1030.0)
+        self.assertAlmostEqual(sel.offset, 0.0)
+        self.assertAlmostEqual(sel.duration, 30.0)
+        ring.release(sel)
+        self.assertAlmostEqual(ring.buffered_seconds(), 30.0)
+
+    def test_select_ignores_open_segment_and_empty(self):
+        ring = RingBuffer(max_seconds=3600)
+        self.assertIsNone(ring.select(0, 1e12))
+        p = self.tmp / "open.ts"
+        p.write_bytes(b"x")
+        ring.opened(p, 1000.0)
+        self.assertIsNone(ring.select(0, 1e12))
+        self.assertEqual(ring.buffered_seconds(), 0.0)
+
+    def test_prune_past_max(self):
+        ring = RingBuffer(max_seconds=30, margin=0)
+        paths = _fill(ring, self.tmp, 10)  # [1000, 1100); cutoff 1070
+        alive = [p for p in paths if p.exists()]
+        self.assertEqual(alive, paths[6:])
+        self.assertLessEqual(ring.buffered_seconds(), 30)
+
+    def test_pinning_prevents_prune(self):
+        ring = RingBuffer(max_seconds=30, margin=0)
+        paths = _fill(ring, self.tmp, 4)  # [1000, 1040)
+        sel = ring.select(1000.0, 1015.0)  # pins seg0, seg1
+        self.assertEqual([s.path for s in sel.segments], paths[:2])
+        more = _fill_from(ring, self.tmp, 4, 6)  # up to 1100 -> cutoff 1070
+        self.assertTrue(paths[0].exists() and paths[1].exists())
+        self.assertFalse(paths[2].exists())
+        ring.release(sel)
+        self.assertFalse(paths[0].exists() or paths[1].exists())
+        self.assertTrue(more[-1].exists())
+
+
+def _fill_from(ring, d, start_index, count, length=10.0, base=1000.0):
+    paths = []
+    for i in range(start_index, start_index + count):
+        p = d / f"seg{i:05d}.ts"
+        p.write_bytes(b"x")
+        ring.opened(p, base + i * length)
+        ring.closed(p, base + (i + 1) * length)
+        paths.append(p)
+    return paths
+
+
+# --- exporter -------------------------------------------------------------------
+
+SEG_SECONDS = 2
+SEG_COUNT = 6
+
+
+def _have(*tools) -> bool:
+    return all(shutil.which(t) for t in tools)
+
+
+def _gst_has(element: str) -> bool:
+    return subprocess.run(["gst-inspect-1.0", element], capture_output=True).returncode == 0
+
+
+def make_segments(d: Path) -> list[Path]:
+    """~SEG_COUNT keyframe-aligned 2 s MPEG-TS segments with H.264 + AAC (1 s GOP)."""
+    frames = SEG_COUNT * SEG_SECONDS * 30
+    audio_bufs = int(SEG_COUNT * SEG_SECONDS * 44100 / 1024)
+    encoders = ["x264enc tune=zerolatency key-int-max=30", "vah264enc key-int-max=30",
+                "openh264enc gop-size=30"]
+    if _have("gst-launch-1.0", "gst-inspect-1.0") and _gst_has("avenc_aac"):
+        for enc in encoders:
+            if not _gst_has(enc.split()[0]):
+                continue
+            cmd = (
+                f"gst-launch-1.0 -q -e videotestsrc num-buffers={frames} pattern=ball "
+                f"! video/x-raw,width=320,height=240,framerate=30/1 ! videoconvert ! {enc} "
+                f"! h264parse config-interval=-1 ! queue ! mux.video "
+                f"audiotestsrc num-buffers={audio_bufs} wave=ticks ! audioconvert ! audioresample "
+                f"! avenc_aac ! aacparse ! queue ! mux.audio_0 "
+                f"splitmuxsink name=mux muxer=mpegtsmux max-size-time={SEG_SECONDS * 10**9} "
+                f"location={d}/seg%05d.ts"
+            )
+            if subprocess.run(cmd, shell=True, capture_output=True, timeout=120).returncode == 0:
+                segs = sorted(d.glob("seg*.ts"))
+                if len(segs) >= SEG_COUNT - 1:
+                    return segs
+            for p in d.glob("seg*.ts"):
+                p.unlink()
+    # Fallback: ffmpeg's own segmenter (keeps continuous timestamps too).
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=30:duration={SEG_COUNT * SEG_SECONDS}",
+         "-f", "lavfi", "-i", f"sine=frequency=440:duration={SEG_COUNT * SEG_SECONDS}",
+         "-c:v", "libx264", "-g", "30", "-c:a", "aac",
+         "-f", "segment", "-segment_time", str(SEG_SECONDS), "-segment_format", "mpegts",
+         str(d / "seg%05d.ts")],
+        check=True, capture_output=True, timeout=120,
+    )
+    return sorted(d.glob("seg*.ts"))
+
+
+def probe(path: Path) -> dict:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration:stream=codec_type,start_time,duration", "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(out.stdout)
+
+
+def first_video_packet(path: Path) -> dict:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1",
+         "-show_entries", "packet=pts_time,flags", "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(out.stdout)["packets"][0]
+
+
+@unittest.skipUnless(_have("ffmpeg", "ffprobe"), "ffmpeg/ffprobe not installed")
+class ExporterTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="momento-export-"))
+        cls.segdir = cls.tmp / "buffer"
+        cls.segdir.mkdir()
+        try:
+            cls.paths = make_segments(cls.segdir)
+        except (subprocess.SubprocessError, OSError) as e:
+            raise unittest.SkipTest(f"cannot generate fixture footage: {e}")
+        if len(cls.paths) < 4:
+            raise unittest.SkipTest("fixture generation produced too few segments")
+        cls.base = 1_000_000.0
+        cls.segments = [
+            Segment(p, cls.base + i * SEG_SECONDS, cls.base + (i + 1) * SEG_SECONDS)
+            for i, p in enumerate(cls.paths)
+        ]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _check(self, out: Path, expected: float):
+        from momento import exporter  # noqa: F401
+
+        info = probe(out)
+        types = sorted(s["codec_type"] for s in info["streams"])
+        self.assertEqual(types, ["audio", "video"])
+        duration = float(info["format"]["duration"])
+        self.assertLess(abs(duration - expected), 1.0, f"duration {duration} vs {expected}")
+        for s in info["streams"]:
+            self.assertLess(abs(float(s["start_time"])), 0.1, f"{s['codec_type']} starts late: {s}")
+        pkt = first_video_packet(out)
+        self.assertIn("K", pkt["flags"], "first video packet is not a keyframe")
+        # Keyframe is the first thing shown (pts may trail 0 by the B-frame delay).
+        self.assertLess(abs(float(pkt["pts_time"])), 0.1)
+        self.assertFalse(any(p.name.startswith(".") for p in out.parent.iterdir()), "temp files left behind")
+        # Decodes cleanly from the first packet (no missing-reference errors).
+        dec = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-f", "null", "-"],
+                             capture_output=True, text=True)
+        self.assertEqual((dec.returncode, dec.stderr.strip()), (0, ""))
+
+    def test_export_mid_segment(self):
+        from momento import exporter
+
+        ring = RingBuffer(3600)
+        ring._segments = [Segment(s.path, s.start, s.end) for s in self.segments]
+        since = self.base + SEG_SECONDS + 1.3
+        until = since + 5.5
+        sel = ring.select(since, until)
+        self.assertAlmostEqual(sel.offset, 1.3)
+        out = exporter.export(sel, self.tmp / "out" / "mid.mp4")
+        ring.release(sel)
+        self.assertTrue(out.exists())
+        self._check(out, 5.5)
+
+    def test_export_whole_buffer(self):
+        from momento import exporter
+
+        segs = self.segments[:-1]  # the last one may be ragged; mirror a closed buffer
+        total = segs[-1].end - segs[0].start
+        sel = Selection(segs, offset=0.0, duration=total, start=segs[0].start, end=segs[-1].end)
+        out = exporter.export(sel, self.tmp / "out" / "all.mp4")
+        self._check(out, total)
+
+    def test_export_tail(self):
+        from momento import exporter
+
+        segs = self.segments[-3:-1]
+        sel = Selection(segs, offset=0.6, duration=3.0, start=segs[0].start + 0.6, end=segs[0].start + 3.6)
+        out = exporter.export(sel, self.tmp / "out" / "tail.mp4")
+        self._check(out, 3.0)
+
+    def test_missing_segment_raises(self):
+        from momento import exporter
+
+        seg = Segment(self.tmp / "nope.ts", 0.0, 2.0)
+        sel = Selection([seg], 0.0, 2.0, 0.0, 2.0)
+        with self.assertRaises(exporter.ExportError):
+            exporter.export(sel, self.tmp / "out" / "fail.mp4")
+        self.assertFalse((self.tmp / "out" / "fail.mp4").exists())
+
+
+class OutputPathTest(unittest.TestCase):
+    def test_unique_and_template(self):
+        from momento import exporter
+
+        tmp = Path(tempfile.mkdtemp(prefix="momento-out-"))
+        try:
+            cfg = {"output": {"dir": str(tmp / "clips"), "filename": "Replay_{date}_{time}_{length}.mp4"}}
+            when = datetime(2026, 9, 26, 18, 5, 7)
+            p1 = exporter.output_path(cfg, 300, when)
+            self.assertEqual(p1.name, "Replay_2026-09-26_18-05-07_5m.mp4")
+            self.assertTrue(p1.parent.is_dir())
+            p1.touch()
+            p2 = exporter.output_path(cfg, 300, when)
+            self.assertEqual(p2.name, "Replay_2026-09-26_18-05-07_5m_2.mp4")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --- ipc --------------------------------------------------------------------------
+
+def _gi_available() -> bool:
+    try:
+        from gi.repository import GLib  # noqa: F401
+        return True
+    except (ImportError, ValueError):
+        return False
+
+
+@unittest.skipUnless(_gi_available(), "PyGObject not available")
+class IPCTest(unittest.TestCase):
+    def setUp(self):
+        from gi.repository import GLib
+
+        from momento import ipc
+
+        self.tmp = Path(tempfile.mkdtemp(prefix="momento-ipc-"))
+        self.sock = self.tmp / "test.sock"
+        self.ctx = GLib.MainContext.default()
+        self.loop = GLib.MainLoop()
+        self.handler_threads = []
+
+        def handler(msg, reply):
+            self.handler_threads.append(threading.current_thread())
+            if msg.get("cmd") == "echo":
+                reply({"ok": True, "echo": msg.get("value")})
+            elif msg.get("cmd") == "later":
+                # Asynchronous reply from the main loop, after a delay.
+                GLib.timeout_add(200, lambda: (reply({"ok": True, "late": True}), False)[1])
+            elif msg.get("cmd") == "boom":
+                raise RuntimeError("kaboom")
+            else:
+                reply({"ok": False, "error": "unknown"})
+
+        self.server = ipc.Server(self.sock, handler)
+        self.server.start()
+        self.loop_thread = threading.Thread(target=self.loop.run, daemon=True)
+        self.loop_thread.start()
+        self.ipc = ipc
+
+    def tearDown(self):
+        self.server.close()
+        self.loop.quit()
+        self.loop_thread.join(2)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_round_trip(self):
+        r = self.ipc.request({"cmd": "echo", "value": [1, "two"]}, timeout=5, path=self.sock)
+        self.assertEqual(r, {"ok": True, "echo": [1, "two"]})
+        self.assertEqual(oct(os.stat(self.sock).st_mode & 0o777), "0o600")
+        self.assertIs(self.handler_threads[0], self.loop_thread)
+
+    def test_async_reply_and_concurrency(self):
+        results = {}
+
+        def call(name, cmd):
+            results[name] = self.ipc.request({"cmd": cmd}, timeout=5, path=self.sock)
+
+        threads = [threading.Thread(target=call, args=(f"l{i}", "later")) for i in range(3)]
+        threads.append(threading.Thread(target=call, args=("e", "echo")))
+        t0 = time.monotonic()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(results["l0"], {"ok": True, "late": True})
+        self.assertEqual(results["e"]["ok"], True)
+
+    def test_handler_exception_becomes_error(self):
+        with self.assertLogs("momento.ipc", "ERROR"):
+            r = self.ipc.request({"cmd": "boom"}, timeout=5, path=self.sock)
+        self.assertFalse(r["ok"])
+        self.assertIn("kaboom", r["error"])
+
+    def test_not_running(self):
+        with self.assertRaises(self.ipc.DaemonNotRunning):
+            self.ipc.request({"cmd": "status"}, timeout=1, path=self.tmp / "missing.sock")
+        stale = self.tmp / "stale.sock"
+        import socket
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(stale))
+        s.close()  # socket file remains, nobody listening
+        with self.assertRaises(self.ipc.DaemonNotRunning):
+            self.ipc.request({"cmd": "status"}, timeout=1, path=stale)
+        # A new server takes over a stale socket file.
+        server = self.ipc.Server(stale, lambda m, r: r({"ok": True}))
+        server.start()
+        try:
+            self.assertEqual(self.ipc.request({"cmd": "x"}, timeout=5, path=stale), {"ok": True})
+        finally:
+            server.close()
+        self.assertFalse(stale.exists())
+
+    def test_refuses_to_steal_live_socket(self):
+        with self.assertRaises(RuntimeError):
+            self.ipc.Server(self.sock, lambda m, r: None).start()
+
+
+class CLITest(unittest.TestCase):
+    def test_parser(self):
+        from momento import cli
+
+        args = cli.build_parser().parse_args(["save", "5m"])
+        self.assertEqual((args.command, args.duration), ("save", 300))
+        args = cli.build_parser().parse_args(["-v", "--config", "/x.toml", "status"])
+        self.assertEqual((args.command, args.verbose, str(args.config)), ("status", 1, "/x.toml"))
+        import contextlib
+        import io
+
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.build_parser().parse_args(["save", "3h"])
+
+
+if __name__ == "__main__":
+    unittest.main()

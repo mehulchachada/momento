@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Momento</title>
+  <!-- A clock face: the red slice is the stretch of time just before "now"
+       (12 o'clock) that Momento keeps. -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#121212"/>
+  <circle cx="128" cy="128" r="84" fill="#F3EFE6"/>
+  <path d="M128 128 L128 44 A84 84 0 0 0 48.11 102.04 Z" fill="#FF4D2E"/>
+  <circle cx="128" cy="128" r="11" fill="#121212"/>
+</svg>

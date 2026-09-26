@@ -1,0 +1,104 @@
+# Momento configuration
+# -----------------------
+# Copy to ~/.config/momento/config.toml (install.sh does this for you if the
+# file doesn't exist yet). Every key is optional: anything you delete or leave
+# commented out falls back to the built-in default shown here.
+# Restart the recorder after editing:  systemctl --user restart momento.service
+
+[capture]
+# What to record:
+#   "auto"      pick the best source for this session (recommended)
+#   "portal"    desktop/monitor chosen in the system "share your screen" dialog
+#               (KDE, GNOME, wlroots/Hyprland/Sway — Wayland). Asked once, remembered.
+#   "gamescope" Steam Gaming Mode / gamescope's own PipeWire output
+#   "x11"       grab the whole X11 screen (X11 sessions only)
+#   "test"      a moving test pattern — for trying Momento without a game
+source = "auto"
+
+# Recording is always 60 fps.
+
+# Recording resolution:
+#   "720p" | "1080p" | "1440p" | "2160p"   scaled to this size; if your screen has
+#                                          a different shape you get black bars,
+#                                          never a stretched picture
+#   "native"                               your screen's own size
+# Change it from a terminal with:  momento set resolution 1440p
+resolution = "1080p"
+
+# Picture quality: "standard" | "high" | "ultra"
+# Change it with:  momento set quality ultra      (show current: momento settings)
+quality = "high"
+
+# Video bitrate in kbit/s. 0 = pick automatically from resolution + quality:
+#                standard   high   ultra      (Mbit/s)
+#     720p           6       10     15
+#     1080p         10       15     25
+#     1440p         16       24     40
+#     2160p         30       45     70
+#     native     same as 1440p
+# Set a number (e.g. 20000) to override. Disk used by a full 60-minute buffer
+# ~= Mbit/s * 0.45 GB (1080p high: ~6.8 GB).
+bitrate_kbps = 0
+
+# H.264 encoder. "auto" tries hardware first, then software:
+#   vah264enc     AMD / Intel via VA-API (modern GStreamer "va" plugin)
+#   vah264lpenc   same, low-power encoder entry point (some Intel GPUs)
+#   vaapih264enc  AMD / Intel via the older gstreamer-vaapi plugin
+#   nvh264enc     NVIDIA NVENC
+#   qsvh264enc    Intel Quick Sync
+#   x264enc       software (CPU heavy; needs gst-plugins-ugly)
+#   openh264enc   software (Cisco OpenH264)
+encoder = "auto"
+
+# Draw the mouse pointer into the recording.
+show_cursor = false
+
+[audio]
+# Record what you hear (game, voice chat, music...).
+desktop = true
+# PulseAudio/PipeWire source name. "@DEFAULT_MONITOR@" = the monitor of your
+# current default output, i.e. whatever is playing through your speakers/headset.
+# List others with:  pactl list short sources
+desktop_device = "@DEFAULT_MONITOR@"
+
+# Also record your microphone (mixed into the same audio track).
+microphone = false
+# "@DEFAULT_SOURCE@" = your default input device.
+microphone_device = "@DEFAULT_SOURCE@"
+
+# AAC audio bitrate, kbit/s.
+bitrate_kbps = 160
+
+[buffer]
+# How much history to keep, in seconds. Maximum (and default) is 3600 = 60 min.
+# Smaller values save disk space; you can't save a clip longer than this.
+max_seconds = 3600
+
+# Length of each on-disk chunk, in seconds. Clips are cut on chunk/keyframe
+# boundaries, so this rarely needs changing.
+segment_seconds = 10
+
+# Where the rolling buffer lives. Put it on a fast drive with enough free space
+# (see bitrate_kbps above). "~" is expanded.
+# Default: $XDG_CACHE_HOME/momento/buffer, normally ~/.cache/momento/buffer
+# dir = "~/.cache/momento/buffer"
+
+[output]
+# Where saved clips go. Empty = your Videos folder + "/Momento"
+# (e.g. ~/Videos/Momento). "~" is expanded.
+dir = ""
+
+# Clip file name. Placeholders: {date} and {time} (when the clip was saved),
+# {length} (the clip length, e.g. 30s or 5m).
+filename = "Momento_{date}_{time}_{length}.mp4"
+
+[hotkey]
+# Register a global shortcut through the desktop's GlobalShortcuts portal
+# (KDE Plasma, GNOME 48+, Hyprland...). The desktop may show a confirmation
+# dialog the first time, and you can change the key later in its settings.
+enabled = true
+
+# Preferred shortcut, in XDG shortcuts syntax: modifiers CTRL, ALT, SHIFT,
+# LOGO (the Super/Windows key) joined with "+", then a key name.
+# Examples: "LOGO+g", "CTRL+ALT+r", "F9"
+trigger = "LOGO+g"

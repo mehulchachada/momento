@@ -1,0 +1,28 @@
+[Desktop Entry]
+# The file name (io.github.mehulchachada.Momento.desktop) MUST match the app id
+# used with the xdg-desktop-portal GlobalShortcuts interface — do not rename.
+Type=Application
+Version=1.5
+Name=Momento
+GenericName=Instant Replay
+Comment=Save the last 15 seconds to 60 minutes of gameplay
+Exec=momento overlay
+TryExec=momento
+Icon=io.github.mehulchachada.Momento
+Terminal=false
+StartupNotify=false
+Categories=AudioVideo;Video;Recorder;
+Keywords=replay;clip;record;capture;screen;gaming;steam;
+Actions=start-daemon;save-30s;save-5m;
+
+[Desktop Action start-daemon]
+Name=Start background recorder
+Exec=momento daemon
+
+[Desktop Action save-30s]
+Name=Save last 30 seconds
+Exec=momento save 30s
+
+[Desktop Action save-5m]
+Name=Save last 5 minutes
+Exec=momento save 5m

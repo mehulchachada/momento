@@ -1,0 +1,33 @@
+# Momento background recorder — systemd *user* unit.
+# Installed to ~/.config/systemd/user/ by install.sh.
+#   Enable:  systemctl --user enable --now momento.service
+#   Logs:    journalctl --user -u momento.service -f
+[Unit]
+Description=Momento instant-replay recorder
+Documentation=https://github.com/mehulchachada/momento
+# Needs a running graphical session (Wayland/X11 + PipeWire + portals).
+After=graphical-session.target pipewire.service wireplumber.service xdg-desktop-portal.service
+Wants=pipewire.service
+PartOf=graphical-session.target
+# Don't hammer restarts if something is fundamentally broken.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/momento daemon
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Encoding runs on the GPU; the process mostly shuffles buffers. Leave CPU
+# priority at the default so frames aren't dropped while a game is loading,
+# but make disk writes yield to the game's own I/O.
+Nice=0
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+# Give the recorder time to finalise the current segment on stop.
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=graphical-session.target

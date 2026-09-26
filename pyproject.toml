@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "momento"
+dynamic = ["version"]
+description = "PS5-style instant replay for Linux: always records the last hour, save the last 15 s to 60 min with one hotkey."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Momento contributors" }]
+keywords = ["replay", "recorder", "gaming", "steam", "wayland", "pipewire", "gstreamer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Topic :: Games/Entertainment",
+]
+# No hard pip dependencies on purpose: PyGObject (with GStreamer typelibs),
+# dbus-python and PySide6 must match the system's GStreamer, PipeWire and Qt
+# (layer-shell-qt is a Qt plugin built against the *distro* Qt). Install them
+# from your distribution — see README.md. The extras below exist only for
+# environments where the pip wheels are known to work.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.5"]
+gst = ["PyGObject>=3.42"]
+dbus = ["dbus-python>=1.3"]
+all = ["PySide6>=6.5", "PyGObject>=3.42", "dbus-python>=1.3"]
+
+[project.scripts]
+momento = "momento.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mehulchachada/momento"
+Issues = "https://github.com/mehulchachada/momento/issues"
+
+[tool.setuptools]
+packages = { find = { include = ["momento*"] } }
+# The .desktop file and systemd user unit are installed by install.sh, not pip.
+
+[tool.setuptools.dynamic]
+version = { attr = "momento.__version__" }
+
