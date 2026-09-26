@@ -84,7 +84,8 @@ TABS_H = 40              # settings: the tab row
 TAB_PILL_H = 26          # a tab is a smaller pill than a value
 TAB_PAD = 11             # text padding inside a tab
 TAB_PX = 13
-ROW_H = 40               # settings: one row
+ROW_H = 40               # settings: a row's controls
+ROW_PITCH = 52           # settings: one row, with breathing room around its controls
 PANEL_PAD_T = 4
 PANEL_PAD_B = 6
 LABEL_W = 110            # settings: row label column
@@ -1118,7 +1119,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.labels = [c[1] for c in choices]
             self.idx = self.values.index(value) if value in self.values else 0
             self.cycle = cycle
-            self.setFixedHeight(ROW_H)
+            self.setFixedHeight(ROW_PITCH)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(16, 0, 12, 0)
             lay.setSpacing(SEG_SPACING)
@@ -1523,7 +1524,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 top += HINT_H
             if self.mode == "settings":
                 # every tab gets the tallest tab's height, so switching tabs never moves the bar
-                ph = PANEL_PAD_T + TABS_H + self.panel_rows * ROW_H + PANEL_PAD_B
+                ph = PANEL_PAD_T + TABS_H + self.panel_rows * ROW_PITCH + PANEL_PAD_B
                 self.panel.setFixedHeight(ph)
                 self.panel.show()
                 top += ph

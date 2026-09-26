@@ -372,7 +372,7 @@ class OverlayOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         self.shot(bar, "clip", "settings")
 
-    PANEL = overlay.PANEL_PAD_T + overlay.TABS_H + 3 * overlay.ROW_H + overlay.PANEL_PAD_B
+    PANEL = overlay.PANEL_PAD_T + overlay.TABS_H + 3 * overlay.ROW_PITCH + overlay.PANEL_PAD_B
 
     def test_settings_keyboard_and_apply(self):
         daemon = FakeDaemon(True)
@@ -393,7 +393,7 @@ class OverlayOffscreen(unittest.TestCase):
                           "fps": "gauge", "quality": "sliders", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "controller_exclusive": "lock",
                           "hour_warning": "hourglass", "instant_bar": "bolt"})
-        self.assertTrue(all(r.height() == overlay.ROW_H for r in bar.rows))
+        self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
         self.assertEqual(bar.rows[0].key, "record")                 # what to record comes first
