@@ -21,7 +21,7 @@ and one key saves what just happened, from the last 15 seconds up to the full ho
 
 ## What is it?
 
-Momento is the Linux version of the PS5's Create button or Xbox's "record that". It records in the background all the time, so you never have to remember to start recording. When something worth keeping happens, press **Super + G**. A slim bar slides in at the top of the screen. Pick how far back to go, and the clip is saved to your **Videos** folder.
+Momento is the Linux version of the PS5's Create button or Xbox's "record that". It records in the background all the time, so you never have to remember to start recording. When something worth keeping happens, press **Super + Shift + G**. A slim bar slides in at the top of the screen. Pick how far back to go, and the clip is saved to your **Videos** folder.
 
 <p align="center"><img src="assets/clip-bar.png" width="716" alt="The Momento clip bar: record dot, 12:34 buffered, and the lengths 15s 30s 1m 3m 5m 15m 30m 60m with 5m selected"></p>
 
@@ -30,7 +30,7 @@ It works with Steam games, emulators, browser games and anything else on your sc
 ## Features
 
 - **Always recording.** Keeps up to the last 60 minutes, including sound.
-- **One key.** Super + G brings up the clip bar on top of your game.
+- **One shortcut.** Super + Shift + G brings up the clip bar on top of your game.
 - **Eight clip lengths.** 15 s, 30 s, 1 min, 3 min, 5 min, 15 min, 30 min and 60 min.
 - **Fast saves.** Clips aren't re-encoded, so even a full hour is saved in a few seconds.
 - **Light on performance.** Your graphics card does the video encoding on AMD, Intel and NVIDIA, so your frame rate barely changes.
@@ -43,7 +43,7 @@ It works with Steam games, emulators, browser games and anything else on your sc
 ## How it works
 
 1. **Momento records quietly in the background.** It keeps only the most recent hour and deletes older footage as it goes, so disk use stays fixed.
-2. **Something happens that you want to keep.** Press **Super + G**.
+2. **Something happens that you want to keep.** Press **Super + Shift + G**.
 3. **The clip bar slides in at the top of the screen** with the eight lengths in a row. Pick one.
 4. **The last X minutes, up to right now, are saved** to `~/Videos/Momento/`.
 
@@ -51,8 +51,8 @@ It works with Steam games, emulators, browser games and anything else on your sc
   |<------------------- last 60 minutes, always kept ------------------->|
   |----------------------------------------------------------|-- 30 s ---|
                                                                          ^
-                                                  you press Super + G here
-                                                  -> Momento_..._30s.mp4
+                                          you press Super + Shift + G here
+                                          -> Momento_..._30s.mp4
 ```
 
 ### How big is a clip?
@@ -142,7 +142,9 @@ The first time Momento starts, your desktop asks what you want to share. It's th
 2. If there's a **Remember** or **Allow restoring** checkbox, tick it so the dialog doesn't come back after a restart.
 3. Click **Share** or **OK**.
 
-Your desktop may also ask you to confirm the **Super + G** shortcut. Accept it, or choose a different key there.
+Your desktop may also ask you to confirm the **Super + Shift + G** shortcut. Accept it, or choose a different key there.
+
+> The **Super** key is the one with the Windows logo, the key that opens your start menu. Hold Super and Shift, then tap G. (Plain Super + G is KDE's own Grid View, which is why Momento adds Shift.)
 
 Momento is now recording. To check, run:
 
@@ -154,10 +156,10 @@ momento status
 
 | Do this | Result |
 |---|---|
-| **Super + G** | The clip bar slides in at the top of the screen |
+| **Super + Shift + G** | The clip bar slides in at the top of the screen |
 | Click or tap a length | Saves that much, ending right now |
 | **Left/Right** + **Enter**, or **1** to **8** | Picks a length with the keyboard |
-| **Esc**, or Super + G again | Closes the bar without saving |
+| **Esc**, or Super + Shift + G again | Closes the bar without saving |
 
 **From a terminal or a script:**
 
@@ -178,7 +180,7 @@ You can turn a button, or a chord of two buttons, into the Momento shortcut with
 
 1. In Steam, open the game's **Controller settings**. For apps outside Steam, use *Settings → Controller → Desktop Layout*.
 2. Choose a button you don't use, or a chord such as **View + a back button**.
-3. Map it to **Keyboard key → Super + G** to open the clip bar. For instant saves without the bar, map it instead to a key you've bound to `momento save 30s` in your desktop's shortcut settings.
+3. Map it to **Keyboard key → Super + Shift + G** to open the clip bar. For instant saves without the bar, map it instead to a key you've bound to `momento save 30s` in your desktop's shortcut settings.
 
 **ROG Ally / Ally X:** the back paddles, or the Armoury Crate and Command Center buttons, work well. On Bazzite they can be remapped through Steam Input like any other button.
 
@@ -238,7 +240,7 @@ The settings most people change:
 |---|---|---|---|
 | Resolution | `[capture] resolution` | `"1080p"` | `720p`, `1080p`, `1440p`, `2160p` or `native` (your screen's own size). See [Video quality](#video-quality) |
 | Quality | `[capture] quality` | `"high"` | `standard`, `high` or `ultra` |
-| Hotkey | `[hotkey] trigger` | `"LOGO+g"` (Super + G) | For example `"CTRL+ALT+r"` or `"F9"`. Your desktop's shortcut settings can also change it |
+| Hotkey | `[hotkey] trigger` | `"LOGO+SHIFT+g"` (Super + Shift + G) | For example `"CTRL+ALT+r"` or `"F9"`. Your desktop's shortcut settings can also change it |
 | Microphone | `[audio] microphone` | `false` | `true` mixes your mic into clips |
 | Game and desktop sound | `[audio] desktop` | `true` | |
 | Clip folder | `[output] dir` | `""` (your Videos folder + `/Momento`) | Any folder. `~` works |
@@ -309,7 +311,7 @@ Clips are cut without re-encoding, which is what makes saving fast. The trade-of
 </details>
 
 <details>
-<summary><b>Super + G does nothing</b></summary>
+<summary><b>Super + Shift + G does nothing</b></summary>
 
 Your desktop may not support shortcuts registered by apps. That needs a recent xdg-desktop-portal: KDE Plasma 6, GNOME 48+ or Hyprland. You can add the shortcut yourself instead: in your desktop's keyboard settings, create a custom shortcut that runs `momento overlay`.
 </details>

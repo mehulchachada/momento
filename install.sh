@@ -394,7 +394,7 @@ EOF
     else
         say "Done. Start recording now and at every login with:"
         echo "    systemctl --user enable --now momento.service     (or: $0 --enable)"
-        echo "  Then press Super+G (or run: momento overlay) to save a clip."
+        echo "  Then press Super+Shift+G (or run: momento overlay) to save a clip."
     fi
 }
 

@@ -100,5 +100,5 @@ enabled = true
 
 # Preferred shortcut, in XDG shortcuts syntax: modifiers CTRL, ALT, SHIFT,
 # LOGO (the Super/Windows key) joined with "+", then a key name.
-# Examples: "LOGO+g", "CTRL+ALT+r", "F9"
-trigger = "LOGO+g"
+# Examples: "LOGO+SHIFT+g", "ALT+z", "CTRL+ALT+r", "F9"
+trigger = "LOGO+SHIFT+g"

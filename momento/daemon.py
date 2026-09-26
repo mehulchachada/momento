@@ -83,7 +83,7 @@ class Daemon:
 
                 self.shortcut = GlobalShortcut(
                     self.bus, config.APP_ID, "save-replay", "Open Momento",
-                    self.cfg["hotkey"].get("trigger", "LOGO+g"), spawn_overlay,
+                    self.cfg["hotkey"].get("trigger", "LOGO+SHIFT+g"), spawn_overlay,
                 )
                 self.shortcut.start()
             except Exception as e:  # noqa: BLE001

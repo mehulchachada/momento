@@ -65,7 +65,7 @@ DEFAULTS = {
     "hotkey": {
         # Registered through the xdg-desktop-portal GlobalShortcuts interface.
         "enabled": True,
-        "trigger": "LOGO+g",
+        "trigger": "LOGO+SHIFT+g",
     },
 }
 

@@ -13,7 +13,7 @@ This page covers how Momento works under the hood, how to hack on it, and how to
   ximagesrc       │  pulsesrc(@DEFAULT_MONITOR@) [+ mic] → AAC enc ────────┘  (mpegts)  │     seg_000123.ts  (10 s each)
   videotestsrc    │                                                                     │
                   │  ring-buffer janitor: deletes segments older than max_seconds       │
-                  │  GlobalShortcuts portal (Super+G) ──► spawns `momento overlay`    │
+                  │  GlobalShortcuts portal (Super+Shift+G) ──► spawns `momento overlay`    │
                   │  IPC server: $XDG_RUNTIME_DIR/momento.sock (JSON lines)           │
                   └─────────────────────────────────────────────────────────────────────┘
                            ▲                                   │ save 5m
@@ -64,7 +64,7 @@ Distro gotchas:
 
 ### Hotkey
 
-The daemon registers a `save-replay` shortcut (preferred trigger from `hotkey.trigger`, default `LOGO+g`) through `org.freedesktop.portal.GlobalShortcuts`. For host (non-Flatpak) apps, the portal identifies the app by its **desktop file id**, so `io.github.mehulchachada.Momento.desktop` must be installed under that exact name. Don't rename it. When the shortcut fires, the daemon launches `momento overlay`. Running `momento overlay` while an overlay is open closes it, so the key toggles.
+The daemon registers a `save-replay` shortcut (preferred trigger from `hotkey.trigger`, default `LOGO+SHIFT+g`) through `org.freedesktop.portal.GlobalShortcuts`. For host (non-Flatpak) apps, the portal identifies the app by its **desktop file id**, so `io.github.mehulchachada.Momento.desktop` must be installed under that exact name. Don't rename it. When the shortcut fires, the daemon launches `momento overlay`. Running `momento overlay` while an overlay is open closes it, so the key toggles.
 
 ### Overlay
 

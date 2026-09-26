@@ -42,7 +42,7 @@ def _token(prefix: str = "momento") -> str:
 class GlobalShortcut:
     """One portal-registered global shortcut.
 
-    ``trigger`` uses the XDG shortcuts spec syntax, e.g. ``"LOGO+g"`` or
+    ``trigger`` uses the XDG shortcuts spec syntax, e.g. ``"LOGO+SHIFT+g"`` or
     ``"CTRL+ALT+r"``; it is only a *preferred* trigger -- the desktop may show
     a dialog and the user can pick something else.
     """
