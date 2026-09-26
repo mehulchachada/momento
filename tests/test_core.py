@@ -1100,6 +1100,95 @@ def _index_lines(d: Path) -> list[dict]:
     return [json.loads(line) for line in (d / "index.jsonl").read_text().splitlines()]
 
 
+class ResolutionCapTest(unittest.TestCase):
+    """Presets taller than the recorded picture are not offered and never upscaled."""
+
+    ALL = ["720p", "1080p", "1440p", "2160p", "native"]
+
+    def test_allowed_table(self):
+        from momento import quality
+
+        table = {
+            (1920, 1080): ["720p", "1080p", "native"],
+            (2560, 1440): ["720p", "1080p", "1440p", "native"],
+            (3440, 1440): ["720p", "1080p", "1440p", "native"],       # ultrawide: by height
+            (2560, 1080): ["720p", "1080p", "native"],                 # 21:9 1080p
+            (3840, 2160): self.ALL,
+            (5120, 2880): self.ALL,
+            (1920, 1200): ["720p", "1080p", "native"],                 # 16:10: not 1440p
+            (1280, 800): ["720p", "native"],                           # Steam Deck
+            (1280, 720): ["720p", "native"],                           # a 720p window
+            (1270, 710): ["720p", "native"],                           # within 2 % of 720
+            (1001, 701): ["native"],                                   # 720 is more than 2 % taller
+            (1000, 600): ["native"],                                   # a small window
+            (1920, 1070): ["720p", "1080p", "native"],                 # a window a bit short of 1080
+            (1080, 1920): ["720p", "1080p", "1440p", "native"],        # portrait
+        }
+        for source, want in table.items():
+            self.assertEqual(quality.allowed_resolutions(source), want, source)
+            self.assertEqual(quality.allowed_resolutions(list(source)), want, source)
+        for unknown in (None, [], [0, 1080], ["1920", "1080"], [True, 1080], (1920,), "1920x1080"):
+            self.assertEqual(quality.allowed_resolutions(unknown), self.ALL, unknown)
+            self.assertIsNone(quality.source_size(unknown))
+
+    def test_effective_and_rate_class(self):
+        from momento import quality
+
+        self.assertEqual(quality.effective_resolution("2160p", (1920, 1080)), "native")
+        self.assertEqual(quality.effective_resolution("1440p", (1920, 1200)), "native")
+        self.assertEqual(quality.effective_resolution("1080p", (1920, 1200)), "1080p")
+        self.assertEqual(quality.effective_resolution("1440p", (3440, 1440)), "1440p")
+        self.assertEqual(quality.effective_resolution("native", (640, 480)), "native")
+        self.assertEqual(quality.effective_resolution("2160p", None), "2160p")      # unknown: as set
+        self.assertEqual(quality.effective_resolution("1080P", (1280, 720)), "native")
+        for source, cls in (((1920, 1080), "1080p"), ((1920, 1200), "1440p"), ((3440, 1440), "1440p"),
+                            ((1280, 720), "720p"), ((1001, 701), "720p"), ((640, 480), "720p"),
+                            ((3840, 2160), "2160p"), ((5120, 2880), "native"), (None, "native")):
+            self.assertEqual(quality.rate_class(source), cls, source)
+        self.assertEqual(quality.height_label((2560, 1440)), "1440p")
+        self.assertIsNone(quality.height_label(None))
+
+    def test_bitrate_uses_what_is_recorded(self):
+        from momento import quality
+
+        def kbps(source=None, **cap):
+            return quality.bitrate_kbps({"resolution": "2160p", "quality": "high", "fps": 60, **cap}, source)
+
+        self.assertEqual(kbps(), 45_000)                          # unknown source: as configured
+        self.assertEqual(kbps((3840, 2160)), 45_000)
+        self.assertEqual(kbps((1920, 1080)), 15_000)              # 4K on 1080p costs 1080p
+        self.assertEqual(kbps((2560, 1440)), 24_000)
+        self.assertEqual(kbps((1280, 720)), 10_000)
+        self.assertEqual(kbps((1920, 1080), fps=120), 22_000)     # round(15 x 1.5), like 1080p at 120
+        self.assertEqual(kbps((1920, 1080), bitrate_kbps=50_000), 50_000)   # explicit wins
+        self.assertEqual(kbps((1920, 1080), resolution="720p"), 10_000)     # fits: unchanged
+        self.assertEqual(kbps((1920, 1080), resolution="native"), 24_000)   # native as before
+
+    def test_storage_uses_what_is_recorded(self):
+        from unittest import mock
+
+        from momento import config, storage
+
+        cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
+        cfg["capture"].update(resolution="2160p", quality="high", fps=60)
+        p1080 = {**cfg, "capture": {**cfg["capture"], "resolution": "1080p"}}
+        on_1080 = storage.required_bytes(cfg, (1920, 1080))
+        self.assertEqual(on_1080, storage.required_bytes(p1080))
+        self.assertLess(on_1080, storage.required_bytes(cfg))
+        self.assertEqual(storage.required_bytes(cfg, (3840, 2160)), storage.required_bytes(cfg))
+        self.assertEqual(storage.buffer_bytes(cfg, (1920, 1080)), storage.buffer_bytes(p1080))
+        with mock.patch.object(storage, "free_bytes", return_value=on_1080):
+            self.assertTrue(storage.check(cfg, source=(1920, 1080))["ok"])
+            self.assertFalse(storage.check(cfg)["ok"])
+            req = storage.requirements(cfg, source=(1920, 1080))
+        self.assertEqual(req["current"], "2160p/high/60")               # the saved setting, as is
+        self.assertEqual(req["required"]["2160p/high/60"], on_1080)
+        self.assertEqual(req["required"]["1440p/high/60"], on_1080)
+        self.assertEqual(req["required"]["1080p/high/60"], on_1080)
+        self.assertLess(req["required"]["720p/high/60"], on_1080)
+        self.assertEqual(cfg["capture"]["resolution"], "2160p")          # not mutated
+
+
 class LiveBufferedTest(unittest.TestCase):
     """The replay time ticks every second while recording, not every 10 s segment."""
 
