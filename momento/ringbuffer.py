@@ -392,6 +392,16 @@ class RingBuffer:
 
     # --- retention --------------------------------------------------------------
 
+    def set_max_seconds(self, max_seconds: float) -> None:
+        """Change the length kept (the Replay length setting), without a restart.
+
+        Shorter: the oldest footage beyond it goes at once (the newest is kept;
+        segments an export has pinned stay until it releases them). Longer: the
+        ring grows from what is there.
+        """
+        self.max_seconds = max_seconds
+        self.prune()
+
     def prune(self) -> None:
         """Delete the oldest footage beyond max_seconds (+ margin) and compact the index.
 

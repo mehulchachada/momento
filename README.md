@@ -7,7 +7,7 @@
 **Never miss the moment.**
 
 Instant replay and screenshots for Linux. Made for games, handy for anything on your screen.<br>
-Momento keeps the last hour of your game in the background. Something great happens? Save it.
+Momento keeps the last 15 minutes of your game by default (up to 60). Something great happens? Save it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](#install)
@@ -26,17 +26,17 @@ Press play once and Momento records in the background. When something worth keep
 ## Features
 
 - **Any game.** Steam, non-Steam, emulators, browser games, GeForce NOW and other cloud gaming.
-- **Save it after it happened.** Always-on replay of up to 60 minutes. Keep the last 15s, 30s, 1m, 3m, 5m, 15m, 30m or the full hour.
+- **Save it after it happened.** Always-on replay of the last 15 minutes by default (up to 60). Keep the last 15s, 30s, 1m, 3m, 5m, 15m, 30m or 60m.
 - **MP4 in seconds.** No re-encoding: a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
 - **Just the game.** Window mode (the default) records only your game, so the bar, chats and notifications stay out of your clips. The bar shows what it's recording: *Recording Ember Rift*. Prefer everything? Switch to Full screen.
 - **Screenshots.** One button. The bar gets out of the way first, then the picture lands in `~/Videos/Momento/Images`.
 - **Made for controllers.** Press PS (or Xbox / Home) + D-pad Down to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
 - **Opens instantly.** The bar is kept ready, so it's on screen the moment you ask.
 - **Pause and stop** whenever you want.
-- **Keep history, if you want it.** Keep your replay after you stop or quit the game, and get every full hour saved as a video.
-- **A heads-up before the hour.** A notification 10, 5 or 3 minutes before the start of your session starts being replaced.
+- **Keep history, if you want it.** Keep your replay after you stop or quit the game, and get every full replay saved as a video.
+- **A heads-up before it's full.** A notification 10, 5 or 3 minutes before the start of your session starts being replaced.
 - **Never fills your disk.** Momento checks free space and tells you early when it's getting tight.
-- **Light.** Your graphics card does the heavy lifting. About 150 MB of memory for a full hour of replay.
+- **Light.** Your graphics card does the heavy lifting. About 150 MB of memory, even with 60 minutes of replay.
 - **Local only.** Nothing is uploaded. No account.
 
 ## How it compares
@@ -174,7 +174,7 @@ Want a different shortcut, or a short hold instead of a tap? See [Controller set
 
 ## Settings
 
-Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a controller). Pick what you want on any tab, then **Apply**. Applying restarts recording, and your replay is kept.
+Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a controller). Pick what you want on any tab, then **Apply**. Some settings apply right away, others restart recording. Your replay is kept either way.
 
 ### General
 
@@ -182,8 +182,9 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 - **Record: Window** (default) records only the game window you pick. The bar and notifications never end up in your clips.
 - **Record: Full screen** records everything on your screen.
+- **Replay length**: how far back you can save: 15 min (default), 30 min or 60 min. Longer takes more disk space (see [Video quality](#video-quality)). Going shorter drops your oldest footage, and clip lengths longer than the replay are greyed out.
 - **Keep history: Off** (default): stopping, or the game closing, clears the replay. Save first!
-- **Keep history: On**: your replay stays after you stop or quit, and every full hour is saved to `~/Videos/Momento` automatically.
+- **Keep history: On**: your replay stays after you stop or quit, and every full replay (every 15 minutes by default) is saved to `~/Videos/Momento` automatically.
 
 ### Video
 
@@ -193,7 +194,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
   Sizes bigger than your screen (or the window you record) aren't offered: they would only take more space, not look sharper.
 - **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
 - **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
-- The line at the bottom shows how much space a full hour will take. See [Video quality](#video-quality) for picks.
+- The line at the bottom shows how much space a full replay will take. See [Video quality](#video-quality) for picks.
 
 ### Audio
 
@@ -229,7 +230,7 @@ A few extras live only in `~/.config/momento/config.toml`. Restart Momento after
 |---|---|---|
 | Clip folder | `[output] dir` | your Videos folder + `/Momento` |
 | Keyboard shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
-| History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
+| Any replay length, in seconds | `[buffer] max_seconds` | `900` (15 min; up to `3600`) |
 </details>
 
 ## Notifications
@@ -241,30 +242,30 @@ Momento tells you what happened, so you never have to guess.
 | **Saved last 5m** | A clip is saved. Shows where. If less was recorded than you asked for, it says so. |
 | **Screenshot saved** | A screenshot is saved to `~/Videos/Momento/Images`. |
 | **Game closed** | The window you were recording closed, so recording stopped. It tells you whether your replay was cleared or kept (Keep history). |
-| **60 min almost full** | Your [hour warning](#misc): in a few minutes the start of your session starts being replaced. Save anything you want from it now. With Keep history on, it tells you the hour is about to be saved instead. |
-| **Saved the last hour to Videos** | Keep history saved a full hour for you. |
-| **Running low on space** | Free space is below what a full hour needs at your settings. The bar warns too. Free up some space. |
+| **15 minutes almost full** | Your [hour warning](#misc): in a few minutes the start of your session starts being replaced. Save anything you want from it now. With Keep history on, it tells you the replay is about to be saved instead. Says 30 or 60 minutes if that's your Replay length. |
+| **Saved the last 15 minutes to Videos** | Keep history saved a full replay for you. |
+| **Running low on space** | Free space is below what a full replay needs at your settings. The bar warns too. Free up some space. |
 | **Not enough disk space** | Momento can't start, the disk got almost full and recording stopped, or there's no room for a clip or screenshot. What you already have can still be saved, and recording starts again by itself once there's room. |
-| **Couldn't save the hour — disk full** | Keep history had no room to save a full hour. Recording continues. |
+| **Couldn't save the last 15 minutes — disk full** | Keep history had no room to save a full replay. Recording continues. |
 | **Save failed** / **Screenshot failed** | Something went wrong. The notification says what. |
 | **Nothing to save** | You asked for a clip before anything was recorded. |
 
 ## Video quality
 
-Free space Momento needs to start (a full hour of replay in brackets):
+Disk space a full 15-minute replay takes (60 minutes in brackets). Momento needs that plus 1 GB free to start:
 
 | Resolution | Standard | High (default) | Ultra |
 |---|---|---|---|
-| **1080p, 60 fps** (default) | 6 GB (4.8) | **8 GB (7.2)** | 13 GB (11.9) |
-| 1080p, 120 fps | 8 GB (7.2) | 12 GB (10.5) | 19 GB (18) |
-| 720p, 60 fps | 4 GB (2.9) | 6 GB (4.8) | 8 GB (7.2) |
+| **1080p, 60 fps** (default) | 1.2 GB (4.8) | **1.8 GB (7.2)** | 3 GB (11.9) |
+| 1080p, 120 fps | 1.8 GB (7.2) | 2.6 GB (10.5) | 4.5 GB (18) |
+| 720p, 60 fps | 0.7 GB (2.9) | 1.2 GB (4.8) | 1.8 GB (7.2) |
 
 - **Handheld or 1080p screen:** 1080p High, 60 fps (the default).
 - **120 Hz screen and fast games:** 1080p High, 120 fps.
 - **1440p, 4K or ultrawide monitor:** Native High. It keeps your screen's shape and records at 1080p.
 - **Different screen shape** (like a 16:10 handheld) at 720p or 1080p: you get black bars. The picture is never stretched.
 
-The replay never grows past its hour: older footage is replaced as new footage comes in. The free-space number in the bar is green when there's plenty of room, yellow when it's getting tight and red when there isn't enough. A setting that won't fit gets a red mark in settings, and **Apply** is disabled.
+The replay never grows past its length: older footage is replaced as new footage comes in. The free-space number in the bar is green when there's plenty of room, yellow when it's getting tight and red when there isn't enough. A setting that won't fit gets a red mark in settings, and **Apply** is disabled.
 
 ## Performance
 
@@ -291,7 +292,7 @@ ASUS ROG Ally (Z1 Extreme, 16 GB), Bazzite 44, KDE Plasma 6.7 on Wayland, on AC 
 - **On GNOME**, the bar can't appear over exclusive fullscreen games. Use borderless or windowed fullscreen.
 - **Screenshots come from the recording**, so they work only while Momento is recording (not paused or stopped).
 - **With Keep history off, stopping clears your replay.** So does the game closing. Save first.
-- **Momento needs free space for a full hour** before it starts: about 8 GB at the default settings.
+- **Momento needs free space for a full replay** before it starts: about 3 GB at the default settings (8 GB for 60 minutes).
 - **Steam may react to the PS / Xbox button too** (its overlay or Big Picture), since it reads controllers its own way. If it gets in the way, pick another shortcut in settings → **Controller**.
 - **View + Menu, the paddles and L3 + R3 also reach your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
 - **Emulators that use Select + Start** (the same buttons as View + Menu) would open the bar too if you pick View + Menu. Switch **Open with** to **Hold**, or keep the default shortcut.
@@ -316,7 +317,7 @@ Yes. That's **Record: Window**, the default. The bar and notifications stay out 
 </details>
 <details><summary><b>How much disk space and memory does it use?</b></summary>
 
-About 7.2 GB of disk for a full hour at the default settings, and it never grows. About 150 MB of memory, plus about 100 MB for the instant bar. Lower resolution or quality to use less disk.
+About 1.8 GB of disk for the default 15-minute replay (7.2 GB for 60 minutes), and it never grows. About 150 MB of memory, plus about 100 MB for the instant bar. Pick a lower resolution, quality or Replay length to use less disk.
 </details>
 <details><summary><b>Does it lower my FPS?</b></summary>
 

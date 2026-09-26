@@ -51,8 +51,8 @@ quality = "high"
 #   (1440p and 4K are not offered yet; a config that still says "1440p" or
 #   "2160p" records at 1080p)
 #   (at 120 fps the automatic bitrate is 1.5x these)
-# Set a number (e.g. 20000) to override. Disk used by a full 60-minute buffer
-# ~= Mbit/s * 0.45 GB (1080p high: ~6.8 GB).
+# Set a number (e.g. 20000) to override. Disk used by a full 15-minute replay
+# ~= Mbit/s * 0.11 GB (1080p high: ~1.7 GB); 60 minutes ~= Mbit/s * 0.45 GB.
 bitrate_kbps = 0
 
 # H.264 encoder. "auto" tries hardware first, then software:
@@ -85,9 +85,11 @@ microphone_device = "@DEFAULT_SOURCE@"
 bitrate_kbps = 160
 
 [buffer]
-# How much history to keep, in seconds. Maximum (and default) is 3600 = 60 min.
-# Smaller values save disk space; you can't save a clip longer than this.
-max_seconds = 3600
+# Replay length: how much history to keep, in seconds. 900 = 15 min (default),
+# 1800 = 30 min, 3600 = 60 min (the maximum; any value up to it works).
+# Longer needs more disk space; you can't save a clip longer than this.
+# Change it with:  momento set replay_length 30m   (or Settings -> General)
+max_seconds = 900
 
 # Length of each on-disk chunk, in seconds. Clips are cut on chunk/keyframe
 # boundaries, so this rarely needs changing.
@@ -101,17 +103,18 @@ segment_seconds = 10
 # What happens to your replay when recording stops (you press Stop, or the
 # window you record closes):
 #   false  it's cleared (default)
-#   true   it's kept, so you can still save from it. Every full hour
-#          (max_seconds) of a recording session is also saved to your clips
-#          folder by itself, so long sessions are never lost.
+#   true   it's kept, so you can still save from it. Every full replay
+#          length (max_seconds, 15 min by default) of a recording session is
+#          also saved to your clips folder by itself, so long sessions are
+#          never lost.
 # Pausing never clears anything, and neither does restarting your computer.
 # Change it with:  momento set keep_history on    (or Settings -> General)
 keep_history = false
 
-# The buffer holds one hour (max_seconds); after that the oldest footage is
+# The replay holds max_seconds of footage; after that the oldest footage is
 # replaced. This many minutes before that point you get a notification: with
 # keep_history off, so you can save the start of your session in time; with it
-# on, to say the hour is about to be saved. 3 to 10 (the bar offers 10, 5, 3).
+# on, to say the replay is about to be saved. 3 to 10 (the bar offers 10, 5, 3).
 # Change it with:  momento set hour_warning 5     (or Settings -> Misc)
 warn_minutes = 10
 

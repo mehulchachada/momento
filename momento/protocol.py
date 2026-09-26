@@ -109,7 +109,9 @@ Commands (fields are in ``COMMANDS``)
     ``requested``; ``reason`` explains a known cause (older footage with other
     width/height/fps/codec/audio is never mixed in). Works in any state while
     footage exists. Errors: ``bad duration: ...``; ``nothing recorded yet``;
-    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB.
+    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB;
+    ``code: too_long`` when ``seconds`` is more than ``max_seconds`` (the
+    replay length; clients should not offer longer lengths).
 ``screenshot``
     Save one frame of the recording as a PNG in ``<output dir>/Images``
     (``Momento_<date>_<time>.png``, ``_2``, ``_3``... on collision; never
@@ -175,9 +177,11 @@ holds that controller (EVIOCGRAB) while the chord's other button is down, when
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` /
-    ``controller_exclusive`` / ``controller_open`` / ``keep_history`` /
-    ``hour_warning`` / ``instant_bar`` apply without a reload
-    (``restarted: false``);
+    ``controller_exclusive`` / ``controller_open`` / ``replay_length`` /
+    ``keep_history`` / ``hour_warning`` / ``instant_bar`` apply without a
+    reload (``restarted: false``). A shorter ``replay_length`` drops the
+    oldest footage beyond it at once (the newest is kept); a longer one fills
+    up from what is there;
     ``changed`` holds the value read back (``"on"`` -> the shortcut it enables). Refused with ``code: no_storage`` (nothing written) only
     when the new settings do not fit AND raise the requirement over the saved
     ones AND ``force`` is not true; so shrinking always works. With ``force``
@@ -286,6 +290,7 @@ ERROR_CODES = {
     "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip "
                   "(save, screenshot)",
     "not_recording": "screenshot: capture isn't running (paused, stopped, starting or failed)",
+    "too_long": "save: longer than the replay keeps (status max_seconds, the Replay length setting)",
 }
 
 
@@ -330,6 +335,9 @@ STORAGE_REQUIREMENTS = {
 
 SETTING_VALUES = {
     "record": (("string",), True),         # "screen" | "window"
+    # minutes of replay kept ([buffer] max_seconds / 60): 15 (default) | 30 | 60; a hand-edited
+    # max_seconds reads as its whole minutes
+    "replay_length": (("integer",), False),
     "resolution": (("string",), True),     # one of choices.resolution ("720p" | "1080p" | "native")
     "quality": (("string",), True),
     "fps": (("integer",), True),
@@ -345,12 +353,13 @@ SETTING_VALUES = {
     # "tap" (hold_ms = 0, the default: opens on press) | "hold" ([controller] hold_ms above 0, 300 when chosen)
     "controller_open": (("string",), False),
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
-    "hour_warning": (("integer",), False),  # minutes before the hour mark to warn: 3-10 (UI: 10, 5, 3)
+    "hour_warning": (("integer",), False),  # minutes before the replay is full to warn: 3-10 (UI: 10, 5, 3)
     "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
 }
 
 SETTING_CHOICES = {
     "record": (("array",), True),
+    "replay_length": (("array",), False),  # [15, 30, 60]
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),

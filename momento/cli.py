@@ -12,8 +12,13 @@ from . import __version__, config, durations, quality, settings, storage
 
 # status.stop_reason -> why, for `momento status`.
 STOP_WHY = {"user": "stopped by you", "window_closed": "the recorded window closed"}
-HISTORY_LINE = {True: "kept when recording stops; every full hour is saved to the clips folder",
-                False: "cleared when recording stops"}
+def history_line(keep: bool, max_seconds) -> str:
+    """keep_history in words: "kept when recording stops; every 15 min of recording is saved ..."."""
+    if not keep:
+        return "cleared when recording stops"
+    seconds = int(max_seconds or config.DEFAULTS["buffer"]["max_seconds"])
+    span = "hour" if seconds == 3600 else storage.span(seconds)
+    return f"kept when recording stops; every {span} of recording is saved to the clips folder"
 
 
 def _duration(text: str) -> int:
@@ -128,6 +133,11 @@ def capped_note(resolution, source, target: str | None) -> str | None:
     return f"{what}, so this records at {size}; a bigger size would only waste space."
 
 
+def _shown(key: str, value) -> str:
+    """A setting's value as `momento set` prints it: replay_length 15 -> "15m"."""
+    return f"{value}m" if key == "replay_length" else str(value)
+
+
 def _status_quietly() -> dict | None:
     """The daemon's status, or None (not running, or anything else): for extra detail only."""
     from . import ipc
@@ -205,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if not r.get("ok"):
             print(f"momento: {r.get('error', 'save failed')}", file=sys.stderr)
+            if r.get("code") == "too_long":
+                longer = next((m for m in config.REPLAY_MINUTES if m * 60 >= args.duration), None)
+                if longer:
+                    print(f"To keep more: momento set replay_length {longer}m", file=sys.stderr)
             return 1
         if r.get("partial"):
             print(f"momento: only {durations.label(r['seconds'])} was buffered "
@@ -253,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             ("output", r.get("output_dir") or "-"),
         ]
         if isinstance(r.get("keep_history"), bool):
-            rows.insert(3, ("history", HISTORY_LINE[r["keep_history"]]))
+            rows.insert(3, ("history", history_line(r["keep_history"], r.get("max_seconds"))))
         if isinstance(r.get("storage"), dict):
             rows.append(("storage", storage_line(r["storage"])))
         warning = low_storage_line(r)
@@ -292,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             record += " (only the window you pick, when you press play; the bar and notifications stay out)"
         rows = [
             ("record", record),
+            ("replay", f"keeps the last {storage.span(cfg['buffer']['max_seconds'])}"),
             ("resolution", resolution),
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
@@ -301,9 +316,9 @@ def main(argv: list[str] | None = None) -> int:
             ("sound", sound),
             ("mic", mic),
             ("controller", controller_line(cfg)),
-            ("history", HISTORY_LINE[cur["keep_history"] == "on"]),
-            ("hour mark", f"warn {cur['hour_warning']} min before the "
-                          f"{durations.label(cfg['buffer']['max_seconds'])} mark"),
+            ("history", history_line(cur["keep_history"] == "on", cfg["buffer"]["max_seconds"])),
+            ("warning", f"{cur['hour_warning']} min before the "
+                        f"{storage.span(cfg['buffer']['max_seconds'])} replay is full"),
             ("clip bar", "kept loaded (opens instantly)" if cur["instant_bar"] == "on"
                          else "started on every press"),
             ("clips", cfg["output"]["dir"]),
@@ -344,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"momento: {r.get('error', 'not saved')}", file=sys.stderr)
                 return 1
             changed = r.get("changed") or {}
-            print(f"{args.key} = {changed.get(args.key, clean[args.key])}")
+            print(f"{args.key} = {_shown(args.key, changed.get(args.key, clean[args.key]))}")
             if set(clean) <= set(settings.CONTROLLER_KEYS):
                 line = controller_line(config.load(args.config))
                 print(f"Saved. {line[:1].upper()}{line[1:]}." if changed else "Saved (nothing changed).")
@@ -377,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"momento: {e}", file=sys.stderr)
             return 1
-        print(f"{args.key} = {clean[args.key]}  (saved to {args.config})")
+        print(f"{args.key} = {_shown(args.key, clean[args.key])}  (saved to {args.config})")
         if not chk["ok"]:
             print(f"momento: warning: {storage.label(cfg)} needs {storage.human(chk['required'])} free, "
                   f"{storage.human(chk['free'] + chk['reclaimable'])} available; "
