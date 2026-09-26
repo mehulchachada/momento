@@ -25,7 +25,8 @@ picture (the daemon's ``source_size``, else the largest screen) are shown
 disabled, since Momento would record them at the picture's own size.
 
 Left of the free space sits the gallery button (key G): saved clips and
-screenshots, browsed and played in the bar, which grows upward again. That
+screenshots, browsed and played in a panel that opens right above the bar
+(the same surface, grown upward; the bar row itself stays as it is). That
 part lives in ``momento.gallery`` and is imported on the first open only, so a
 resident bar that never shows it never loads QtMultimedia.
 
@@ -107,6 +108,7 @@ GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: p
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
+GALLERY_GAP = 8            # between the gallery's panel and the bar under it
 START_TIMEOUT_S = 10
 START_POLL_S = 0.5
 LOGO_SIZE = 18
@@ -1094,9 +1096,24 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setFixedSize(ICON_W, BAR_HEIGHT)
             self.setAccessibleDescription(self.TIPS[kind])
             self.setAccessibleName(self.TIPS[kind])
+            self.on = False           # the gallery button while its panel is open
 
         def rest_text(self):
             return MUTED
+
+        def selected(self):
+            return getattr(self, "on", False)
+
+        def set_on(self, on):
+            if self.on != on:
+                self.on = on
+                self.sync()
+
+        def target(self):
+            state, style = super().target()
+            if state == "selected":   # a quiet fill, like the open settings tab
+                return state, (QColor(TAB_SEL), QColor(TEXT), 0.0)
+            return state, style
 
         def set_kind(self, kind):
             if kind != self.kind:
@@ -1502,6 +1519,21 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             outer.setContentsMargins(1, 1, 1, 1)
             outer.setSpacing(0)
 
+            # The gallery (momento/gallery.py builds its panel in here on its first open):
+            # a panel of its own above everything else, a GALLERY_GAP under it, then the
+            # bar as it always is. One surface, so the keyboard, the pointer's leave and
+            # the layer-shell anchor stay as they are; it grows upward like settings.
+            self.gallery_host = QWidget()
+            gl = QVBoxLayout(self.gallery_host)
+            gl.setContentsMargins(0, 0, 0, 0)
+            gl.setSpacing(0)
+            self.gallery_host.hide()
+            outer.addWidget(self.gallery_host)
+            self.gallery_gap = QWidget()      # the panel's bottom edge, the gap, the bar's top edge
+            self.gallery_gap.setFixedHeight(GALLERY_GAP + 2)
+            self.gallery_gap.hide()
+            outer.addWidget(self.gallery_gap)
+
             # Above the bar (bottom-anchored, so the bar grows upward):
             # a one-line hint while paused, or the settings rows.
             self.hintbar = QLabel(PAUSED_HINT)
@@ -1518,13 +1550,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.panel_lay.setSpacing(0)
             self.panel.hide()
             outer.addWidget(self.panel)
-            # the gallery (momento/gallery.py) builds its panel in here on its first open
-            self.gallery_host = QWidget()
-            gl = QVBoxLayout(self.gallery_host)
-            gl.setContentsMargins(0, 0, 0, 0)
-            gl.setSpacing(0)
-            self.gallery_host.hide()
-            outer.addWidget(self.gallery_host)
             self.sep = QFrame()
             self.sep.setFixedHeight(1)
             self.sep.setStyleSheet(f"background: {BORDER}; margin: 0 12px;")
@@ -1656,13 +1681,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             crow.addSpacing(8)
             self.stack.addWidget(conf)
 
-            # page 4: the gallery's footer (built by the gallery on its first open)
-            self.gallery_foot = QWidget()
-            gfl = QVBoxLayout(self.gallery_foot)
-            gfl.setContentsMargins(0, 0, 0, 0)
-            gfl.setSpacing(0)
-            self.stack.addWidget(self.gallery_foot)
-
             # Width is fixed to the picker so the bar never jumps between states;
             # only the height changes (upward) for the hint line and settings.
             self.bar_w = picker.sizeHint().width() + 2
@@ -1745,7 +1763,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(QColor(BORDER), 1))
             p.setBrush(QColor(*BG))
-            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+            r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            if not self.gallery_host.isHidden():
+                # the gallery's panel: a surface of its own, fading in and out with its motion
+                split = self.gallery_host.y() + self.gallery_host.height() + 1
+                g = self.gallery
+                p.setOpacity(max(0.0, min(1.0, g.reveal)) if g is not None else 1.0)
+                p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, split - 1), 10, 10)
+                p.setOpacity(1.0)
+                r.setTop(split + GALLERY_GAP + 0.5)
+            p.drawRoundedRect(r, 10, 10)
             p.end()
 
         # ---------------- layout
@@ -1775,16 +1802,20 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 top += ph
             else:
                 self.panel.hide()
+            self.sep.setHidden(top == 0)
+            h = BAR_HEIGHT + 2 + top + (1 if top else 0)
             g = self.gallery
             if g is not None and (self.mode == "gallery" or g.closing):
                 gh = g.shown_height()                 # grows / folds with the gallery's motion
                 self.gallery_host.setFixedHeight(gh)
                 self.gallery_host.show()
-                top += gh
+                self.gallery_gap.show()
+                h += gh + GALLERY_GAP + 2
+                if g.reveal < 1.0 or g.closing:
+                    self.update()                     # the panel's surface fades with it
             else:
                 self.gallery_host.hide()
-            self.sep.setHidden(top == 0)
-            h = BAR_HEIGHT + 2 + top + (1 if top else 0)
+                self.gallery_gap.hide()
             if h == self.height():
                 return
             bottom = self.y() + self.height()
@@ -1796,6 +1827,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def show_line(self, markup, focus=None):
             self.line.setText(markup)
+            if self.mode == "gallery":        # the gallery above keeps the keyboard
+                if self.stack.currentIndex() != 1:
+                    self.stack.setCurrentIndex(1)
+                return
             if self.stack.currentIndex() != 1:
                 self.stack.setCurrentIndex(1)
                 (focus or self).setFocus(Qt.OtherFocusReason)
@@ -1922,7 +1957,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def apply_status(self, st):
             self.last_status = st
             self.status_at = time.monotonic()
-            if self.saving or self.done or self.mode != "clip" or self.control_busy:
+            # the bar row stays live under the gallery (the time ticks on, pause works)
+            if self.saving or self.done or self.mode not in ("clip", "gallery") or self.control_busy:
                 return
             if self.stopping:
                 if st.get("ok"):
@@ -1995,6 +2031,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.stack.currentIndex() != 0:
                 self.stack.setCurrentIndex(0)
             self.relayout()
+            if self.mode == "gallery":
+                return                          # the gallery keeps the keyboard
             w = QApplication.focusWidget()
             if (self.online and not was_on) or w not in self.focusables():
                 self.focus_default()
@@ -2031,7 +2069,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def choose(self, opt):
             if (self.saving or self.done or not self.online or not opt.isEnabled()
-                    or self.mode != "clip" or self.control_busy):
+                    or self.control_busy or not self.gallery_yield()):
                 return
             self.saving = True
             self.idle.stop()
@@ -2077,7 +2115,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             daemon's desktop notification does. A one-shot bar quits after the reply.
             """
             if (self.view != "rec" or self.saving or self.done or self.control_busy
-                    or self.mode != "clip"):
+                    or not self.gallery_yield()):
                 return
             self.done = True
             self.idle.stop()
@@ -2114,7 +2152,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.relayout()
 
         def toggle_pause(self):
-            if self.control_busy or self.saving or self.done or self.mode != "clip":
+            if self.control_busy or self.saving or self.done or self.mode not in ("clip", "gallery"):
                 return
             if not self.running:
                 if self.view == "off":
@@ -2143,7 +2181,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def ask_stop(self):
             if (not self.running or self.stopped or self.control_busy or self.saving or self.done
-                    or self.mode != "clip"):
+                    or not self.gallery_yield()):
                 return
             self.confirm.setText(self.confirm_text())
             self.mode = "confirm"
@@ -2234,7 +2272,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.set_view("starting", False)
             self.set_time("0:00", MUTED)
             self.relayout()
-            self.setFocus(Qt.OtherFocusReason)
+            if self.mode != "gallery":
+                self.setFocus(Qt.OtherFocusReason)
             gen = self.gen
 
             def work():
@@ -2277,7 +2316,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         # ---------------- settings
         def open_settings(self):
-            if self.mode != "clip" or self.saving or self.done or self.loading_settings or self.control_busy:
+            if self.saving or self.done or self.loading_settings or self.control_busy or not self.gallery_yield():
                 return
             self.loading_settings = True
             gen = self.gen
@@ -2889,6 +2928,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def open_gallery(self):
             """The gallery button / G: list the clips folder (in a worker), then open the gallery
             above the bar, or say there is nothing yet."""
+            if self.mode == "gallery" and self.gallery is not None:
+                self.gallery.back()           # the button toggles, like G
+                return
             if self.mode != "clip" or self.saving or self.done or self.control_busy:
                 return
             if self.gallery is None:
@@ -2902,7 +2944,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     layer_full=_apply_layer_shell_full, set_keyboard=_set_keyboard_interactivity)
                 self.gallery = gallery_mod.Gallery(self, kit)
                 self.track_mouse(self.gallery_host)
-                self.track_mouse(self.gallery_foot)
             self.gallery.open()
 
         def gallery_empty(self):
@@ -2921,7 +2962,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.mode = "gallery"
             self.gallery_hint = None
             self.recycle = True       # its video libraries stay loaded: start over once hidden
-            self.stack.setCurrentIndex(4)
+            self.gallery_btn.set_on(True)
             self.relayout()
             self.idle.setInterval(GALLERY_IDLE_MS)
             self.touch_idle()
@@ -2931,6 +2972,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Back from the gallery to the clip view, on the gallery button."""
             self.pad_renew.stop()
             self.mode = "clip"
+            self.gallery_btn.set_on(False)
             self.idle.setInterval(IDLE_HIDE_MS)
             self.back_to_clip()
             if self.stack.currentIndex() == 0:
@@ -2943,9 +2985,19 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.pad_renew.stop()
             if self.gallery is not None:
                 self.gallery.close()
+            self.gallery_btn.set_on(False)
             if self.mode == "gallery":
                 self.mode = "clip"
                 self.idle.setInterval(IDLE_HIDE_MS)
+
+        def gallery_yield(self):
+            """Before a bar action that takes the bar row or hides the bar (a save, the stop
+            question, settings, a screenshot): the gallery folds away first. True when the
+            bar is in the clip view (now)."""
+            g = self.gallery
+            if self.mode == "gallery" and g is not None and g.full is None:
+                g.back()
+            return self.mode == "clip"
 
         def renew_pads(self):
             if self.pads is not None and self.mode == "gallery":

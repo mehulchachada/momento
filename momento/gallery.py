@@ -6,11 +6,13 @@ that is never asked for it doesn't load QtMultimedia at all. Every open lists
 the clips folder again (``momento.media.scan`` in a worker thread) and starts
 on the newest item, muted, playing.
 
-Layout, top to bottom, inside the bar (which grows upward like settings):
-the filters (All · Clips · Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9
-stage, the transport row (−10, play/pause, +10, time, scrubber, length, mute,
-full screen; a screenshot shows its size and format instead) and the bar row
-as a footer (what it is and when, the controller hints, Back).
+Layout: a panel of its own right above the bar, as wide as the bar, with the
+bar row unchanged under it (one surface that grows upward like settings; the
+bar paints the two apart). Top to bottom: the filters (All · Clips ·
+Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9 stage, the transport row
+(−10, play/pause, +10, time, scrubber, length, mute, full screen; a screenshot
+shows its size and format instead) and a footer (what it is and when, the
+controller hints, Back).
 
 Playback is a QMediaPlayer feeding a QVideoSink; the frames are painted by the
 stage itself (no QVideoWidget, which would be a separate native surface).
@@ -35,7 +37,7 @@ from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, Q
                             Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader, QPainter,
                            QPainterPath, QPen, QPolygonF)
-from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
 from . import config, media
@@ -637,7 +639,7 @@ def _widgets(kit):
                 self.clicked.emit()
 
     class Footer(QWidget):
-        """The bar row as the gallery's footer: what and when · controller hints (centred) · Back."""
+        """The panel's last row: what and when · controller hints (centred) · Back."""
 
         def __init__(self):
             super().__init__()
@@ -843,13 +845,14 @@ class Gallery(QObject):
     # ------------------------------------------------------------------ building
     @property
     def stage_size(self):
-        """16:9 across the bar (1006 x 566), smaller only when the screen is too short for
+        """16:9 across the panel (1006 x 566), smaller only when the screen is too short for
         it (a 1280x720 desktop at 150 %): the bar with its gallery always fits on screen."""
         w = self.bar.bar_w - 2 - 2 * STAGE_PAD
         h = round(w * 9 / 16)
         screen = self.bar.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
-            rest = ov.BAR_HEIGHT + 3 + ov.PANEL_PAD_T + ov.TABS_H + 4 + ov.ROW_PITCH
+            rest = (ov.BAR_HEIGHT + 2 + ov.GALLERY_GAP + 2          # the bar, the gap, the edges
+                    + ov.PANEL_PAD_T + ov.TABS_H + 4 + ov.ROW_PITCH + 1 + ov.BAR_HEIGHT)
             room = screen.availableGeometry().height() - 2 * ov.BOTTOM_MARGIN - rest
             if room < h:
                 h = max(MIN_STAGE_H, room)
@@ -857,10 +860,10 @@ class Gallery(QObject):
         return QSize(w, h)
 
     def panel_height(self):
-        return ov.PANEL_PAD_T + ov.TABS_H + 4 + self.stage.height() + ov.ROW_PITCH
+        return ov.PANEL_PAD_T + ov.TABS_H + 4 + self.stage.height() + ov.ROW_PITCH + 1 + ov.BAR_HEIGHT
 
     def shown_height(self):
-        """What the bar gives the gallery right now (it grows / folds with ``reveal``)."""
+        """The panel's height right now (it grows / folds with ``reveal``)."""
         return int(round(self.panel_height() * max(0.0, min(1.0, self.reveal))))
 
     def eventFilter(self, obj, ev):
@@ -934,18 +937,22 @@ class Gallery(QObject):
         c.w["full"].clicked.connect(lambda: self.toggle_full())
         rl.addWidget(c.w["full"])
         pl.addWidget(row)
-        # Not in the host's layout: pinned to the host's bottom edge, so while the bar grows
-        # (or folds) the panel rises out of (or sinks into) the bar row instead of squeezing.
-        self.panel_w = panel
-        panel.setParent(self.bar.gallery_host)
-        panel.setFixedHeight(self.panel_height())
-        self.bar.gallery_host.installEventFilter(self)
 
+        line = QFrame()                   # the hairline over the footer, like the bar's own
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {ov.BORDER}; margin: 0 12px;")
+        pl.addWidget(line)
         self.footer = W.Footer()
         c.w["meta"] = self.footer.meta
         c.w["back"] = self.footer.back
         self.footer.back.clicked.connect(self.back)
-        self.bar.gallery_foot.layout().addWidget(self.footer)
+        pl.addWidget(self.footer)
+        # Not in the host's layout: pinned to the host's bottom edge, so while the host grows
+        # (or folds) the panel rises up from (or sinks back to) the bar instead of squeezing.
+        self.panel_w = panel
+        panel.setParent(self.bar.gallery_host)
+        panel.setFixedHeight(self.panel_height())
+        self.bar.gallery_host.installEventFilter(self)
 
     def _transport(self, c, lay, height):
         """−10 · play · +10 · time · scrubber · length · mute (into ``lay``)."""

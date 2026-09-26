@@ -277,8 +277,8 @@ class GalleryOffscreen(unittest.TestCase):
     def daemon(self, folder=None, **kw):
         return FakeDaemon(True, extra={"output_dir": str(folder or self.out)}, **kw)
 
-    def bar(self, folder=None):
-        bar = self.make(self.daemon(folder))
+    def bar(self, folder=None, daemon=None):
+        bar = self.make(daemon or self.daemon(folder))
         bar.focus_visible = True
         self.addCleanup(bar.close_gallery)
         return bar
@@ -288,6 +288,14 @@ class GalleryOffscreen(unittest.TestCase):
         self.wait_for(lambda: bar.mode == "gallery")
         pump(self.app, 0.05)
         return bar.gallery
+
+    def screen_size(self, w=1920, h=1080):
+        """The screen's available size as the gallery sees it (the offscreen one is short)."""
+        from PySide6.QtCore import QRect
+
+        cls = type(QApplication.primaryScreen())
+        self.addCleanup(setattr, cls, "availableGeometry", cls.availableGeometry)
+        cls.availableGeometry = lambda _s: QRect(0, 0, w, h)
 
     @property
     def player(self):
@@ -371,6 +379,7 @@ class GalleryOffscreen(unittest.TestCase):
 
     # ------------------------------------------------------------ opening
     def test_open_by_click(self):
+        self.screen_size()                                            # 1920x1080
         bar = self.bar()
         h0 = bar.height()
         bar.move(100, 900)
@@ -378,24 +387,84 @@ class GalleryOffscreen(unittest.TestCase):
         QTest.mouseClick(bar.gallery_btn, Qt.LeftButton)
         self.wait_for(lambda: bar.mode == "gallery")
         g = bar.gallery
-        self.assertEqual(bar.height(), h0 + g.panel_height() + 1)
-        self.assertEqual(bar.height(), 721)                           # the mockup's panel
+        self.assertEqual(bar.height(), h0 + g.panel_height() + overlay.GALLERY_GAP + 2)
+        self.assertEqual(bar.height(), 783)                           # panel 719, gap 8, bar 54 (+2 edges)
         self.assertEqual((g.stage.width(), g.stage.height()), (1006, 566))
         self.assertEqual(bar.y() + bar.height(), bottom)              # grew upward
-        self.assertEqual(bar.stack.currentIndex(), 4)
+        self.assertEqual(bar.width(), 1040)                           # the panel is as wide as the bar
         self.assertFalse(bar.gallery_host.isHidden())
         self.assertTrue(bar.panel.isHidden())
+
+    def test_bar_stays_under_the_gallery(self):
+        """The panel opens above the bar; the bar row keeps its layout, buttons and live time."""
+        bar = self.resident()
+        opts = [(o.geometry(), o.isEnabled()) for o in bar.options]
+        g = self.open(bar)
+        self.assertEqual(bar.stack.currentIndex(), 0)                 # the clip lengths, not a footer
+        self.assertEqual([(o.geometry(), o.isEnabled()) for o in bar.options], opts)
+        self.assertTrue(all(o.isVisible() for o in bar.options))
+        self.assertTrue(bar.controls[0]["pause"].isVisible() and bar.controls[0]["gear"].isEnabled())
+        self.assertTrue(bar.gallery_btn.selected())                   # the button shows it is open
+        host, stack = bar.gallery_host, bar.stack
+        self.assertEqual(host.geometry().top(), 1)                    # the panel on top...
+        self.assertEqual(stack.geometry().top() - host.geometry().bottom() - 1,
+                         overlay.GALLERY_GAP + 2)                      # ...a gap, then the bar
+        self.assertEqual(bar.height() - stack.geometry().bottom() - 1, 1)
+        self.assertEqual(g.footer.window(), bar)                      # the footer is in the panel
+        self.assertTrue(host.isAncestorOf(g.footer))
+        self.assertTrue(g.panel.w["play"].hasFocus())
+        st = dict(bar.last_status, buffered_live=754.0)               # the bar row stays live
+        bar.apply_status(st)
+        self.assertEqual(bar.time.text(), "12:34")
+        self.assertTrue(g.panel.w["play"].hasFocus())                 # ...without taking the keyboard
+        self.assertEqual(bar.mode, "gallery")
+        from PySide6.QtCore import QEvent
+        self.app.sendEvent(g.stage, QEvent(QEvent.Enter))             # the pointer on the panel is on the bar
+        self.assertFalse(bar.leave.isActive())
+        QTest.mouseClick(bar.gallery_btn, Qt.LeftButton)              # the button toggles it closed
+        self.assertEqual(bar.mode, "clip")
+        self.assertFalse(bar.gallery_btn.selected())
+        self.assertIsNone(g.player)
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
+        self.open(bar)
+        self.key(Qt.Key_Escape)                                       # Esc: the gallery first...
+        self.assertEqual(bar.mode, "clip")
+        self.assertTrue(bar.isVisible())
+        self.key(Qt.Key_Escape)                                       # ...then the bar
+        self.assertFalse(bar.isVisible())
+        pump(self.app, 0.05)
+        self.assertEqual(self.exits, [config.BAR_RECYCLE_EXIT])      # and the recycle after a gallery
+
+    def test_bar_buttons_under_the_gallery(self):
+        """Pause works with the gallery open; settings / a save fold the gallery away first."""
+        d = self.daemon()
+        bar = self.bar(daemon=d)
+        g = self.open(bar)
+        QTest.mouseClick(bar.controls[0]["pause"], Qt.LeftButton)
+        self.wait_for(lambda: d.controls == ["pause"] and not bar.control_busy)
+        pump(self.app, 0.05)
+        self.assertEqual(bar.mode, "gallery")                         # still open, still playing
+        self.assertEqual(g.state, "playing")
+        self.assertEqual(bar.controls[0]["pause"].kind, "play")
+        QTest.mouseClick(bar.gear, Qt.LeftButton)                     # settings take the bar
+        self.assertIsNone(g.player)
+        self.wait_for(lambda: bar.mode == "settings")
+        self.assertTrue(bar.gallery_host.isHidden())
+        bar.close_settings()
+        pump(self.app, 0.05)
+        g = self.open(bar)
+        QTest.mouseClick(bar.options[0], Qt.LeftButton)               # a save: the gallery folds, then saves
+        self.assertEqual(bar.mode, "clip")
+        self.assertTrue(bar.saving)
+        self.assertIsNone(g.player)
+        self.wait_for(lambda: d.saves == [bar.options[0].seconds])
 
     def test_short_screen_shrinks_the_stage(self):
         """1280x720 (the Ally at 150 %): the stage gets smaller so the whole bar fits."""
         bar = self.bar()
         g = self.open(bar)
         self.key(Qt.Key_Escape)
-        screen = bar.screen()
-        orig = type(screen).availableGeometry
-        from PySide6.QtCore import QRect
-        self.addCleanup(setattr, type(screen), "availableGeometry", orig)
-        type(screen).availableGeometry = lambda _s: QRect(0, 0, 1280, 720)
+        self.screen_size(1280, 720)
         g = self.open(bar)
         self.assertLessEqual(bar.height() + 2 * overlay.BOTTOM_MARGIN, 720)
         self.assertEqual(round(g.stage.width() * 9 / 16), g.stage.height())
@@ -689,7 +758,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_G)
         self.wait_for(lambda: bar.mode == "gallery")
         g = bar.gallery
-        full_h = overlay.BAR_HEIGHT + 2 + g.panel_height() + 1
+        full_h = overlay.BAR_HEIGHT + 2 + g.panel_height() + overlay.GALLERY_GAP + 2
         self.assertLess(bar.height(), full_h)                         # growing, not a jump
         self.assertIsNotNone(g.panel_w.graphicsEffect())              # the content fades in
         self.wait_for(lambda: bar.height() == full_h, timeout=2)
