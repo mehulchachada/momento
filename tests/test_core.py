@@ -342,6 +342,12 @@ class IPCTest(unittest.TestCase):
         self.server.start()
         self.loop_thread = threading.Thread(target=self.loop.run, daemon=True)
         self.loop_thread.start()
+        # Wait until the loop dispatches: a quit() that lands before run() starts is
+        # lost, and the leaked thread would keep running the default context under
+        # later tests (e.g. test_gamepad's GLib adapter test).
+        running = threading.Event()
+        GLib.idle_add(lambda: running.set() or False)
+        self.assertTrue(running.wait(5), "GLib main loop thread did not start")
         self.ipc = ipc
 
     def tearDown(self):

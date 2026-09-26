@@ -761,8 +761,11 @@ class GlibLoop(unittest.TestCase):
             self.assertEqual(got, ["accept", "chord"])
             d.unplug()                                        # watch goes away cleanly
             deadline = time.monotonic() + 3
-            while hub.devices() and time.monotonic() < deadline:
+            # the pad leaves hub.devices() a moment before the adapter drops its watch
+            while (hub.devices() or handle.watches) and time.monotonic() < deadline:
                 ctx.iteration(False)
+                time.sleep(0.001)
+            self.assertEqual(hub.devices(), [])
             self.assertEqual(handle.watches, {})
         finally:
             handle.detach()

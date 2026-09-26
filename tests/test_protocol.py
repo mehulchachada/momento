@@ -440,6 +440,21 @@ class CoverageTest(_DaemonCase):
         self.assertEqual(found - known, set(), "overlay.py uses commands that momento/protocol.py does not document")
 
 
+def _wait_running(loop, timeout=5.0):
+    """Block until ``loop`` (just started in a thread) is dispatching.
+
+    A quit() that lands before the thread gets into run() is lost (run() sets the
+    loop running again), and the leaked thread would keep dispatching the default
+    GLib context under later tests.
+    """
+    from gi.repository import GLib
+
+    running = threading.Event()
+    GLib.idle_add(lambda: running.set() or False)
+    if not running.wait(timeout):
+        raise RuntimeError("GLib main loop thread did not start")
+
+
 @unittest.skipUnless(_gi_available(), "PyGObject not available")
 class WireTest(_DaemonCase):
     """The daemon's handler behind the real ipc.Server, over a real Unix socket."""
@@ -456,6 +471,7 @@ class WireTest(_DaemonCase):
         self.server.start()
         t = threading.Thread(target=self.loop.run, daemon=True)
         t.start()
+        _wait_running(self.loop)
 
         def stop():
             self.server.close()
