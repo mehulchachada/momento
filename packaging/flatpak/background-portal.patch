@@ -1,0 +1,106 @@
+diff --git a/momento/background.py b/momento/background.py
+new file mode 100644
+index 0000000..09967a9
+--- /dev/null
++++ b/momento/background.py
+@@ -0,0 +1,83 @@
++"""Flatpak: run in the background and start at login via the Background portal.
++
++A Flatpak cannot install a systemd user unit, so inside the sandbox the daemon
++asks org.freedesktop.portal.Background instead. With autostart=True the portal
++writes ~/.config/autostart/<app-id>.desktop running
++``flatpak run --command=momento <app-id> daemon`` at every login; the desktop
++shows the user a one-time permission prompt (GNOME) or lists Momento under
++Autostart (KDE). The same request also marks the app as allowed to keep running
++with no window open.
++
++Outside Flatpak this module does nothing: install.sh and the distro packages
++use momento.service instead.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import secrets
++
++import dbus
++
++log = logging.getLogger("momento.background")
++
++BUS_NAME = "org.freedesktop.portal.Desktop"
++OBJECT_PATH = "/org/freedesktop/portal/desktop"
++BACKGROUND_IFACE = "org.freedesktop.portal.Background"
++REQUEST_IFACE = "org.freedesktop.portal.Request"
++
++
++def in_flatpak() -> bool:
++    return os.path.exists("/.flatpak-info")
++
++
++def request(bus: dbus.Bus, autostart: bool = True) -> None:
++    """Ask for background + autostart permission (async; result is only logged)."""
++    if bus is None or not in_flatpak():
++        return
++    token = "momento_bg_" + secrets.token_hex(4)
++    sender = bus.get_unique_name().lstrip(":").replace(".", "_")
++    handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
++    match = None
++
++    def on_response(response, results):
++        if match is not None:
++            match.remove()
++        if int(response) == 0:
++            log.info("background portal: background=%s autostart=%s",
++                     bool(results.get("background")), bool(results.get("autostart")))
++        else:
++            log.warning("background portal: request denied or cancelled (%s); "
++                        "Momento will not start at login", int(response))
++
++    # Subscribe before calling, so a fast reply can't be missed.
++    match = bus.add_signal_receiver(on_response, signal_name="Response",
++                                    dbus_interface=REQUEST_IFACE, path=handle)
++    options = {
++        "handle_token": dbus.String(token),
++        "reason": dbus.String("Momento records in the background so you can save what just happened."),
++        "autostart": dbus.Boolean(autostart),
++        "commandline": dbus.Array(["momento", "daemon"], signature="s"),
++        "dbus-activatable": dbus.Boolean(False),
++    }
++    try:
++        portal = dbus.Interface(bus.get_object(BUS_NAME, OBJECT_PATH), BACKGROUND_IFACE)
++        portal.RequestBackground("", dbus.Dictionary(options, signature="sv"),
++                                 reply_handler=lambda _h: None,
++                                 error_handler=lambda e: log.warning("background portal: %s", e))
++    except dbus.DBusException as e:
++        match.remove()
++        log.warning("background portal unavailable: %s", e)
++
++
++def set_status(bus: dbus.Bus, message: str) -> None:
++    """Short status line shown next to the app in the desktop's background-apps list (portal v2+)."""
++    if bus is None or not in_flatpak():
++        return
++    try:
++        portal = dbus.Interface(bus.get_object(BUS_NAME, OBJECT_PATH), BACKGROUND_IFACE)
++        portal.SetStatus(dbus.Dictionary({"message": dbus.String(message[:96])}, signature="sv"),
++                         reply_handler=lambda: None, error_handler=lambda e: log.debug("SetStatus: %s", e))
++    except dbus.DBusException as e:
++        log.debug("SetStatus: %s", e)
+diff --git a/momento/daemon.py b/momento/daemon.py
+index fdcca39..67688a9 100644
+--- a/momento/daemon.py
++++ b/momento/daemon.py
+@@ -94,6 +94,12 @@ class Daemon:
+             from .portal import register_app_id
+ 
+             register_app_id(self.bus, config.APP_ID)
++
++            # Flatpak only: no systemd unit there, so ask the Background portal
++            # to keep us running and to start `momento daemon` at login.
++            from . import background
++
++            background.request(self.bus, autostart=True)
+         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
+         self._start_recorder()  # our own buffer (if any is left) counts as reclaimable
+         from gi.repository import GLib

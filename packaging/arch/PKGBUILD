@@ -1,0 +1,67 @@
+# Maintainer: Mehul Chachada <mehulchachada at users dot noreply dot github dot com>
+#
+# AUR package for Momento. Publish: see docs/PUBLISHING.md ("AUR").
+# After bumping pkgver: updpkgsums && makepkg --printsrcinfo > .SRCINFO
+pkgname=momento
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Instant replay for Linux gaming - always records, saves the last 15 s to 60 min with one hotkey'
+arch=('any')
+url='https://github.com/mehulchachada/momento'
+license=('MIT')
+depends=(
+  'python'
+  'python-gobject'
+  'python-dbus'
+  'pyside6'
+  'gstreamer'
+  'gst-plugins-base'
+  'gst-plugin-pipewire'
+  'gst-plugins-good'
+  'gst-plugins-bad'
+  'gst-libav'
+  'ffmpeg'
+  'libpulse'
+  'xdg-desktop-portal'
+  'hicolor-icon-theme'
+)
+optdepends=(
+  'gst-plugin-va: hardware H.264 encoding on AMD and Intel (recommended)'
+  'intel-media-driver: VA-API driver for Intel graphics'
+  'gst-plugins-ugly: x264enc software encoder fallback'
+  'layer-shell-qt: clip bar above fullscreen games on KDE Plasma and wlroots'
+  'xdg-user-dirs: save clips to your (localized) Videos folder'
+)
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+checkdepends=('ffmpeg')
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+# Placeholder until v0.1.0 is released: run `updpkgsums` (or copy the value
+# from the release's SHA256SUMS).
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  python -m unittest tests.test_core
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  local appid=io.github.mehulchachada.Momento
+  install -Dm644 "data/$appid.desktop" "$pkgdir/usr/share/applications/$appid.desktop"
+  install -Dm644 assets/logo.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$appid.svg"
+  install -Dm644 "packaging/flatpak/$appid.metainfo.xml" "$pkgdir/usr/share/metainfo/$appid.metainfo.xml"
+  # User unit with ExecStart=/usr/bin/momento (data/momento.service is the
+  # ~/.local variant used by install.sh). Not enabled: each user runs
+  #   systemctl --user enable --now momento.service
+  install -Dm644 packaging/systemd/momento.service "$pkgdir/usr/lib/systemd/user/momento.service"
+  install -Dm644 data/config.example.toml "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

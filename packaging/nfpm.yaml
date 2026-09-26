@@ -1,0 +1,188 @@
+# nfpm config: builds the noarch .deb, .rpm and Arch .pkg.tar.zst attached to
+# every GitHub release (see .github/workflows/release.yml).
+#
+#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p deb       -t dist/
+#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p rpm       -t dist/
+#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p archlinux -t dist/
+#
+# Run from the repository root. Paths below are relative to it.
+#
+# Target distros (their package names are used below):
+#   .deb  Ubuntu 24.04+, Debian 13+ (older ones have no PySide6 packages)
+#   .rpm  Fedora 41+ (openSUSE uses different package names — use OBS instead)
+#   .pkg  Arch Linux, CachyOS, EndeavourOS, Manjaro
+name: momento
+arch: all
+platform: linux
+version: ${VERSION}
+version_schema: semver
+release: 1
+section: video
+priority: optional
+maintainer: Mehul Chachada <mehulchachada@users.noreply.github.com>
+# One line on purpose: Arch's pkgdesc takes the whole field.
+description: Instant replay for Linux gaming - always records, saves the last 15 s to 60 min with one hotkey
+vendor: Momento contributors
+homepage: https://github.com/mehulchachada/momento
+license: MIT
+
+contents:
+  # Own our directories so rpm/pacman remove them on uninstall.
+  - dst: /usr/share/momento
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/momento/momento
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/doc/momento
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/licenses/momento
+    type: dir
+    packager: rpm
+    file_info:
+      mode: 0755
+  - dst: /usr/share/licenses/momento
+    type: dir
+    packager: archlinux
+    file_info:
+      mode: 0755
+  # Python package, outside site-packages (see packaging/nfpm/momento.sh).
+  - src: ./momento/*.py
+    dst: /usr/share/momento/momento/
+    file_info:
+      mode: 0644
+  - src: ./packaging/nfpm/momento.sh
+    dst: /usr/bin/momento
+    file_info:
+      mode: 0755
+  - src: ./data/io.github.mehulchachada.Momento.desktop
+    dst: /usr/share/applications/io.github.mehulchachada.Momento.desktop
+    file_info:
+      mode: 0644
+  - src: ./assets/logo.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/io.github.mehulchachada.Momento.svg
+    file_info:
+      mode: 0644
+  - src: ./packaging/flatpak/io.github.mehulchachada.Momento.metainfo.xml
+    dst: /usr/share/metainfo/io.github.mehulchachada.Momento.metainfo.xml
+    file_info:
+      mode: 0644
+  - src: ./packaging/systemd/momento.service
+    dst: /usr/lib/systemd/user/momento.service
+    file_info:
+      mode: 0644
+  - src: ./data/config.example.toml
+    dst: /usr/share/doc/momento/config.example.toml
+    file_info:
+      mode: 0644
+  - src: ./README.md
+    dst: /usr/share/doc/momento/README.md
+    file_info:
+      mode: 0644
+  # License: Debian wants doc/<pkg>/copyright, Fedora and Arch licenses/<pkg>/.
+  - src: ./LICENSE
+    dst: /usr/share/doc/momento/copyright
+    packager: deb
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/licenses/momento/LICENSE
+    packager: rpm
+    file_info:
+      mode: 0644
+  - src: ./LICENSE
+    dst: /usr/share/licenses/momento/LICENSE
+    packager: archlinux
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./packaging/nfpm/postinstall.sh
+  preremove: ./packaging/nfpm/preremove.sh
+
+# Runtime dependencies mirror the per-distro package names in install.sh.
+# Hardware encoders are GPU-specific, so they are recommendations: without one,
+# Momento falls back to x264enc/openh264enc (software) if present.
+overrides:
+  deb:
+    depends:
+      - python3 (>= 3.11)
+      - python3-gi
+      - gir1.2-gstreamer-1.0
+      - gir1.2-gst-plugins-base-1.0
+      - python3-dbus
+      - python3-pyside6.qtcore
+      - python3-pyside6.qtgui
+      - python3-pyside6.qtwidgets
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-pipewire
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-pulseaudio
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-libav
+      - ffmpeg
+      - pulseaudio-utils
+      - xdg-desktop-portal
+    recommends:
+      - mesa-va-drivers
+      - layer-shell-qt
+      - pipewire-bin
+      - xdg-user-dirs
+    suggests:
+      - gstreamer1.0-plugins-ugly
+      - intel-media-va-driver-non-free
+  rpm:
+    depends:
+      - python3 >= 3.11
+      - python3-gobject
+      - gstreamer1
+      - python3-dbus
+      - python3-pyside6
+      - gstreamer1-plugins-base
+      - pipewire-gstreamer
+      - gstreamer1-plugins-good
+      - gstreamer1-plugins-bad-free
+      - gstreamer1-plugin-libav
+      # ffmpeg-free (Fedora) or ffmpeg (RPM Fusion) — both provide it.
+      - /usr/bin/ffmpeg
+      # pulseaudio-utils
+      - /usr/bin/pactl
+      - xdg-desktop-portal
+    recommends:
+      - mesa-va-drivers
+      - layer-shell-qt
+      - pipewire-utils
+      - xdg-user-dirs
+  archlinux:
+    depends:
+      - python>=3.11
+      - python-gobject
+      - gstreamer
+      - gst-plugins-base
+      - python-dbus
+      - pyside6
+      - gst-plugin-pipewire
+      - gst-plugins-good
+      - gst-plugins-bad
+      - gst-libav
+      - ffmpeg
+      - libpulse
+      - xdg-desktop-portal
+      - hicolor-icon-theme
+    # nfpm cannot write Arch optdepends; the release notes list the optional
+    # packages (gst-plugin-va, layer-shell-qt, gst-plugins-ugly, xdg-user-dirs).
+
+rpm:
+  summary: Instant replay for Linux gaming — save the last 15 s to 60 min
+  group: Applications/Multimedia
+  compression: zstd
+
+deb:
+  compression: zstd
+
+archlinux:
+  packager: Mehul Chachada <mehulchachada@users.noreply.github.com>

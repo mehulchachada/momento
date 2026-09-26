@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Momento contributors -->
+<component type="desktop-application">
+  <id>io.github.mehulchachada.Momento</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Momento</name>
+  <summary>Instant replay: save the last 15 seconds to 60 minutes</summary>
+
+  <developer id="io.github.mehulchachada">
+    <name>Mehul Chachada</name>
+  </developer>
+
+  <description>
+    <p>
+      Momento is instant replay for Linux gaming, like the Create button on a PlayStation 5
+      or “record that” on an Xbox. It records your screen and sound in the background all
+      the time, so you never have to remember to start recording. When something worth
+      keeping happens, press Super+Shift+G, pick how far back to go, and the clip is saved
+      to your Videos folder.
+    </p>
+    <ul>
+      <li>Always keeps up to the last 60 minutes, including desktop sound and, optionally, your microphone</li>
+      <li>Eight clip lengths, from 15 seconds to a full hour</li>
+      <li>Clips are cut without re-encoding, so even an hour saves in seconds</li>
+      <li>Hardware H.264 encoding on AMD, Intel and NVIDIA graphics keeps the cost low</li>
+      <li>A slim clip bar that appears over fullscreen games on KDE Plasma, Hyprland and Sway</li>
+      <li>Works in desktop mode and in Steam Game Mode, on desktops, laptops and handhelds</li>
+    </ul>
+    <p>
+      The first time it starts, your desktop asks which screen Momento may record. The replay
+      buffer is kept in your cache folder and its size is bounded by the length you choose.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.mehulchachada.Momento.desktop</launchable>
+
+  <provides>
+    <binary>momento</binary>
+  </provides>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Game</category>
+  </categories>
+
+  <keywords>
+    <keyword>replay</keyword>
+    <keyword>instant replay</keyword>
+    <keyword>clip</keyword>
+    <keyword>record</keyword>
+    <keyword>screen recorder</keyword>
+    <keyword>capture</keyword>
+    <keyword>gaming</keyword>
+    <keyword>steam</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/mehulchachada/momento</url>
+  <url type="bugtracker">https://github.com/mehulchachada/momento/issues</url>
+  <url type="vcs-browser">https://github.com/mehulchachada/momento</url>
+  <url type="contribute">https://github.com/mehulchachada/momento/blob/main/CONTRIBUTING.md</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>The clip bar over a game, with the 5 minute length selected</caption>
+      <image>https://raw.githubusercontent.com/mehulchachada/momento/v0.1.0/assets/clip-bar.png</image>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#F3EFE6</color>
+    <color type="primary" scheme_preference="dark">#121212</color>
+  </branding>
+
+  <content_rating type="oars-1.1"/>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-26">
+      <description>
+        <p>First public release.</p>
+        <ul>
+          <li>Continuous replay buffer of up to 60 minutes</li>
+          <li>Save 15 s to 60 min with Super+Shift+G or the command line</li>
+          <li>Hardware encoding through VA-API and NVENC</li>
+          <li>Clip bar with resolution, quality and sound settings</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

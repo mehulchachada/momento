@@ -1,0 +1,52 @@
+Source: momento
+Section: video
+Priority: optional
+Maintainer: Mehul Chachada <mehulchachada@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               dh-sequence-python3,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools (>= 77),
+               desktop-file-utils,
+               appstream,
+Standards-Version: 4.7.2
+Homepage: https://github.com/mehulchachada/momento
+Vcs-Browser: https://github.com/mehulchachada/momento
+Vcs-Git: https://github.com/mehulchachada/momento.git
+Rules-Requires-Root: no
+
+Package: momento
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         python3 (>= 3.11),
+         python3-gi,
+         python3-dbus,
+         python3-pyside6.qtcore,
+         python3-pyside6.qtgui,
+         python3-pyside6.qtwidgets,
+         gir1.2-gstreamer-1.0,
+         gir1.2-gst-plugins-base-1.0,
+         gstreamer1.0-plugins-base,
+         gstreamer1.0-plugins-good,
+         gstreamer1.0-plugins-bad,
+         gstreamer1.0-pulseaudio,
+         gstreamer1.0-pipewire,
+         gstreamer1.0-libav,
+         ffmpeg,
+         pulseaudio-utils,
+         xdg-desktop-portal,
+Recommends: mesa-va-drivers,
+            layer-shell-qt,
+            pipewire-bin,
+            xdg-user-dirs,
+Suggests: gstreamer1.0-plugins-ugly,
+          intel-media-va-driver-non-free,
+Description: instant replay for Linux gaming
+ Momento records the screen and sound in the background all the time. One
+ hotkey (Super+Shift+G) saves what just happened, from the last 15 seconds
+ up to the full hour, to your Videos folder. Encoding runs on the GPU through
+ VA-API or NVENC, and clips are cut without re-encoding.
+ .
+ Enable the recorder per user with: systemctl --user enable --now momento

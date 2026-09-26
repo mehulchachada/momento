@@ -1,0 +1,46 @@
+# Momento background recorder — systemd *user* unit, system-wide copy for
+# distro packages (installed to /usr/lib/systemd/user/momento.service).
+# Nothing is enabled automatically. Each user who wants it runs:
+#   systemctl --user enable --now momento.service
+# Logs: journalctl --user -u momento.service -f
+#
+# Keep in sync with data/momento.service (the ~/.local variant used by
+# install.sh): only ExecStart differs. The release workflow checks this.
+[Unit]
+Description=Momento instant-replay recorder
+Documentation=https://github.com/mehulchachada/momento
+# Needs a running graphical session (Wayland/X11 + PipeWire + portals).
+After=graphical-session.target pipewire.service wireplumber.service xdg-desktop-portal.service
+Wants=pipewire.service
+PartOf=graphical-session.target
+# Don't hammer restarts if something is fundamentally broken.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/momento daemon
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Encoding runs on the GPU; the process mostly shuffles buffers. Leave CPU
+# priority at the default so frames aren't dropped while a game is loading,
+# but make disk writes yield to the game's own I/O.
+Nice=0
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+# Memory safety: the recorder itself needs ~150 MB; the rest is page cache of
+# the segments it writes. Above MemoryHigh the kernel reclaims this cgroup's
+# memory (cache first) before touching the game's; MemoryMax is a hard cap
+# against leaks. If RAM really runs out, the OOM killer picks Momento before
+# the game.
+MemoryHigh=768M
+MemoryMax=1536M
+MemorySwapMax=256M
+OOMScoreAdjust=500
+# Give the recorder time to finalise the current segment on stop.
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=graphical-session.target

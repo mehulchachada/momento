@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+# Build from the source root after `cp -r packaging/debian debian`.
+export PYBUILD_NAME=momento
+APPID := io.github.mehulchachada.Momento
+D := debian/momento
+
+%:
+	dh $@ --buildsystem=pybuild
+
+override_dh_auto_test:
+	python3 -m unittest tests.test_core
+	desktop-file-validate data/$(APPID).desktop
+	appstreamcli validate --no-net packaging/flatpak/$(APPID).metainfo.xml
+
+execute_after_dh_auto_install:
+	install -Dm644 data/$(APPID).desktop $(D)/usr/share/applications/$(APPID).desktop
+	install -Dm644 assets/logo.svg $(D)/usr/share/icons/hicolor/scalable/apps/$(APPID).svg
+	install -Dm644 packaging/flatpak/$(APPID).metainfo.xml $(D)/usr/share/metainfo/$(APPID).metainfo.xml
+	# Installed, not enabled: users run `systemctl --user enable --now momento`.
+	install -Dm644 packaging/systemd/momento.service $(D)/usr/lib/systemd/user/momento.service
+	install -Dm644 data/config.example.toml $(D)/usr/share/doc/momento/config.example.toml

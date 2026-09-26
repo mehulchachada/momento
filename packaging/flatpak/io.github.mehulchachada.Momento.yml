@@ -1,0 +1,140 @@
+# Flatpak manifest for Momento — intended for submission to Flathub.
+#
+# Local test build (from the repository root):
+#   flatpak run org.flatpak.Builder --user --install --force-clean \
+#       --install-deps-from=flathub build-dir packaging/flatpak/io.github.mehulchachada.Momento.yml
+#   (for an uncommitted tree, swap the momento module's source for
+#    `- type: dir` / `path: ../..` — see docs/PUBLISHING.md)
+#
+# Runtime choice: org.kde.Platform 6.11 + io.qt.PySide.BaseApp 6.11.
+#  * The BaseApp's PySide6 is built against the runtime's own Qt, so the
+#    layer-shell-qt Qt plugin built below loads into it (a pip PySide6 wheel
+#    bundles its own Qt and could never load a runtime-built plugin).
+#  * The KDE runtime (freedesktop-sdk 25.08 underneath) already ships everything
+#    else Momento needs: Python 3.13, GStreamer 1.26 with pipewiresrc, pulsesrc,
+#    splitmuxsink, mpegtsmux, h264parse, the `va` plugin (vapostproc/vah264enc),
+#    nvcodec, gst-libav (avenc_aac), plus ffmpeg, ffprobe, pactl, pw-dump and
+#    xdg-user-dir. Verified with gst-inspect-1.0 inside the runtime.
+#  * Patent-encumbered bits come from runtime extensions that Flatpak installs
+#    automatically next to the runtime, not from this app:
+#      - org.freedesktop.Platform.codecs-extra (x264enc, full libavcodec incl. AAC)
+#      - org.freedesktop.Platform.GL.default//25.08-extra (Mesa built WITH the
+#        H.264 VA-API encoder — this is what makes vah264enc work on AMD)
+#    There is no org.freedesktop.Platform.ffmpeg-full for 25.08; codecs-extra
+#    replaced it. The runtime's own ffmpeg is enough for the exporter, which
+#    only stream-copies (-c copy) and never encodes.
+app-id: io.github.mehulchachada.Momento
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+base: io.qt.PySide.BaseApp
+base-version: '6.11'
+command: momento
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Desktop/mic audio (pulsesrc) and `pactl` for the device list.
+  - --socket=pulseaudio
+  # Hardware H.264 encoding (VA-API on AMD/Intel, NVENC on NVIDIA).
+  - --device=dri
+  # Direct PipeWire access: desktop audio that follows the default output
+  # (pipewiresrc with no target), Steam Game Mode capture of the `gamescope`
+  # node, and `pw-dump` to detect it. Screen capture on a desktop session goes
+  # through the ScreenCast portal and does not need this.
+  - --filesystem=xdg-run/pipewire-0
+  # Saved clips: ~/Videos/Momento by default. (Could be narrowed to
+  # xdg-videos/Momento:create if custom output folders are not wanted.)
+  - --filesystem=xdg-videos
+  # Desktop notifications ("Saved last 5 minutes") via the classic interface
+  # the daemon already uses. Portals (ScreenCast, GlobalShortcuts, Background)
+  # need no talk-name: org.freedesktop.portal.* is always reachable.
+  - --talk-name=org.freedesktop.Notifications
+build-options:
+  env:
+    # Drop the parts of the PySide BaseApp Momento doesn't use (see
+    # /app/cleanup-BaseApp.sh in the BaseApp).
+    BASEAPP_REMOVE_WEBENGINE: '1'
+    BASEAPP_DISABLE_NUMPY: '1'
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+  # The BaseApp also carries the shiboken generator (libclang + libLLVM,
+  # ~150 MB) and PyOpenGL; Momento needs neither at runtime.
+  - rm -rf /app/lib/libclang* /app/lib/libLLVM* /app/lib/python3*/site-packages/shiboken6_generator*
+    /app/lib/python3*/site-packages/OpenGL /app/lib/python3*/site-packages/pyopengl*
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/man
+  - '*.a'
+  - '*.la'
+modules:
+  # KDE's Qt Wayland layer-shell plugin: lets the clip bar sit on the Overlay
+  # layer above fullscreen games on Plasma, Hyprland, Sway... Not in the KDE
+  # runtime. Installs lib/libLayerShellQtInterface.so.6 (loaded by the overlay
+  # through ctypes) and lib/plugins/wayland-shell-integration/liblayer-shell.so
+  # (found through QT_PLUGIN_PATH=/app/lib/plugins:...).
+  - name: layer-shell-qt
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_TESTING=OFF
+    sources:
+      - type: archive
+        url: https://download.kde.org/stable/plasma/6.7.5/layer-shell-qt-6.7.5.tar.xz
+        sha256: ccdcfec7081ca956f7a52c9113a4df3a226575bfbe98b56a2a9a4d7d7e19e8f0
+        x-checker-data:
+          type: html
+          url: https://download.kde.org/stable/plasma/
+          version-pattern: href="(6\.\d+\.\d+)/"
+          url-template: https://download.kde.org/stable/plasma/$version/layer-shell-qt-$version.tar.xz
+
+  # Python bindings the runtime does not ship. Both are meson projects, so they
+  # are built directly (no pip, no network) against the runtime's GLib/libdbus.
+  - name: pygobject
+    buildsystem: meson
+    config-opts:
+      - -Dpycairo=disabled
+      - -Dtests=false
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/a3/9b/473a5234ec86bce978d3583adc62441c84cc57181c4ea8a8978997c7f0c1/pygobject-3.58.0.tar.gz
+        sha256: 45068697de3ffe46840ca369705f23118b34db4f7deb63f6eff079a6734ddcca
+        x-checker-data:
+          type: pypi
+          name: PyGObject
+
+  - name: dbus-python
+    buildsystem: meson
+    config-opts:
+      - -Dtests=false
+      - -Ddoc=false
+    sources:
+      - type: archive
+        url: https://files.pythonhosted.org/packages/ff/24/63118050c7dd7be04b1ccd60eab53fef00abe844442e1b6dec92dae505d6/dbus-python-1.4.0.tar.gz
+        sha256: 991666e498f60dbf3e49b8b7678f5559b8a65034fdf61aae62cdecdb7d89c770
+        x-checker-data:
+          type: pypi
+          name: dbus-python
+
+  - name: momento
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --no-index --no-deps --no-build-isolation --prefix=${FLATPAK_DEST} .
+      - install -Dm644 data/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm644 assets/logo.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm644 packaging/flatpak/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm644 data/config.example.toml ${FLATPAK_DEST}/share/momento/config.example.toml
+    sources:
+      # Release tarball uploaded by .github/workflows/release.yml. Bump url +
+      # sha256 (sha256 is in the release's SHA256SUMS) for every release.
+      - type: archive
+        url: https://github.com/mehulchachada/momento/releases/download/v0.1.0/momento-0.1.0.tar.gz
+        # Placeholder until v0.1.0 is tagged: take it from SHA256SUMS in the release.
+        sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/mehulchachada/momento/releases/latest
+          version-query: .tag_name | sub("^v"; "")
+          url-query: .assets[] | select(.name == "momento-" + $version + ".tar.gz") | .browser_download_url

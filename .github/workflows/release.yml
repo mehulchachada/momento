@@ -1,0 +1,179 @@
+# Release: push a tag like v0.1.0 and this builds the distro packages, the
+# source tarball and SHA256SUMS, smoke-tests the packages, and publishes a
+# GitHub Release with them attached.
+#
+#   git tag -a v0.1.0 -m "Momento 0.1.0" && git push origin v0.1.0
+#
+# The tag must match momento/__init__.py's __version__.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  NFPM_VERSION: 2.47.0   # checksums.txt of the nfpm release is verified on download
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches __version__
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' momento/__init__.py)"
+          if [ "$tag" != "$code" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ = $code"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check packaged systemd unit is in sync with data/momento.service
+        run: |
+          diff <(grep -v '^#' data/momento.service | sed 's|%h/.local/bin/momento|/usr/bin/momento|') \
+               <(grep -v '^#' packaging/systemd/momento.service)
+
+      - name: Lint and unit tests
+        run: |
+          python3 -m compileall -q momento
+          python3 -m unittest tests.test_core
+          sudo apt-get update -qq && sudo apt-get install -y -qq desktop-file-utils appstream >/dev/null
+          desktop-file-validate data/io.github.mehulchachada.Momento.desktop
+          appstreamcli validate --no-net packaging/flatpak/io.github.mehulchachada.Momento.metainfo.xml
+
+      - name: Install nfpm
+        run: |
+          cd "$RUNNER_TEMP"
+          base="https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}"
+          file="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLO "$base/$file"
+          curl -fsSL "$base/checksums.txt" | grep " ${file}\$" | sha256sum -c -
+          tar xzf "$file" nfpm
+          sudo install -m755 nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Build packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist
+          nfpm package -f packaging/nfpm.yaml -p deb       -t "dist/momento_${VERSION}_all.deb"
+          nfpm package -f packaging/nfpm.yaml -p rpm       -t "dist/momento-${VERSION}-1.noarch.rpm"
+          nfpm package -f packaging/nfpm.yaml -p archlinux -t "dist/momento-${VERSION}-1-any.pkg.tar.zst"
+
+      - name: Source tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Stable, self-hosted tarball: AUR, COPR and Flathub point at this
+          # asset (its checksum never changes, unlike on-the-fly archives).
+          git archive --format=tar.gz --prefix="momento-${VERSION}/" \
+              -o "dist/momento-${VERSION}.tar.gz" "$GITHUB_REF_NAME"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  # Install each package on the distro it targets (dependencies resolved from
+  # that distro's own repositories) and run the CLI. No GPU or session here, so
+  # only the dependency set and the launcher are tested.
+  smoke-test:
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:trixie
+            install: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/*.deb
+          - image: ubuntu:26.04
+            install: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ./dist/*.deb
+          - image: fedora:latest
+            install: dnf install -y -q ./dist/*.rpm
+          - image: archlinux:latest
+            install: pacman -Syu --noconfirm >/dev/null && pacman -U --noconfirm ./dist/*.pkg.tar.zst
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Install
+        run: ${{ matrix.install }}
+      - name: Run
+        run: |
+          momento --version
+          momento settings
+          python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); import dbus; from PySide6 import QtWidgets; print(Gst.version_string())'
+          test -f /usr/lib/systemd/user/momento.service
+
+  release:
+    needs: [build, smoke-test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cat > notes.md <<EOF
+          ## Install
+
+          **Any distro, including SteamOS and Bazzite:** Flatpak from Flathub (when available).
+
+          **Fedora 41+** (Fedora's Mesa has no H.264 encoder; AMD users also want \`mesa-va-drivers-freeworld\` from RPM Fusion):
+          \`\`\`
+          sudo dnf install ./momento-${VERSION}-1.noarch.rpm
+          \`\`\`
+
+          **Ubuntu 25.04+ / 26.04 LTS, Debian 13+** (Ubuntu 24.04 has no PySide6 packages — use the Flatpak there):
+          \`\`\`
+          sudo apt install ./momento_${VERSION}_all.deb
+          \`\`\`
+
+          **Arch, CachyOS, EndeavourOS, Manjaro** (or install \`momento\` from the AUR):
+          \`\`\`
+          sudo pacman -U momento-${VERSION}-1-any.pkg.tar.zst
+          sudo pacman -S --needed gst-plugin-va layer-shell-qt   # recommended
+          \`\`\`
+
+          Then, as your normal user:
+          \`\`\`
+          systemctl --user enable --now momento.service
+          \`\`\`
+          and press **Super+Shift+G** to save a clip.
+
+          Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          EOF
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Momento $VERSION" \
+              --notes-file notes.md \
+              --generate-notes \
+              --verify-tag

@@ -1,0 +1,95 @@
+diff --git a/momento/cli.py b/momento/cli.py
+index c32fb16..c2ec04b 100644
+--- a/momento/cli.py
++++ b/momento/cli.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import logging
++import os
+ import sys
+ from pathlib import Path
+ 
+@@ -83,6 +84,17 @@ def main(argv: list[str] | None = None) -> int:
+     if args.command == "overlay":
+         from . import overlay
+ 
++        # Flatpak: each `flatpak run` has its own PID namespace, so the pidfile
++        # toggle can't see a bar the daemon opened. Let the daemon open/close
++        # it; fall back to running it here when no daemon is up.
++        if os.path.exists("/.flatpak-info"):
++            from . import ipc
++
++            try:
++                if ipc.request({"cmd": "overlay"}, timeout=5).get("ok"):
++                    return 0
++            except (ipc.IPCError, OSError, ValueError):
++                pass
+         return overlay.main([]) or 0
+ 
+     if args.command == "daemon":
+diff --git a/momento/config.py b/momento/config.py
+index fd6955c..a28d73b 100644
+--- a/momento/config.py
++++ b/momento/config.py
+@@ -16,6 +16,12 @@ CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "momento"
+ CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "momento"
+ STATE_DIR = _xdg("XDG_STATE_HOME", ".local/state") / "momento"
+ RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/momento-{os.getuid()}")
++# Flatpak gives every `flatpak run` its own private XDG_RUNTIME_DIR; only
++# $XDG_RUNTIME_DIR/app/$FLATPAK_ID is shared between instances of the app. The
++# socket and overlay pidfile must live there or `flatpak run ... save 30s`
++# could never reach the daemon.
++if os.environ.get("FLATPAK_ID") and os.environ.get("XDG_RUNTIME_DIR"):
++    RUNTIME_DIR = RUNTIME_DIR / "app" / os.environ["FLATPAK_ID"]
+ SOCKET_PATH = RUNTIME_DIR / "momento.sock"
+ 
+ 
+diff --git a/momento/daemon.py b/momento/daemon.py
+index 67688a9..a905dae 100644
+--- a/momento/daemon.py
++++ b/momento/daemon.py
+@@ -225,6 +225,9 @@ class Daemon:
+             reply(self.status())
+         elif cmd == "save":
+             self.save(msg, reply)
++        elif cmd == "overlay":
++            spawn_overlay()
++            reply({"ok": True})
+         elif cmd == "reload":
+             self.reload(reply)
+         elif cmd == "settings":
+diff --git a/momento/overlay.py b/momento/overlay.py
+index 1789ab2..9aa5e97 100644
+--- a/momento/overlay.py
++++ b/momento/overlay.py
+@@ -210,8 +210,12 @@ def _layer_shell_available() -> bool:
+         plugins = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath))
+     except Exception:  # noqa: BLE001
+         plugins = Path("/usr/lib64/qt6/plugins")
+-    candidates = [plugins / LAYER_SHELL_PLUGIN, Path("/usr/lib64/qt6/plugins") / LAYER_SHELL_PLUGIN,
+-                  Path("/usr/lib/qt6/plugins") / LAYER_SHELL_PLUGIN]
++    # QT_PLUGIN_PATH first: in the Flatpak the plugin is in /app/lib/plugins,
++    # which Qt searches through that variable, not through QLibraryInfo.
++    extra = [Path(d) for d in os.environ.get("QT_PLUGIN_PATH", "").split(":") if d]
++    candidates = [d / LAYER_SHELL_PLUGIN for d in extra] + [
++        plugins / LAYER_SHELL_PLUGIN, Path("/usr/lib64/qt6/plugins") / LAYER_SHELL_PLUGIN,
++        Path("/usr/lib/qt6/plugins") / LAYER_SHELL_PLUGIN]
+     if not any(p.exists() for p in candidates):
+         return False
+     try:
+@@ -274,6 +278,14 @@ def _apply_layer_shell(widget) -> bool:
+ 
+ def start_daemon() -> str:
+     """Start the recorder: through its systemd user unit if installed, else detached."""
++    if os.path.exists("/.flatpak-info"):
++        # A child of this sandbox would be killed when the overlay exits (the
++        # sandbox ends with its first process). flatpak-spawn asks the Flatpak
++        # portal for a new, independent instance of this app instead.
++        subprocess.Popen(["flatpak-spawn", "momento", "daemon"],
++                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
++                         start_new_session=True, close_fds=True)
++        return "flatpak"
+     try:
+         unit = subprocess.run(["systemctl", "--user", "cat", "momento.service"],
+                               capture_output=True, timeout=5)
