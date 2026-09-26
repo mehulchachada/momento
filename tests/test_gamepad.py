@@ -329,11 +329,11 @@ class Chord(Base):
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
         self.clock.t = 100.1
         self.push(hub, d, EV_KEY, BTN_START, 1)
-        self.assertAlmostEqual(hub.next_timeout(), 0.5)
-        self.at(hub, 100.599)
+        self.assertAlmostEqual(hub.next_timeout(), 0.3)
+        self.at(hub, 100.399)
         self.assertEqual(self.chords, [])
-        self.at(hub, 100.6)
-        self.assertEqual(self.chords, [100.6])
+        self.at(hub, 100.4)
+        self.assertEqual(self.chords, [100.4])
         self.at(hub, 105.0)
         self.assertEqual(len(self.chords), 1)
 
@@ -343,15 +343,15 @@ class Chord(Base):
         hub.add_device(d)
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
         self.push(hub, d, EV_KEY, BTN_START, 1)
-        self.clock.t = 100.4
+        self.clock.t = 100.2
         self.push(hub, d, EV_KEY, BTN_START, 0)
         self.at(hub, 101.0)
         self.assertEqual(self.chords, [])
         self.push(hub, d, EV_KEY, BTN_START, 1)            # the hold restarts from here
-        self.at(hub, 101.49)
+        self.at(hub, 101.29)
         self.assertEqual(self.chords, [])
-        self.at(hub, 101.5)
-        self.assertEqual(self.chords, [101.5])
+        self.at(hub, 101.3)
+        self.assertEqual(self.chords, [101.3])
 
     def test_rearm_after_release(self):
         hub = self.hub()
@@ -445,7 +445,7 @@ class Chord(Base):
             g.normalize_chord(buttons)
         self.assertEqual(g.chord_label(["mode", "south"]), "Mode + South")
         self.assertEqual(g.DEFAULT_CHORD, ("select", "start"))
-        self.assertEqual(g.DEFAULT_HOLD_MS, 500)
+        self.assertEqual(g.DEFAULT_HOLD_MS, 300)
 
 
 class Grab(Base):

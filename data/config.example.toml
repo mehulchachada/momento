@@ -140,7 +140,7 @@ enabled = true
 open_chord = ["select", "start"]
 
 # How long to hold them, in milliseconds (0-5000).
-hold_ms = 500
+hold_ms = 300
 
 # While the bar is open, take the controller over so the game doesn't see the
 # presses. If another program already holds it, Momento shares it instead.

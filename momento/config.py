@@ -89,7 +89,7 @@ DEFAULTS = {
         # (stick clicks), tl / tr (bumpers), south / east / north / west, or
         # left_paddle / right_paddle (back buttons on Elite-style pads and handhelds).
         "open_chord": ["select", "start"],
-        "hold_ms": 500,
+        "hold_ms": 300,
         # Take the controller over while the bar is open, so the game doesn't see
         # the presses (falls back to sharing it where that isn't possible).
         "exclusive": True,

@@ -149,7 +149,7 @@ momento stop            # stop recording and clear the history
 
 ## Using a controller
 
-Hold **View + Menu** (the two small buttons in the middle) for half a second to open the bar. Do it again to close it.
+Hold **View + Menu** (the two small buttons in the middle) for a moment to open the bar. Do it again to close it. On a PlayStation controller that's **Create + Options**, on a Nintendo-style one **− and +**.
 
 | Button | In the bar |
 |---|---|
@@ -232,7 +232,7 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 | Microphone | `[audio] microphone` | `false` |
 | Clip folder | `[output] dir` | your Videos folder + `/Momento` |
 | Shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
-| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 500`. `enabled = false` turns controllers off |
+| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 300`. `enabled = false` turns controllers off |
 | History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
 | Instant bar | `[ui] keep_bar_loaded` | `true`: keeps the bar ready so it opens immediately; uses ~100 MB. Set `false` to save memory |
 

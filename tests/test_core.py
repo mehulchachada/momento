@@ -495,7 +495,7 @@ class CLITest(unittest.TestCase):
             req.assert_called_once_with({"cmd": "configure", "changes": {"controller": "on"}}, timeout=30)
             text = out.getvalue()
             self.assertIn("controller = left_paddle", text)
-            self.assertIn("Hold Left paddle (0.5 s) to open or close the bar", text)
+            self.assertIn("Hold Left paddle (0.3 s) to open or close the bar", text)
             self.assertNotIn("paused", text)             # a controller change never waits for resume
             out = io.StringIO()
             with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
@@ -1907,7 +1907,7 @@ class ControllerSettingTest(unittest.TestCase):
     def test_defaults(self):
         cfg = self.config.load(self.path)
         self.assertEqual(self.config.controller(cfg),
-                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 500, "exclusive": True})
+                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 300, "exclusive": True})
         self.assertEqual(self.config.load_controller(self.path), self.config.controller(cfg))
         cur = self.settings.current(cfg)
         self.assertEqual((cur["controller"], cur["controller_exclusive"]), ("view_menu", "on"))
@@ -1919,7 +1919,7 @@ class ControllerSettingTest(unittest.TestCase):
         self.path.write_text('[controller]\nopen_chord = ["select", "turbo"]\nhold_ms = -3\n')
         with self.assertLogs("momento.config", "WARNING"):
             ctl = self.config.load_controller(self.path)
-        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 500))
+        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 300))
         self.path.write_text("[controller\n")                       # broken TOML: defaults
         self.assertTrue(self.config.load_controller(self.path)["enabled"])
         self.assertTrue(self.config.load_controller(Path(self._tmp.name) / "missing.toml")["enabled"])
@@ -1997,7 +1997,7 @@ class DaemonControllerTest(unittest.TestCase):
         self.hubs.append(hub)
         return hub
 
-    def chord(self, hold=0.5):
+    def chord(self, hold=0.3):
         g, dev, hub = self.gamepad, self.devs[-1], self.d.pads
         for code in (g.BTN_SELECT, g.BTN_START):
             dev.push(g.EV_KEY, code, 1)
@@ -2012,11 +2012,11 @@ class DaemonControllerTest(unittest.TestCase):
         self.d._sync_controller()
         self.assertEqual(self.made[-1]["navigate"], False)
         self.assertEqual(self.devs[-1].mask, (self.gamepad.EV_KEY,))   # key events only
-        self.chord(hold=0.3)
+        self.chord(hold=0.2)
         self.assertEqual(self.opened, [])
         self.chord()
         self.assertEqual(len(self.opened), 1)
-        self.assertAlmostEqual(self.opened[0], 100.8)                # pressed at 100.3, held 0.5 s
+        self.assertAlmostEqual(self.opened[0], 100.5)                # pressed at 100.2, held 0.3 s
         self.assertEqual(self.devs[-1].grab_calls, 0)
         self.assertFalse(self.d.pads.grabbing)
 

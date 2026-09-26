@@ -1403,7 +1403,7 @@ class ControllerBar(unittest.TestCase):
         self.assertTrue(self.dev.grabbed)
         self.assertEqual(bar.pads.grab_state(), "exclusive")
         self.assertEqual(self.made[-1]["chord"], ("select", "start"))
-        self.assertEqual(self.made[-1]["hold_ms"], 500)
+        self.assertEqual(self.made[-1]["hold_ms"], 300)
         self.assertTrue(self.made[-1]["navigate"])
         first = self.dev
         bar.hide()

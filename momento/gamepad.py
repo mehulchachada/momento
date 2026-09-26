@@ -139,7 +139,7 @@ ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode",
            "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2"}
 
 DEFAULT_CHORD = ("select", "start")
-DEFAULT_HOLD_MS = 500
+DEFAULT_HOLD_MS = 300
 # (key, label, buttons): the choices the settings UI offers
 CHORD_PRESETS = (
     ("view_menu", "View + Menu", ("select", "start")),

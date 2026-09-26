@@ -79,7 +79,7 @@ def storage_line(st: dict) -> str:
 
 
 def controller_line(cfg: dict) -> str:
-    """"hold View + Menu (0.5 s) to open or close the bar" / "off"."""
+    """"hold View + Menu (0.3 s) to open or close the bar" / "off"."""
     from . import gamepad
 
     ctl = config.controller(cfg)
