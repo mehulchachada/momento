@@ -30,11 +30,12 @@ It works with Steam games, emulators, browser games and anything else on your sc
 ## Features
 
 - **Always recording.** Keeps up to the last 60 minutes, including sound.
-- **One shortcut.** Super + Shift + G brings up the clip bar on top of your game.
+- **One shortcut.** Super + Shift + G brings up a slim clip bar at the bottom of the screen, on top of your game.
 - **Eight clip lengths.** 15 s, 30 s, 1 min, 3 min, 5 min, 15 min, 30 min and 60 min.
 - **Fast saves.** Clips aren't re-encoded, so even a full hour is saved in a few seconds.
-- **Light on performance.** Your graphics card does the video encoding on AMD, Intel and NVIDIA, so your frame rate barely changes.
-- **Game audio included.** Microphone recording is optional.
+- **Light on performance.** Your graphics card's video engine does the encoding on AMD, Intel and NVIDIA. On our test handheld it used about 4.5% of one CPU core (see [Performance](#performance)).
+- **Game audio included.** Momento records whatever you're hearing and follows you when you switch between speakers, headphones and HDMI. Microphone recording is optional.
+- **Settings in the bar.** A gear button in the clip bar changes resolution, quality, sound and mic without touching a config file.
 - **Controller-friendly.** Bind it to a button through Steam Input, or trigger saves from the command line.
 - **Works on KDE Plasma, GNOME, Hyprland, Sway and X11**, and can record Steam Gaming Mode.
 - **Local only.** Nothing is uploaded, and you don't need an account.
@@ -65,73 +66,132 @@ At the default settings (1080p, High quality, 60 fps):
 
 Clips are ordinary MP4 files. They play in any video player and upload directly to Discord, YouTube and similar sites.
 
+## How it compares
+
+| | Momento | OBS Replay Buffer | Steam Game Recording |
+|---|---|---|---|
+| Records | Anything on screen | Anything in your OBS scene | Only games running through Steam |
+| Buffer kept in | Disk, up to 60 min | RAM (60 min at 1080p is about 6.8 GB) | Disk, 120 min by default |
+| Pick clip length when saving | Yes: 15 s to 60 min from the clip bar | No: saves the whole buffer | Yes: trim on a timeline, then export |
+| Global hotkey on Wayland | Yes | Only with a plugin | Yes (Steam shortcuts) |
+| Steam Gaming Mode | Records; the bar doesn't show there yet | Not designed for it | Built in, controller-first |
+| Codecs | H.264 | H.264, HEVC, AV1 | H.264 (HEVC reported in newer clients) |
+
+GPU Screen Recorder is also a strong Linux option. See [docs/COMPARISON.md](docs/COMPARISON.md) for the full comparison with sources, measured numbers and advice on which to use.
+
 ## Install
 
-Installing has two steps. First install the system packages Momento uses, then run its installer. The installer itself only writes to your home folder.
-
-**Step 2 is the same on every distro:**
+Paste this into a terminal:
 
 ```bash
-git clone https://github.com/mehulchachada/momento.git && cd momento && ./install.sh --enable
+curl -fsSL https://raw.githubusercontent.com/mehulchachada/momento/main/install.sh | bash
 ```
 
-`--enable` starts Momento now and at every login. Leave it off if you'd rather start it yourself.
-
-### Bazzite, Bluefin, Aurora (Fedora Atomic)
-
-Everything Momento needs ships with the system image, so no `rpm-ostree` layering is needed. Just run step 2.
-
-> On plain Fedora Silverblue or Kinoite, the Fedora packages below would have to be layered with `rpm-ostree install`. That works, but it slows down system updates. A Flatpak is planned.
-
-### Fedora Workstation / KDE
+Or clone the repo and run the installer from it (`make install` does the same):
 
 ```bash
-sudo dnf install python3-gobject python3-dbus python3-pyside6 pipewire-gstreamer gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugin-libav ffmpeg-free layer-shell-qt
+git clone https://github.com/mehulchachada/momento.git && cd momento && ./install.sh
 ```
 
-GPU video drivers:
+**What it does:** installs any missing system packages (it shows you the exact command and asks first), installs Momento for your user, and starts it. That's it: press **Super + Shift + G** in a game to save a clip.
 
-- **AMD:** Fedora's own Mesa can't encode H.264. Enable [RPM Fusion](https://rpmfusion.org/Configuration), then run `sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld`.
-- **Intel:** install `intel-media-driver` from RPM Fusion.
-- **NVIDIA:** install the RPM Fusion driver and `gstreamer1-plugins-bad-freeworld` for NVENC.
+Works on Fedora, Bazzite / Bluefin / Aurora, Arch / CachyOS / EndeavourOS / Manjaro, Ubuntu / Debian / Pop!_OS / Mint and openSUSE. You need Ubuntu 24.04+ or Debian 13+ on the Debian side.
 
-### Arch Linux, CachyOS, EndeavourOS, Manjaro
+Useful options (with the one-liner, put them after `bash -s --`, e.g. `... | bash -s -- --yes`):
+
+| Option | What it does |
+|---|---|
+| `--yes` | don't ask, install missing packages right away |
+| `--no-deps` | skip the system packages, you handle them |
+| `--no-enable` | install, but don't start Momento or add it to login |
+| `--check` | only show what's installed and what's missing |
+| `--update` | download the latest version and reinstall |
+
+**Bazzite, Bluefin and Aurora** already ship everything Momento needs in the system image, so nothing gets layered and no `sudo` is needed. On plain **Fedora Silverblue / Kinoite** the installer never layers packages on its own: it prints the `rpm-ostree install` command and explains the trade-off (layering slows down every system update). On **SteamOS** it points you to an Arch distrobox for now, and on **NixOS** it lists what to add to your config. A Flatpak is planned for all three.
+
+**Uninstall** (keeps your clips):
 
 ```bash
-sudo pacman -S --needed python-gobject python-dbus pyside6 gst-plugin-pipewire gst-plugins-good gst-plugins-bad gst-plugin-va gst-libav ffmpeg layer-shell-qt
+curl -fsSL https://raw.githubusercontent.com/mehulchachada/momento/main/install.sh | bash -s -- --uninstall
 ```
 
-GPU video drivers: `libva-mesa-driver` for AMD, `intel-media-driver` for Intel. On NVIDIA, the NVENC encoder comes with `gst-plugins-bad`.
+### Installing the packages yourself
 
-### Ubuntu, Debian, Pop!_OS, Linux Mint
+Prefer to do it by hand? These are the exact packages the installer uses, tested on each distro. Afterwards run the installer with `--no-deps`.
+
+<details>
+<summary><b>Fedora Workstation / KDE</b></summary>
 
 ```bash
-sudo apt install python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 python3-dbus python3-pyside6.qtwidgets gstreamer1.0-pipewire gstreamer1.0-plugins-good gstreamer1.0-pulseaudio gstreamer1.0-plugins-bad gstreamer1.0-libav ffmpeg
+sudo dnf install python3-gobject gstreamer1 gstreamer1-plugins-base python3-dbus python3-pyside6 pipewire-gstreamer gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugin-libav ffmpeg-free gstreamer1-plugin-openh264 layer-shell-qt pulseaudio-utils
 ```
 
-You need Ubuntu 24.04+ or Debian 13+ for Python 3.11+ and PySide6.
+GPU encoding (without it Momento falls back to the CPU):
 
-- **GPU video drivers:** `mesa-va-drivers` for AMD, `intel-media-va-driver-non-free` for Intel.
-- **KDE Plasma:** also install `layer-shell-qt` so the clip bar can appear over fullscreen games.
+- **AMD:** Fedora's own Mesa can't encode H.264. Enable [RPM Fusion](https://rpmfusion.org/Configuration), then `sudo dnf install mesa-va-drivers-freeworld` (the installer adds it for you once RPM Fusion is enabled).
+- **Intel:** `sudo dnf install libva-intel-media-driver`
+- **NVIDIA:** the proprietary driver from RPM Fusion. The NVENC plugin is already in `gstreamer1-plugins-bad-free`.
+</details>
 
-### openSUSE Tumbleweed
+<details>
+<summary><b>Bazzite, Bluefin, Aurora, Silverblue, Kinoite (Fedora Atomic)</b></summary>
+
+Bazzite, Bluefin and Aurora: nothing to install, just run the installer.
+
+Silverblue / Kinoite: the Fedora packages above have to be layered (`rpm-ostree install ...`, then reboot). It works, but it slows down every system update. The alternative is to run Momento inside a Fedora [distrobox](https://distrobox.it/).
+</details>
+
+<details>
+<summary><b>Arch Linux, CachyOS, EndeavourOS, Manjaro</b></summary>
 
 ```bash
-sudo zypper install python3-gobject typelib-1_0-Gst-1_0 python3-dbus-python python3-pyside6 gstreamer-plugin-pipewire gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-libav ffmpeg layer-shell-qt6
+sudo pacman -S --needed python-gobject gstreamer gst-plugins-base-libs python-dbus pyside6 gst-plugin-pipewire gst-plugins-good gst-plugins-bad gst-plugin-va gst-libav gst-plugins-ugly ffmpeg layer-shell-qt libpulse
 ```
 
-openSUSE's default repositories leave out H.264 encoding and AAC audio. Add [Packman](https://en.opensuse.org/Additional_package_repositories#Packman) and switch to its codec packages with `sudo zypper dup --from packman --allow-vendor-change`.
+GPU encoding: AMD works out of the box (the VA-API driver is part of `mesa`). Intel: `intel-media-driver`. NVIDIA: the NVENC plugin comes with `gst-plugins-bad`, you only need the proprietary driver.
+</details>
 
-### SteamOS (Steam Deck)
+<details>
+<summary><b>Ubuntu, Debian, Pop!_OS, Linux Mint</b></summary>
 
-SteamOS undoes system changes on every update. Until the Flatpak is ready, the most reliable route is an Arch [distrobox](https://distrobox.it/) with the Arch packages above.
+Debian 13+ / Ubuntu 24.10+:
+
+```bash
+sudo apt install python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools python3-dbus python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets gstreamer1.0-pipewire gstreamer1.0-plugins-good gstreamer1.0-pulseaudio gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-plugins-ugly ffmpeg layer-shell-qt pulseaudio-utils
+```
+
+**Ubuntu 24.04, Pop!_OS 24.04 and Mint 22** don't package PySide6. Install the same list without the three `python3-pyside6.*` packages and without `layer-shell-qt` (24.04 only has the Qt 5 version), plus `python3-venv`. The installer then downloads PySide6 from PyPI into Momento's own folder (`~/.local/share/momento/venv`), so your system Python stays untouched.
+
+GPU encoding: `mesa-va-drivers` for AMD, `intel-media-va-driver` for Intel. NVIDIA's NVENC plugin is in `gstreamer1.0-plugins-bad`, you only need the proprietary driver.
+</details>
+
+<details>
+<summary><b>openSUSE Tumbleweed</b></summary>
+
+```bash
+sudo zypper install python3-gobject typelib-1_0-Gst-1_0 typelib-1_0-GstVideo-1_0 gstreamer-utils python3-dbus-python python3-pyside6 gstreamer-plugin-pipewire gstreamer-plugins-good gstreamer-plugins-bad gstreamer-plugins-libav ffmpeg layer-shell-qt6 pulseaudio-utils
+```
+
+GPU encoding: `Mesa-libva` for AMD, `intel-media-driver` for Intel. openSUSE's default repositories leave out H.264 GPU encoding, so for that add [Packman](https://en.opensuse.org/Additional_package_repositories#Packman) and run `sudo zypper dup --from packman --allow-vendor-change`. Without it Momento records with the CPU encoder.
+</details>
+
+<details>
+<summary><b>SteamOS (Steam Deck)</b></summary>
+
+SteamOS wipes system changes on every update, so don't install packages on the host. Until the Flatpak is ready, the route is an Arch [distrobox](https://distrobox.it/) (experimental). Run the installer inside it; the `momento` launcher it creates hops into the box by itself when started from the desktop:
+
+```bash
+distrobox create -i archlinux:latest momento && distrobox enter momento
+curl -fsSL https://raw.githubusercontent.com/mehulchachada/momento/main/install.sh | bash
+```
+</details>
 
 ### Checking the install
 
 The installer ends with a checklist. For anything missing, it names the package to install on your distro. Run the check again at any time with:
 
 ```bash
-./install.sh --check
+./install.sh --check      # or: ~/.local/share/momento/install.sh --check
 ```
 
 ## First launch
@@ -160,6 +220,11 @@ momento status
 | Click or tap a length | Saves that much, ending right now |
 | **Left/Right** + **Enter**, or **1** to **8** | Picks a length with the keyboard |
 | **Esc**, or Super + Shift + G again | Closes the bar without saving |
+| **P**, or the pause button | Pauses recording. What's already buffered can still be saved. Press again to resume; your replay history is kept |
+| The stop button | Shuts Momento down after you confirm it in the bar. When Momento is off, the bar shows **Start** instead |
+| **S**, or the gear button | Opens settings right in the bar (see [Settings](#settings)) |
+
+The pause, stop and gear buttons sit at the right end of the bar. Press **Right** past 60m to reach them.
 
 **From a terminal or a script:**
 
@@ -168,8 +233,10 @@ momento save 30s        # save the last 30 seconds without opening the bar
 momento save 5m         # also 15s, 1m, 3m, 15m, 30m, 60m, or e.g. 90s, 2m
 momento overlay         # open the clip bar
 momento status          # recording state and how much is buffered
-momento settings        # current resolution and quality
-momento quit            # stop recording
+momento settings        # current video and audio settings, plus your audio devices
+momento pause           # pause recording (the buffer is kept and can be saved)
+momento resume          # resume recording (history is kept)
+momento quit            # stop recording (or: momento stop)
 ```
 
 The Momento entry in your app menu opens the clip bar. Right-click it to start the recorder or save a quick 30-second or 5-minute clip.
@@ -202,31 +269,117 @@ You can choose a different folder in the settings.
 
 ## Video quality
 
-Momento always records at 60 fps. You choose the **resolution** and the **quality**. Together they decide how sharp clips look and how much disk space the 60-minute history takes:
+You choose the **resolution**, the **quality** and the **frame rate** (60 or 120 fps). Together they decide how sharp clips look and how much disk space the 60-minute history takes. Change them with the gear button in the clip bar, or from a terminal.
+
+**Free space Momento needs to start**, with the size of a full hour of history in brackets:
 
 | Resolution | Standard | High (default) | Ultra |
 |---|---|---|---|
-| 720p | 2.7 GB | 4.5 GB | 6.8 GB |
-| **1080p** (default) | 4.5 GB | **6.8 GB** | 11 GB |
-| 1440p | 7.2 GB | 11 GB | 18 GB |
-| 2160p (4K) | 13.5 GB | 20 GB | 32 GB |
-| Native (your screen's size) | 7.2 GB | 11 GB | 18 GB |
+| 720p, 60 fps | 4 GB (2.9) | 6 GB (4.8) | 8 GB (7.2) |
+| **1080p, 60 fps** (default) | 6 GB (4.8) | **8 GB (7.2)** | 13 GB (11.9) |
+| 1080p, 120 fps | 8 GB (7.2) | 12 GB (10.5) | 19 GB (18) |
+| 1440p, 60 fps | 9 GB (7.6) | 12 GB (11.4) | 20 GB (19) |
+| 1440p, 120 fps | 12 GB (11.4) | 18 GB (17.1) | 29 GB (28.4) |
+| 2160p (4K), 60 fps | 15 GB (14.3) | 22 GB (21.3) | 34 GB (33.2) |
+| 2160p (4K), 120 fps | 22 GB (21.3) | 33 GB (32.2) | 51 GB (49.7) |
+| Native | same as 1440p | | |
 
-These are the approximate totals for a full hour of history. The buffer never grows past them, because old footage is deleted as new footage comes in.
+The history never grows past its size, because the oldest footage is deleted as new footage comes in. The extra ~1 GB on top is kept free on purpose so Momento never fills your disk.
 
-**Recommendations:** on a handheld or a 1080p monitor, use 1080p High (the default). On a 1440p or 4K monitor, use 1440p High.
+**Recommendations:**
+- **Handheld or 1080p monitor:** 1080p High, 60 fps (the default).
+- **120 Hz screen and fast games:** 1080p High, 120 fps.
+- **1440p or 4K monitor:** 1440p High.
 
-Change them from a terminal. Momento restarts recording by itself to apply the change:
+120 fps only helps if your screen runs at 120 Hz or more.
 
 ```bash
 momento set resolution 1440p     # 720p, 1080p, 1440p, 2160p, native
 momento set quality ultra        # standard, high, ultra
-momento settings                 # show the current values
+momento set fps 120              # 60, 120
+momento settings                 # show the current values and the space they need
 ```
 
 If your screen's shape doesn't match the resolution you picked (for example a 16:10 handheld recording at 1080p), the video gets black bars. It is never stretched.
 
+## Performance
+
+These numbers come from **one test machine** and a light desktop workload, not from a range of hardware or games. Your results will differ with other GPUs, drivers, screens and workloads.
+
+<details>
+<summary><b>Test machine and conditions</b></summary>
+
+| | |
+|---|---|
+| Device | ASUS ROG Ally (RC71L) |
+| CPU | AMD Ryzen Z1 Extreme, 8 cores / 16 threads |
+| GPU | AMD Radeon 780M (integrated), H.264 via VA-API |
+| Memory | 16 GB shared: 6 GB reserved as VRAM, 9.4 GB visible to Linux |
+| Storage | external SanDisk Extreme USB SSD, 1 TB |
+| OS | Bazzite 44 (Fedora 44 base), kernel 7.2, Mesa 26.2, GStreamer 1.28 |
+| Desktop | KDE Plasma 6.7 on Wayland |
+| Displays | built-in 1920x1080 at 120 Hz + external 1920x1080 at 120 Hz |
+| Power | on AC power, `performance` power profile |
+| Momento settings | 1080p, High, 60 fps (15 Mbps), desktop audio on, mic off |
+| Workload | desktop with light use (browser, terminal); no game running |
+| Method | Momento's own CPU from its systemd cgroup; package power from the amdgpu sensor; 100-180 s windows split into 10 s buckets, repeated; frame rate impact from an offscreen GPU-bound OpenGL test, 3-6 runs each; captured motion from a 60 fps test animation |
+| Date | September 2026, Momento 0.1.0 |
+
+Not measured yet: battery drain, real games, other GPUs (Intel, NVIDIA, desktop AMD), X11, GNOME.
+</details>
+
+Results on that machine, comparing Momento running against Momento stopped:
+
+| | Cost |
+|---|---|
+| CPU | about **4.5% of one core** (0.3% of the whole processor) |
+| Graphics | about **+3%** busy; the video encoding runs on the GPU's separate video engine |
+| Frame rate in a GPU-heavy test | **about 2-3% lower**, which is within normal run-to-run variation |
+| Power | about **+1.5 W** for the whole chip |
+| Memory | about **150 MB** |
+| Disk writes | about **7 GB per hour** (1.9 MB/s) |
+| Saving a 1-minute clip | about **3 seconds**, with no lasting cost |
+| Captured motion | **54-58 unique frames per second** on a 60 fps animation |
+
+Higher resolutions, Ultra quality and 120 fps write more data per hour (see the table above) but still run on the video engine, so the CPU cost should stay small; they were not measured separately. Nothing is re-encoded when you save, which is why saves are fast and don't cause stutter. Battery life impact has not been measured yet.
+
+For a comparison with OBS and Steam's own recorder, see [How it compares](#how-it-compares).
+
+## Storage and warnings
+
+Momento checks your free disk space so it never fills your drive:
+
+| When | What Momento does | What you see |
+|---|---|---|
+| **Starting or resuming**, and there isn't enough space for your settings (see the table above) | Doesn't start. It checks again every 30 seconds and starts by itself once there is room. | The bar shows a red dot and **Low storage**, with a line above it: *Not enough free space: needs 8 GB, 3.1 GB free.* One desktop notification. |
+| **While recording**, free space drops below 512 MB | Stops recording. Footage it already has can still be saved. | The same Low storage warning. |
+| **Changing settings** to something that won't fit | Refuses the change and keeps your current settings. | In the gear menu, options that won't fit get a small red mark, the footer shows e.g. *Needs 19 GB · 9 GB free*, and **Apply** is disabled. |
+| **Saving a clip**, and the clip folder's drive is too full | Doesn't save. | *Not enough space to save this clip: needs X, Y free.* |
+
+Space that Momento's own history already uses counts as available, because it gets reused.
+
+To fix a warning, free up space on the drive, pick a lower resolution, quality or frame rate, or move the history to a bigger drive with `[buffer] dir` in the settings file.
+
+**Your history is kept** when you pause and resume, change a setting, restart Momento or reboot. Only **Stop** in the clip bar clears it, and the bar asks before doing that. Clip lengths count recorded footage: "5m" is the last 5 minutes Momento actually recorded, even if you paused in between. If you changed resolution partway through, a clip only includes the part recorded at the current resolution, and Momento tells you it's shorter than asked.
+
 ## Settings
+
+**In the clip bar:** press **S** or select the gear. The bar grows upward into a few rows:
+
+- **Resolution:** 720p, 1080p, 1440p, 4K or Native
+- **Quality:** Standard, High or Ultra
+- **Sound:** your default output (it follows you when you switch between speakers, headphones and HDMI), one specific output, or Off
+- **Mic:** Off or On. With On you can also pick which mic to use
+
+**Up/Down** moves between rows and **Left/Right** changes the value. You can also tap an option. The bottom line shows how much disk space the 60-minute history will take. **Enter** applies the change and restarts recording; your replay history is kept. **Esc** goes back without changing anything. If Momento is off, the change is saved and used the next time it starts.
+
+**From a terminal:**
+
+```bash
+momento set audio_source off                  # default, off, or a name from `momento settings`
+momento set mic on                            # on, off
+momento set mic_device default                # default, or a name from `momento settings`
+```
 
 All settings are stored in `~/.config/momento/config.toml`, a plain text file with a comment next to each option. If you edit the file by hand, restart Momento afterwards:
 
@@ -267,7 +420,7 @@ Then pick your whole monitor in the dialog. If you have more than one monitor, p
 <details>
 <summary><b>My clip has no sound</b></summary>
 
-Momento records whatever your default output device is playing. If you switched headsets or speakers after it started, restart it with `systemctl --user restart momento.service`. Also check that `[audio] desktop = true` in the settings, and that `./install.sh --check` finds an AAC encoder.
+Momento records whatever your **default** output is playing (speakers, headphones, Bluetooth or HDMI), and follows along when you switch. If you hear sound but the clip is silent, the game is probably playing to a device that isn't the default: pick that device as the default in your sound settings, or choose it under **Sound** in the clip bar's gear menu. Also check that sound isn't set to *Off* there, and that `./install.sh --check` finds an AAC encoder.
 </details>
 
 <details>
@@ -293,15 +446,15 @@ Tick **Remember** or **Allow restoring** in the dialog. If your desktop doesn't 
 <details>
 <summary><b>How much disk space does it use? Will it wear out my SSD?</b></summary>
 
-At the default settings (1080p High), the buffer takes about 6.8 GB and never grows past that. While it runs, Momento writes about 6.7 GB per hour. A typical 1 TB SSD is rated for several hundred terabytes of writes, so even a few hours of gaming a day uses a small part of its rated life.
+At the default settings (1080p High, 60 fps), the history takes about 7.2 GB and never grows past that, and Momento needs about 8 GB free to start (see [Storage and warnings](#storage-and-warnings)). While it runs, it writes about 7 GB per hour. A typical 1 TB SSD is rated for several hundred terabytes of writes, so even a few hours of gaming a day uses a small part of its rated life.
 
-To write less, use a lower resolution or Standard quality, or lower `max_seconds`. You can also move the buffer to another drive with `[buffer] dir`.
+To write less, use a lower resolution, Standard quality or 60 fps, or lower `max_seconds`. You can also move the buffer to another drive with `[buffer] dir`.
 </details>
 
 <details>
 <summary><b>Does it slow my games down?</b></summary>
 
-With hardware encoding (AMD, Intel or NVIDIA), the cost is usually a few percent at most. If the installer reports that only a *software* encoder was found, you will notice it, especially on a handheld. Install your GPU's video driver from the install section above.
+On our test machine (a ROG Ally), Momento used about 4.5% of one CPU core and cost about 2-3% frame rate in a GPU-heavy test. It hasn't been measured in real games or on other hardware yet. See [Performance](#performance) for the full numbers and test conditions. If the installer reports that only a *software* encoder was found, you will notice it, especially on a handheld. Install your GPU's video driver from the install section above.
 </details>
 
 <details>
@@ -313,7 +466,9 @@ Clips are cut without re-encoding, which is what makes saving fast. The trade-of
 <details>
 <summary><b>Super + Shift + G does nothing</b></summary>
 
-Your desktop may not support shortcuts registered by apps. That needs a recent xdg-desktop-portal: KDE Plasma 6, GNOME 48+ or Hyprland. You can add the shortcut yourself instead: in your desktop's keyboard settings, create a custom shortcut that runs `momento overlay`.
+First check that Momento is running: `momento status` should say *recording*. Remember it's Super **+ Shift** + G: plain Super + G is KDE's Grid View.
+
+On KDE, look for **Momento** under *System Settings → Keyboard → Shortcuts*; you can change the key there too. Shortcuts registered by apps need a recent desktop (KDE Plasma 6, GNOME 48+ or Hyprland). If yours doesn't support them, add a custom shortcut in your keyboard settings that runs `momento overlay`.
 </details>
 
 <details>
@@ -333,12 +488,12 @@ journalctl --user -u momento.service -f
 
 ## Uninstall
 
-From the folder you cloned:
-
 ```bash
-./install.sh --uninstall     # removes Momento, keeps settings and clips
-./install.sh --purge         # also deletes settings and the replay buffer
+~/.local/share/momento/install.sh --uninstall   # removes Momento, keeps settings and clips
+~/.local/share/momento/install.sh --purge       # also deletes settings and the replay history
 ```
+
+The installer keeps a copy of itself there, so this works whether you used the one-liner or a clone (from a clone, `./install.sh --uninstall` works too). System packages Momento installed for you (GStreamer plugins and so on) are left in place, since other apps may use them.
 
 Your saved clips are never deleted.
 
