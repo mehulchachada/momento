@@ -151,19 +151,24 @@ enabled = true
 
 # Press these buttons together to open or close the bar. Buttons are named by
 # position, so they work on any brand:
+#   mode = PS / Xbox / Home (Guide)    dpad_up / dpad_down / dpad_left / dpad_right
 #   select = View / Share / Minus      start = Menu / Options / Plus
-#   mode = Guide / PS / Home           thumbl / thumbr = left / right stick click
+#   thumbl / thumbr = left / right stick click
 #   tl / tr = bumpers                  south / east / north / west = face buttons
 #   left_paddle / right_paddle = back buttons (Elite pads, ROG Ally, Legion Go...)
+# The default, PS / Xbox / Home + D-pad Down, keeps the D-pad press from your
+# game: Momento holds the controller while the PS / Xbox / Home button is down
+# (with exclusive = true below).
 # Examples: ["select", "start"], ["left_paddle"], ["thumbl", "thumbr"]
-open_chord = ["select", "start"]
+open_chord = ["mode", "dpad_down"]
 
 # How long to hold them, in milliseconds (0-5000). 0 (the default) opens the bar
 # the instant they are all down: a tap ("Open with: Tap" in the bar's settings).
-# If an emulator you play uses Select + Start, set 300 ("Open with: Hold") so a
-# quick press there doesn't open the bar too.
+# If you use Select + Start and an emulator you play uses it too, set 300
+# ("Open with: Hold") so a quick press there doesn't open the bar too.
 hold_ms = 0
 
 # While the bar is open, take the controller over so the game doesn't see the
-# presses. If another program already holds it, Momento shares it instead.
+# presses (and, for a D-pad shortcut, while its other button is held). If another
+# program already holds it, Momento shares it instead.
 exclusive = true

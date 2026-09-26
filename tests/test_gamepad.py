@@ -54,6 +54,7 @@ class Base(unittest.TestCase):
 
     def hub(self, **kw):
         kw.setdefault("clock", self.clock)
+        kw.setdefault("chord", ("select", "start"))       # the old default; DpadChord tests the new one
         kw.setdefault("watchdog_thread", False)
         kw.setdefault("hotplug", "off")
         h = Gamepads(on_action=lambda a, r: self.actions.append((a, r)),
@@ -487,7 +488,7 @@ class Chord(Base):
             self.assertEqual(g.chord_label(buttons), label)
             g.normalize_chord(buttons)
         self.assertEqual(g.chord_label(["mode", "south"]), "Mode + South")
-        self.assertEqual(g.DEFAULT_CHORD, ("select", "start"))
+        self.assertEqual(g.DEFAULT_CHORD, ("mode", "dpad_down"))
         self.assertEqual(g.DEFAULT_HOLD_MS, 0)                 # a tap, like [controller] hold_ms
         from momento import config
         self.assertEqual(g.DEFAULT_HOLD_MS, config.DEFAULTS["controller"]["hold_ms"])
@@ -541,14 +542,15 @@ class Grab(Base):
         d.held.add(BTN_SOUTH)
         hub.add_device(d)
         hub.grab()
-        self.assertAlmostEqual(hub.next_timeout(), 1.0)
+        self.assertAlmostEqual(hub.next_timeout(), g.GRAB_POLL_S)     # re-reads the pad meanwhile
+        self.at(hub, 100.5)
         self.at(hub, 100.9)
         self.assertFalse(d.grabbed)
         self.at(hub, 101.0)
         self.assertTrue(d.grabbed)
 
     def test_grab_failure_falls_back_to_shared_and_logs_once(self):
-        hub = self.hub()
+        hub = self.hub(grab_busy_s=0)                        # (EBUSY retries: DpadChord)
         busy = self.dev(name="Held by Steam", path="/fake/busy", grab_error=errno.EBUSY)
         ok = self.dev(path="/fake/ok")
         hub.add_device(busy)
@@ -645,6 +647,327 @@ class Grab(Base):
         hub.process(d.fileno())
         self.assertEqual(hub.devices(), [])
         hub.ungrab()                                         # nothing left to fail on
+
+MODE, DPAD = g.BTN_MODE, (g.BTN_DPAD_UP, g.BTN_DPAD_DOWN, g.BTN_DPAD_LEFT, g.BTN_DPAD_RIGHT)
+KEY_MASK, HAT_MASK = (EV_KEY,), (EV_KEY, EV_ABS)
+
+
+class DpadChord(Base):
+    """The default shortcut, PS/Xbox/Home + D-pad Down: hat or BTN_DPAD_*, the mask
+    that widens to the hat while mode is held, and the grab that hides the D-pad."""
+
+    def daemon(self, **kw):
+        kw.setdefault("chord", g.DEFAULT_CHORD)
+        kw.setdefault("navigate", False)
+        kw.setdefault("chord_grab", True)
+        return self.hub(**kw)
+
+    def pad(self, hub, **kw):
+        d = self.dev(**kw)
+        d.mask_honoured = True                        # filtered events never arrive, as in the kernel
+        hub.add_device(d)
+        return d
+
+    def test_default_and_presets(self):
+        from momento import config
+
+        self.assertEqual(g.DEFAULT_CHORD, ("mode", "dpad_down"))
+        self.assertEqual(tuple(config.DEFAULTS["controller"]["open_chord"]), g.DEFAULT_CHORD)
+        self.assertEqual(g.CHORD_PRESETS[0], ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")))
+        self.assertEqual([k for k, _l, _b in g.CHORD_PRESETS],
+                         ["ps_down", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
+        self.assertEqual(g.chord_label(g.DEFAULT_CHORD), "PS / Xbox + Down")
+        for text in ("ps+down", "Xbox + Down", "guide+dpad_down", "home, dpad-down"):
+            self.assertEqual(g.normalize_chord(text), ("mode", "dpad_down"), text)
+        self.assertEqual(g.normalize_chord("mode+up"), ("mode", "dpad_up"))
+        hub = Gamepads(hotplug="off", watchdog_thread=False)
+        self.addCleanup(hub.close)
+        self.assertEqual((hub.chord, hub.chord_mod, hub.chord_dpad), (("mode", "dpad_down"), ("mode",), True))
+        self.assertFalse(hub.chord_grab)                 # only the daemon asks for it
+
+    def test_hat_mode_first(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        self.assertEqual(d.mask, KEY_MASK)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)          # D-pad alone: masked, never wakes us
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)                        # the game sees nothing from here
+        self.assertEqual(d.mask, HAT_MASK)
+        self.assertEqual(d.mask_codes, {EV_ABS: (ABS_HAT0X, ABS_HAT0Y)})   # the hat, not the sticks
+        self.assertEqual(d._queue, [])
+        d.push(EV_ABS, ABS_X, 30000)                      # stick: still filtered
+        self.assertEqual(d._queue, [])
+        self.clock.t = 100.1
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.1])
+        self.assertEqual(self.actions, [])
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.assertTrue(d.grabbed)                        # held until mode is let go
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertFalse(d.grabbed)
+        self.assertEqual(d.mask, KEY_MASK)
+        self.assertIsNone(hub.next_timeout())             # no timer left behind
+        self.push(hub, d, EV_KEY, MODE, 1)                # again: fires again
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(len(self.chords), 2)
+
+    def test_other_directions_and_buttons_do_not_fire(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, -1)          # up
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 1)           # right
+        self.push(hub, d, EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.push(hub, d, EV_KEY, BTN_SELECT, 1)          # View + Menu isn't the shortcut now
+        self.push(hub, d, EV_KEY, BTN_START, 1)
+        self.assertEqual(self.chords, [])
+
+    def test_hat_down_first_still_counts(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        d.push(EV_ABS, ABS_HAT0Y, 1)                      # masked: only the device state changes
+        self.assertEqual(d._queue, [])
+        self.push(hub, d, EV_KEY, MODE, 1)                # the hat is read when the mask widens
+        self.assertEqual(self.chords, [100.0])
+
+    def test_btn_dpad_pad(self):
+        """Pads that send BTN_DPAD_* (no hat): key events suffice, the mask never widens."""
+        hub = self.daemon()
+        d = self.pad(hub, keys=FakeDevice.XBOX_KEYS + DPAD, axes={ABS_X: _AbsInfo(0), ABS_Y: _AbsInfo(0)})
+        self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 1)
+        self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 0)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)
+        self.assertEqual(d.mask, KEY_MASK)
+        self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 1)
+        self.assertEqual(self.chords, [100.0])
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertFalse(d.grabbed)
+
+    def test_xpad_dpad_as_buttons(self):
+        hub = self.daemon()
+        d = self.pad(hub, axes={ABS_X: _AbsInfo(0), ABS_Y: _AbsInfo(0)})    # HAPPY1-4 = D-pad
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.push(hub, d, EV_KEY, BTN_TRIGGER_HAPPY1 + 3, 1)                # down
+        self.assertEqual(self.chords, [100.0])
+
+    def test_dpad_down_pressed_first_on_btn_dpad_pad(self):
+        hub = self.daemon()
+        d = self.pad(hub, keys=FakeDevice.XBOX_KEYS + DPAD, axes={})
+        self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 1)
+        self.push(hub, d, EV_KEY, MODE, 1)                 # order doesn't matter
+        self.assertEqual(self.chords, [100.0])
+
+    def test_grab_watchdog(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertAlmostEqual(hub.next_timeout(), g.CHORD_GRAB_S)
+        self.at(hub, 101.9)
+        self.assertTrue(d.grabbed)
+        with self.assertLogs("momento.gamepad", logging.WARNING):
+            self.at(hub, 102.0)
+        self.assertFalse(d.grabbed)
+        self.assertEqual(d.mask, HAT_MASK)                 # still held: the hat still counts
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [102.0])
+        self.assertEqual(d.grab_calls, 1)                  # not taken again for the same press
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertEqual(d.mask, KEY_MASK)
+
+    def test_missed_release_is_noticed(self):
+        """Mode let go while someone else held the pad: the 2 s re-read narrows the mask."""
+        hub = self.daemon(chord_grab=False)
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertEqual(d.mask, HAT_MASK)
+        d.grabbed_by_other = True                          # the bar took it
+        d.push(EV_KEY, MODE, 0)                            # unseen
+        self.at(hub, 102.0)
+        self.assertEqual(d.mask, KEY_MASK)
+        d.grabbed_by_other = False
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)            # masked again: a plain D-pad does nothing
+        self.assertEqual(self.chords, [])
+        self.assertIsNone(hub.next_timeout())
+
+    def test_grab_fails_falls_back_to_shared(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="Held by Steam", path="/fake/steam", grab_error=errno.EBUSY)
+        g._warned.discard(("modgrab", "/fake/steam", "Held by Steam"))
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_KEY, MODE, 1)
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertTrue(any("can't hold" in m for m in cm.output))
+        self.assertEqual(self.chords, [100.0])            # the shortcut still works
+        self.assertFalse(d.grabbed)
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertEqual(d.ungrab_calls, 0)
+
+    def test_no_grab_unless_asked_or_without_dpad(self):
+        hub = self.daemon(chord_grab=False)
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertEqual(d.mask, HAT_MASK)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.0])
+        self.assertEqual(d.grab_calls, 0)
+        hub2 = self.daemon(chord=("select", "start"))       # no D-pad: shared, key-only, as before
+        d2 = self.pad(hub2, path="/fake/2")
+        self.push(hub2, d2, EV_KEY, BTN_SELECT, 1)
+        self.push(hub2, d2, EV_KEY, BTN_START, 1)
+        self.assertEqual(len(self.chords), 2)
+        self.assertEqual((d2.grab_calls, d2.mask), (0, KEY_MASK))
+        self.assertIsNone(hub2.next_timeout())
+
+    def test_chord_change_and_errors_release(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)
+        hub.set_chord(("select", "start"), 0)
+        self.assertFalse(d.grabbed)
+        self.assertEqual(d.mask, KEY_MASK)
+        hub.set_chord(g.DEFAULT_CHORD, 0)
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)
+        hub.set_chord_grab(False)
+        self.assertFalse(d.grabbed)
+        hub.set_chord_grab(True)
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)
+        hub.close()
+        self.assertFalse(d.grabbed)
+
+    def test_callback_error_releases(self):
+        def boom():
+            raise RuntimeError("open_bar broke")
+
+        hub = Gamepads(on_chord=boom, chord=g.DEFAULT_CHORD, navigate=False, chord_grab=True,
+                       clock=self.clock, watchdog_thread=False, hotplug="off")
+        self.addCleanup(hub.close)
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertTrue(d.grabbed)
+        with self.assertLogs("momento.gamepad", logging.ERROR):
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertFalse(d.grabbed)
+
+    def test_unplug_releases(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        self.push(hub, d, EV_KEY, MODE, 1)
+        d.unplug()
+        hub.process(d.fileno())
+        self.assertEqual(hub.devices(), [])
+        self.assertFalse(d.grabbed)
+
+    def test_watchdog_thread_releases_when_loop_is_stuck(self):
+        hub = Gamepads(chord=g.DEFAULT_CHORD, navigate=False, chord_grab=True, chord_grab_s=0.1,
+                       hotplug="off")                        # real clock, real thread, no tick()
+        self.addCleanup(hub.close)
+        d = self.dev()
+        hub.add_device(d)
+        with self.assertLogs("momento.gamepad", logging.WARNING):
+            d.push(EV_KEY, MODE, 1)
+            hub.process(d.fileno())
+            self.assertTrue(d.grabbed)
+            deadline = time.monotonic() + 5
+            while d.grabbed and time.monotonic() < deadline:
+                time.sleep(0.05)
+        self.assertFalse(d.grabbed)
+
+    def test_bar_dpad_does_nothing_while_mode_held(self):
+        """In the open bar, mode + Down closes it; the Down doesn't also move the focus."""
+        hub = self.hub(chord=g.DEFAULT_CHORD)
+        d = self.dev()
+        hub.add_device(d)
+        self.assertEqual(d.mask, "all")
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.0])
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 1)             # any direction, while mode is down
+        self.push(hub, d, EV_KEY, MODE, 0)                  # still held after mode: stays quiet
+        self.at(hub, 101.0)
+        self.assertEqual(self.actions, [])
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 0)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.actions, [("down", False)])
+        self.assertEqual(d.grab_calls, 0)                   # the bar hub never grabs for the chord
+
+    def test_bar_opened_by_the_chord_needs_release(self):
+        hub = self.hub(chord=g.DEFAULT_CHORD)
+        d = self.dev()
+        d.held.add(MODE)
+        d.axes[ABS_HAT0Y].value = 1
+        hub.add_device(d)
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 1)
+        self.assertEqual((self.chords, self.actions), ([], []))
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 0)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.0])
+
+    def test_hand_off_to_the_bar(self):
+        """The daemon holds the pad (EBUSY) while mode is down: the bar keeps trying,
+        takes it within 50 ms of the release, and doesn't keep a stale "mode held"."""
+        hub = self.hub(chord=g.DEFAULT_CHORD)
+        d = self.dev(grab_error=errno.EBUSY)
+        d.grabbed_by_other = True                           # the daemon's hold
+        d.held.add(MODE)
+        d.axes[ABS_HAT0Y].value = 1
+        hub.add_device(d)
+        hub.grab()
+        self.assertFalse(d.grabbed)
+        self.assertAlmostEqual(hub.next_timeout(), g.GRAB_POLL_S)
+        d.push(EV_ABS, ABS_HAT0Y, 0)                        # released, unseen
+        self.at(hub, 100.05)
+        self.assertEqual(hub.pads[d.path].hat, [0, 0])      # re-read from the kernel
+        self.assertEqual(d.grab_calls, 0)                   # mode still down: wait
+        for t in (100.1, 100.5, 101.0, 101.5):              # mode held longer than grab_wait_s
+            self.at(hub, t)
+        self.assertGreaterEqual(d.grab_calls, 2)            # tried: EBUSY, and again
+        self.assertEqual(hub.grab_state(), "shared")
+        self.assertFalse(hub.pads[d.path].grab_failed)      # still trying
+        d.push(EV_KEY, MODE, 0)                             # unseen
+        d.grab_error, d.grabbed_by_other = None, False      # the daemon lets go
+        self.at(hub, 101.55)
+        self.assertTrue(d.grabbed)
+        self.assertEqual(hub.grab_state(), "exclusive")
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)             # a plain Down: navigates, doesn't close
+        self.assertEqual(self.chords, [])
+        self.assertEqual(self.actions, [("down", False)])
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.push(hub, d, EV_KEY, MODE, 1)                  # mode + Down: closes
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(len(self.chords), 1)
+
+    def test_ebusy_for_good_falls_back_to_shared(self):
+        hub = self.hub(chord=g.DEFAULT_CHORD, grab_busy_s=2.5)
+        d = self.dev(name="Held for good", path="/fake/held", grab_error=errno.EBUSY)
+        hub.add_device(d)
+        g._warned.discard(("grab", "/fake/held", "Held for good"))
+        hub.grab()
+        self.at(hub, 102.4)
+        self.assertFalse(hub.pads[d.path].grab_failed)
+        with self.assertLogs("momento.gamepad", logging.WARNING):
+            self.at(hub, 102.5)
+        self.assertTrue(hub.pads[d.path].grab_failed)
+        self.assertEqual(hub.grab_state(), "shared")
+        calls = d.grab_calls
+        self.at(hub, 103.0)
+        self.assertEqual(d.grab_calls, calls)                # no more tries
+        self.push(hub, d, EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual(self.actions[-1], ("accept", False))
 
 
 class Hotplug(Base):
@@ -791,7 +1114,7 @@ class GlibLoop(unittest.TestCase):
         ctx = GLib.MainContext.default()
         got = []
         hub = Gamepads(on_action=lambda a, r: got.append(a), on_chord=lambda: got.append("chord"),
-                       hold_ms=60, hotplug="off", watchdog_thread=False)
+                       chord=("select", "start"), hold_ms=60, hotplug="off", watchdog_thread=False)
         d = FakeDevice()
         hub.add_device(d)
         handle = hub.attach_glib()

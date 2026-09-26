@@ -578,8 +578,9 @@ class CLITest(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(gamepad, "main", return_value=0) as watch, contextlib.redirect_stdout(out):
                 self.assertEqual(cli.main(["--config", str(path), "controller", "--watch"]), 0)
-            watch.assert_called_once_with(["--watch", "--chord", "select+start", "--hold-ms", "0"])
-            self.assertIn("press View + Menu to open or close the bar", out.getvalue())
+            watch.assert_called_once_with(["--watch", "--chord", "mode+dpad_down", "--hold-ms", "0"])
+            self.assertIn("press PS / Xbox + Down to open or close the bar", out.getvalue())
+            config.set_value("controller", "open_chord", ["select", "start"], path)   # the old default
             config.set_value("controller", "hold_ms", config.HOLD_MS, path)    # Open with: Hold
             out = io.StringIO()
             with mock.patch.object(gamepad, "main", return_value=0) as watch, contextlib.redirect_stdout(out):
@@ -602,8 +603,9 @@ class CLITest(unittest.TestCase):
                 self.assertEqual(cli.main(["--config", str(path), "set", "controller_open", "tap"]), 0)
                 self.assertEqual(cli.main(["--config", str(path), "settings"]), 0)
             self.assertIn("controller_open = tap", out.getvalue())
-            self.assertIn("controller: press View + Menu to open or close the bar", out.getvalue())
+            self.assertIn("controller: press PS / Xbox + Down to open or close the bar", out.getvalue())
             self.assertEqual(config.load_controller(path)["hold_ms"], 0)
+            config.set_value("controller", "open_chord", ["select", "start"], path)   # set explicitly
             out = io.StringIO()
             reply = {"ok": True, "changed": {"controller_open": "hold"}, "restarted": False, "paused": False}
             config.set_value("controller", "hold_ms", 300, path)   # what the daemon writes
@@ -3071,20 +3073,31 @@ class ControllerSettingTest(unittest.TestCase):
     def test_defaults(self):
         cfg = self.config.load(self.path)
         self.assertEqual(self.config.controller(cfg),
-                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 0, "exclusive": True})
+                         {"enabled": True, "chord": ("mode", "dpad_down"), "hold_ms": 0, "exclusive": True})
         self.assertEqual(self.config.load_controller(self.path), self.config.controller(cfg))
         cur = self.settings.current(cfg)
         self.assertEqual((cur["controller"], cur["controller_exclusive"], cur["controller_open"]),
-                         ("view_menu", "on", "tap"))
+                         ("ps_down", "on", "tap"))
         d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
-        self.assertEqual(d["choices"]["controller"], ["off", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
+        self.assertEqual(d["choices"]["controller"],
+                         ["off", "ps_down", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
+        self.assertEqual(self.settings.controller_label("ps_down"), "PS / Xbox + Down")
         self.assertIsInstance(d["controller_available"], bool)
+
+    def test_explicit_chord_is_kept(self):
+        """A config that sets open_chord keeps it; one that doesn't gets the new default."""
+        self.path.write_text('[controller]\nopen_chord = ["select", "start"]\n')
+        cfg = self.config.load(self.path)
+        self.assertEqual(self.config.controller(cfg)["chord"], ("select", "start"))
+        self.assertEqual(self.settings.current(cfg)["controller"], "view_menu")
+        self.path.write_text('[controller]\nexclusive = true\n')
+        self.assertEqual(self.config.load_controller(self.path)["chord"], ("mode", "dpad_down"))
 
     def test_bad_values_fall_back(self):
         self.path.write_text('[controller]\nopen_chord = ["select", "turbo"]\nhold_ms = -3\n')
         with self.assertLogs("momento.config", "WARNING"):
             ctl = self.config.load_controller(self.path)
-        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 0))       # the defaults
+        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("mode", "dpad_down"), 0))     # the defaults
         self.path.write_text("[controller\n")                       # broken TOML: defaults
         self.assertTrue(self.config.load_controller(self.path)["enabled"])
         self.assertTrue(self.config.load_controller(Path(self._tmp.name) / "missing.toml")["enabled"])
@@ -3092,6 +3105,11 @@ class ControllerSettingTest(unittest.TestCase):
     def test_normalize(self):
         v = self.settings.validate
         self.assertEqual(v({"controller": "View + Menu"}), {"controller": "view_menu"})
+        self.assertEqual(v({"controller": "PS / Xbox + Down"}), {"controller": "ps_down"})
+        self.assertEqual(v({"controller": "ps+down"}), {"controller": "ps_down"})
+        self.assertEqual(v({"controller": "Guide + D-pad Down"}), {"controller": "ps_down"})
+        self.assertEqual(v({"controller": ["home", "dpad_down"]}), {"controller": "ps_down"})
+        self.assertEqual(v({"controller": "xbox+up"}), {"controller": "mode+dpad_up"})
         self.assertEqual(v({"controller": "left paddle"}), {"controller": "left_paddle"})
         self.assertEqual(v({"controller": "l3+r3"}), {"controller": "l3_r3"})
         self.assertEqual(v({"controller": "Guide+South"}), {"controller": "mode+south"})
@@ -3209,6 +3227,13 @@ class DaemonControllerTest(unittest.TestCase):
             dev.push(g.EV_KEY, code, 0)
         hub.process(dev.fileno())
 
+    def use_view_menu(self):
+        """The old default, View + Menu, set explicitly."""
+        from momento import config
+
+        config.set_value("controller", "open_chord", ["select", "start"], self.path)
+        self.d.cfg = config.load(self.path)
+
     def use_hold(self):
         """Open with: Hold ([controller] hold_ms = 300), as the settings row writes it."""
         from momento import config
@@ -3217,6 +3242,7 @@ class DaemonControllerTest(unittest.TestCase):
         self.d.cfg = config.load(self.path)
 
     def test_chord_opens_bar_without_grabbing(self):
+        self.use_view_menu()
         self.use_hold()
         self.d._sync_controller()
         self.assertEqual(self.made[-1]["navigate"], False)
@@ -3252,6 +3278,7 @@ class DaemonControllerTest(unittest.TestCase):
 
     def test_default_opens_on_press(self):
         """No [controller] hold_ms: a tap opens the bar, nothing to wait for."""
+        self.use_view_menu()
         self.d._sync_controller()
         hub = self.d.pads
         self.assertEqual((self.made[-1]["hold_ms"], hub.hold), (0, 0))
@@ -3264,6 +3291,7 @@ class DaemonControllerTest(unittest.TestCase):
         self.assertEqual(self.call({"cmd": "settings"})["values"]["controller_open"], "tap")
 
     def test_tap_applies_live_and_opens_on_press(self):
+        self.use_view_menu()
         self.use_hold()
         self.d._sync_controller()
         rec, hub = self.d.recorder, self.d.pads
@@ -3304,6 +3332,49 @@ class DaemonControllerTest(unittest.TestCase):
         self.d.stop()
         self.assertIsNone(self.d.pads)
         self.assertTrue(dev.closed)
+
+    def test_default_ps_down_holds_the_pad_while_mode_is_down(self):
+        """PS/Xbox/Home + D-pad Down: the pad is held from the mode press to its release,
+        so the game never sees the D-pad; the mask widens to the hat only meanwhile."""
+        g = self.gamepad
+        self.d._sync_controller()
+        self.assertEqual(self.made[-1]["chord"], ("mode", "dpad_down"))
+        self.assertIs(self.made[-1]["chord_grab"], True)                 # [controller] exclusive
+        hub, dev = self.d.pads, self.devs[-1]
+        dev.mask_honoured = True
+        self.assertEqual(dev.mask, (g.EV_KEY,))
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)                                # D-pad alone: not even seen
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 0)
+        hub.process(dev.fileno())
+        self.assertEqual(self.opened, [])
+        dev.push(g.EV_KEY, g.BTN_MODE, 1)
+        hub.process(dev.fileno())
+        self.assertTrue(dev.grabbed)
+        self.assertEqual(dev.mask, (g.EV_KEY, g.EV_ABS))
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)
+        hub.process(dev.fileno())
+        self.assertEqual(self.opened, [100.0])
+        self.assertTrue(dev.grabbed)                                      # until mode is let go
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 0)
+        dev.push(g.EV_KEY, g.BTN_MODE, 0)
+        hub.process(dev.fileno())
+        self.assertFalse(dev.grabbed)
+        self.assertEqual(dev.mask, (g.EV_KEY,))
+        self.assertFalse(hub.grabbing)                                   # never the bar's grab
+
+    def test_exclusive_off_shares_the_pad(self):
+        g = self.gamepad
+        self.d._sync_controller()
+        hub, dev = self.d.pads, self.devs[-1]
+        r = self.call({"cmd": "configure", "changes": {"controller_exclusive": "off"}})
+        self.assertEqual((r["ok"], r["restarted"]), (True, False))
+        self.assertIs(self.d.pads, hub)
+        self.assertFalse(hub.chord_grab)
+        dev.push(g.EV_KEY, g.BTN_MODE, 1)
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)
+        hub.process(dev.fileno())
+        self.assertEqual(self.opened, [100.0])
+        self.assertEqual(dev.grab_calls, 0)
 
     def test_real_devices_never_opened_in_tests(self):
         self.d.pad_factory = None                  # the real Gamepads: refuses under the sandbox

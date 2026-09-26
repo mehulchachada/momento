@@ -140,7 +140,7 @@ def _status_quietly() -> dict | None:
 
 
 def controller_line(cfg: dict) -> str:
-    """"press View + Menu to open or close the bar" (a tap, the default) / "hold View + Menu (0.3 s) ..." / "off"."""
+    """"press PS + Down to open or close the bar" (a tap, the default) / "hold View + Menu (0.3 s) ..." / "off"."""
     from . import gamepad
 
     ctl = config.controller(cfg)

@@ -38,8 +38,10 @@ Raw buttons (``on_button(name, pressed)``; also the names a chord uses):
 south east north west tl tr tl2 tr2 select start mode thumbl thumbr
 dpad_up dpad_down dpad_left dpad_right paddle1..paddle4 extra1..extra4.
 Chord-only groups: ``left_paddle`` (paddle3 or paddle4), ``right_paddle``
-(paddle1 or paddle2). Aliases: view=select, menu=start, guide/home=mode,
-l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2.
+(paddle1 or paddle2). Aliases: view=select, menu=start, guide/home/ps/xbox=mode,
+l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2, up/down/left/right=dpad_*.
+In a chord, ``dpad_*`` also matches the hat (``ABS_HAT0X/Y``), which is how
+most pads report their D-pad; others send ``BTN_DPAD_*``.
 
 Layout notes
 ------------
@@ -69,7 +71,25 @@ called on :meth:`close`, at interpreter exit, when a callback raises, and by a
 watchdog when nothing happened for ``watchdog_s`` (60 s). The kernel drops a
 grab by itself when the process exits.
 
-The chord is watched without grabbing, so its own presses reach the game.
+Shortcut with a D-pad direction (the default, PS/Xbox/Home + D-pad Down)
+-------------------------------------------------------------------------
+The chord's other buttons are its *modifier* (``mode``). The daemon's hub
+(``navigate=False``) reads key events only (EVIOCSMASK), so stick movement never
+wakes it. While the modifier is held on a pad with a hat, that pad's mask is
+widened to key + absolute events so the hat is seen, and narrowed again when
+the modifier is let go (the hat is then read afresh with EVIOCGABS on the next
+press, so D-pad first also works). With ``chord_grab`` (the daemon, when
+``[controller] exclusive``) the hub also takes the pad with ``EVIOCGRAB`` the
+moment the modifier goes down, so the D-pad press that completes the chord never
+reaches the game. It lets go when the modifier is released, after
+``chord_grab_s`` (2 s) at most (checked in ``tick()`` and by the watchdog
+thread), on any error, and on close. A pad someone else holds stays shared. The
+open bar's own grab takes over: a grab that fails with EBUSY (the daemon still
+holds the pad) is retried every 50 ms for ``grab_busy_s`` before the pad counts
+as shared, and a waiting pad re-reads its state from the kernel, since another
+program's grab hides events from us. In a navigating hub the D-pad does nothing
+while the modifier is held. Chords without a D-pad direction are watched
+without grabbing, so their own presses reach the game.
 
 Under the test sandbox (``MOMENTO_TEST_SANDBOX``, see tests/_sandbox.py) the
 real device layer is off: :func:`open_device` and :func:`probe` find nothing and
@@ -135,13 +155,16 @@ BUTTON_NAMES = ("south", "east", "north", "west", "tl", "tr", "tl2", "tr2", "sel
                 "mode", "thumbl", "thumbr", "dpad_up", "dpad_down", "dpad_left", "dpad_right",
                 "paddle1", "paddle2", "paddle3", "paddle4", "extra1", "extra2", "extra3", "extra4")
 GROUPS = {"left_paddle": ("paddle3", "paddle4"), "right_paddle": ("paddle1", "paddle2")}
-ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode",
-           "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2"}
+ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode", "ps": "mode",
+           "xbox": "mode", "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2",
+           "up": "dpad_up", "down": "dpad_down", "left": "dpad_left", "right": "dpad_right"}
+DPAD_NAMES = ("dpad_up", "dpad_down", "dpad_left", "dpad_right")
 
-DEFAULT_CHORD = ("select", "start")
+DEFAULT_CHORD = ("mode", "dpad_down")
 DEFAULT_HOLD_MS = 0        # open on a tap, like [controller] hold_ms
-# (key, label, buttons): the choices the settings UI offers
+# (key, label, buttons): the choices the settings UI offers (the first is the default)
 CHORD_PRESETS = (
+    ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")),
     ("view_menu", "View + Menu", ("select", "start")),
     ("left_paddle", "Left paddle", ("left_paddle",)),
     ("right_paddle", "Right paddle", ("right_paddle",)),
@@ -154,6 +177,9 @@ REPEAT_DELAY_MS = 350
 REPEAT_INTERVAL_MS = 90
 WATCHDOG_S = 60.0
 GRAB_WAIT_S = 1.0
+GRAB_BUSY_S = 2.5         # EBUSY (the daemon's shortcut hold) is retried this long
+GRAB_POLL_S = 0.05        # ...this often, re-reading the pad's state from the kernel
+CHORD_GRAB_S = 2.0        # the shortcut's modifier hold is let go after this at most
 RESCAN_S = 2.0
 ACTION_DEDUP_S = 0.05     # same action from another pad this soon = the same press
 CHORD_DEDUP_S = 0.25      # (Steam's virtual pad mirrors the physical one)
@@ -200,6 +226,7 @@ def normalize_chord(buttons) -> tuple[str, ...]:
     out = []
     for b in buttons:
         name = str(b).strip().lower().replace("-", "_").replace(" ", "_")
+        name = name.replace("d_pad_", "dpad_")      # "D-pad Down" -> dpad_down
         name = ALIASES.get(name, name)
         if name not in BUTTON_NAMES and name not in GROUPS:
             raise ValueError(f"unknown controller button {b!r}; use one of: "
@@ -281,20 +308,28 @@ def is_gamepad_caps(caps: dict) -> bool:
 
 # EVIOCSMASK: per-client event filter (Linux 4.4+). The daemon only needs key
 # events for the chord, so it masks out the stick/trigger stream and isn't woken
-# hundreds of times a second while someone plays.
+# hundreds of times a second while someone plays. A D-pad chord adds EV_ABS
+# while its modifier is held, limited by a per-code mask to the hat, so even
+# then the sticks don't wake it (the kernel also drops the empty SYN_REPORTs).
 _EVIOCSMASK = (1 << 30) | (16 << 16) | (ord("E") << 8) | 0x93
+HAT_ONLY = {EV_ABS: (ABS_HAT0X, ABS_HAT0Y)}
 
 
-def set_event_mask(fd: int, types: Iterable[int] | None) -> bool:
-    """Deliver only these event types to this fd (None = everything)."""
+def _mask_ioctl(fd: int, type_: int, bits: int) -> None:
     import ctypes
     import fcntl
 
-    bits = (1 << 32) - 1 if types is None else sum(1 << t for t in set(types))
     buf = ctypes.create_string_buffer(struct.pack("<Q", bits), 8)
-    arg = struct.pack("IIQ", 0, 8, ctypes.addressof(buf))
+    fcntl.ioctl(fd, _EVIOCSMASK, struct.pack("IIQ", type_, 8, ctypes.addressof(buf)))
+
+
+def set_event_mask(fd: int, types: Iterable[int] | None, codes: dict | None = None) -> bool:
+    """Deliver only these event types to this fd (None = everything); ``codes``
+    ({type: codes}) narrows a type further (only types with at most 64 codes)."""
     try:
-        fcntl.ioctl(fd, _EVIOCSMASK, arg)
+        for t, allowed in (codes or {}).items():
+            _mask_ioctl(fd, t, sum(1 << c for c in set(allowed)))
+        _mask_ioctl(fd, 0, (1 << 32) - 1 if types is None else sum(1 << t for t in set(types)))
         return True
     except OSError:
         return False
@@ -375,9 +410,11 @@ class _Pad:
     __slots__ = ("dev", "key", "name", "fd", "layout", "names", "has_hat", "axes_info",
                  "held", "axes", "hat", "dir", "dir_src", "dir_blocked", "repeat_at",
                  "chord_since", "chord_latched", "grabbed", "grab_failed", "grab_wait_since",
-                 "dropped")
+                 "busy_since", "grab_poll_at", "abs_hat", "mask", "mod_held", "mod_grabbed",
+                 "mod_since", "mod_check_at", "dropped")
 
-    def __init__(self, dev, key, name="", layout="standard", has_hat=True, axes_info=None):
+    def __init__(self, dev, key, name="", layout="standard", has_hat=True, axes_info=None,
+                 abs_hat=None):
         self.dev = dev
         self.key = key
         self.name = name
@@ -404,10 +441,30 @@ class _Pad:
         self.grabbed = False
         self.grab_failed = False
         self.grab_wait_since = None
+        self.busy_since = None             # first EBUSY of the current grab attempt
+        self.grab_poll_at = None           # next re-read while a grab waits
+        # the D-pad is a hat (ABS_HAT0X/Y): the key-only mask hides it
+        self.abs_hat = (ABS_HAT0X in self.axes_info or ABS_HAT0Y in self.axes_info) if abs_hat is None \
+            else abs_hat
+        self.mask = "unset"                # the event mask last set on the fd
+        self.mod_held = False              # the chord's modifier (e.g. mode) is down
+        self.mod_grabbed = False           # ...and we hold the pad for it (chord_grab)
+        self.mod_since = None
+        self.mod_check_at = None           # next re-read of the keys while the modifier is held
         self.dropped = False
 
     def held_names(self) -> set[str]:
         return {self.names[c] for c in self.held if c in self.names}
+
+    def chord_names(self) -> set[str]:
+        """``held_names()`` plus the hat as ``dpad_*`` (what a chord matches)."""
+        names = self.held_names()
+        x, y = self.hat
+        if x:
+            names.add("dpad_right" if x > 0 else "dpad_left")
+        if y:
+            names.add("dpad_down" if y > 0 else "dpad_up")
+        return names
 
     def normalize(self, code: int, value: int) -> float:
         lo, hi = self.axes_info.get(code, (-32768, 32767))
@@ -452,6 +509,8 @@ class Gamepads:
                  deadzone: float = DEADZONE, repeat_delay_ms: int = REPEAT_DELAY_MS,
                  repeat_interval_ms: int = REPEAT_INTERVAL_MS, watchdog_s: float = WATCHDOG_S,
                  grab_wait_s: float = GRAB_WAIT_S, rescan_s: float = RESCAN_S,
+                 grab_busy_s: float = GRAB_BUSY_S, chord_grab: bool = False,
+                 chord_grab_s: float = CHORD_GRAB_S,
                  clock: Callable[[], float] = time.monotonic,
                  lister: Callable[[], list[str]] | None = None,
                  opener: Callable[[str], object] | None = None,
@@ -463,7 +522,13 @@ class Gamepads:
         self.on_devices = on_devices
         self.navigate = navigate
         self.chord: tuple[str, ...] = ()
+        self.chord_mod: tuple[str, ...] = ()    # the chord minus its D-pad directions
+        self.chord_dpad = False                 # the chord has a D-pad direction
         self.hold = 0.0
+        # take a pad while the chord's modifier is held (the daemon; see the module doc)
+        self.chord_grab = bool(chord_grab)
+        self.chord_grab_s = chord_grab_s
+        self.grab_busy_s = grab_busy_s
         self.set_chord(chord, hold_ms)
         self.deadzone = deadzone
         self.repeat_delay = repeat_delay_ms / 1000.0
@@ -504,11 +569,24 @@ class Gamepads:
         """Buttons that must be held together for ``hold_ms`` (0: fires the moment
         they are all down); ``()``/None disables."""
         self.chord = normalize_chord(buttons) if buttons else ()
+        self.chord_dpad = any(n in DPAD_NAMES for n in self.chord)
+        self.chord_mod = tuple(n for n in self.chord if n not in DPAD_NAMES) if self.chord_dpad else ()
         if hold_ms is not None:
             self.hold = max(0, int(hold_ms)) / 1000.0
-        for pad in getattr(self, "pads", {}).values():
+        for pad in list(getattr(self, "pads", {}).values()):
             pad.chord_since = None
+            self._mod_release(pad)
+            pad.mod_held = False
+            pad.mod_check_at = None
+            self._apply_mask(pad)
             pad.chord_latched = self._chord_held(pad)
+
+    def set_chord_grab(self, on: bool) -> None:
+        """Hold a pad while the chord's modifier is down (see the module doc)."""
+        self.chord_grab = bool(on)
+        if not on:
+            for pad in list(self.pads.values()):
+                self._mod_release(pad)
 
     def set_navigate(self, on: bool) -> None:
         """Turn action/raw-button reporting on (the bar) or off (daemon: chord only)."""
@@ -658,6 +736,8 @@ class Gamepads:
         except (AttributeError, OSError, ValueError):
             pad.fd = getattr(dev, "fd", None)
         self._seed(pad, caps)
+        if pad.mod_held and not self.navigate:
+            pad.mod_check_at = self.clock() + self.chord_grab_s
         self.pads[key] = pad
         if pad.fd is not None:
             self._by_fd[pad.fd] = pad
@@ -682,6 +762,7 @@ class Gamepads:
             return
         if pad.fd is not None and self._by_fd.get(pad.fd) is pad:
             del self._by_fd[pad.fd]
+        self._mod_release(pad)
         if pad.grabbed:
             try:
                 pad.dev.ungrab()
@@ -717,16 +798,30 @@ class Gamepads:
         pad.dir, pad.dir_src = self._direction(pad)
         pad.dir_blocked = pad.dir is not None
         pad.chord_latched = self._chord_held(pad)
+        pad.mod_held = self._mod_held(pad)
+
+    def _mask_for(self, pad: _Pad):
+        if self.navigate:
+            return None
+        # the hat is needed only for a D-pad chord, and then only while its modifier is
+        # down (a chord of D-pad directions alone has no modifier: always)
+        if self.chord_dpad and pad.abs_hat and (pad.mod_held or not self.chord_mod):
+            return (EV_KEY, EV_ABS)
+        return (EV_KEY,)
 
     def _apply_mask(self, pad: _Pad) -> None:
         if pad.dev is None or pad.fd is None:
             return
-        types = None if self.navigate else (EV_KEY,)
+        types = self._mask_for(pad)
+        if types == pad.mask:
+            return
+        pad.mask = types
+        codes = HAT_ONLY if types is not None and EV_ABS in types else None
         setter = getattr(pad.dev, "set_event_mask", None)  # FakeDevice
         if setter is not None:
-            setter(types)
+            setter(types, codes)
         else:
-            set_event_mask(pad.fd, types)
+            set_event_mask(pad.fd, types, codes)
 
     # --------------------------------------------------------- input path
     def process(self, fd: int, now: float | None = None) -> None:
@@ -782,6 +877,8 @@ class Gamepads:
                 pad.held.add(code)
             else:
                 pad.held.discard(code)
+            if self.chord_mod:
+                self._update_modifier(pad, now)
             if name in DPAD_BUTTONS:
                 self._update_dir(pad, now)
             elif self.navigate and value and name in BUTTON_ACTIONS:
@@ -793,6 +890,8 @@ class Gamepads:
         elif t == EV_ABS:
             if code in (ABS_HAT0X, ABS_HAT0Y):
                 pad.hat[code - ABS_HAT0X] = (value > 0) - (value < 0)
+                if self.chord_dpad:
+                    self._update_chord(pad, now)
             else:
                 pad.axes[code] = pad.normalize(code, value)
 
@@ -800,12 +899,18 @@ class Gamepads:
         self._update_dir(pad, now)
         self._check_pending_grab(pad, now)
 
-    def _resync(self, pad: _Pad) -> None:
+    def _resync(self, pad: _Pad, axes: bool = True) -> None:
         try:
             pad.held = {c for c in pad.dev.active_keys() if c in pad.names}
         except Exception:
             pass
-        for code in list(pad.axes_info):
+        if axes:
+            self._resync_axes(pad)
+
+    def _resync_axes(self, pad: _Pad, codes=None) -> None:
+        for code in list(pad.axes_info) if codes is None else codes:
+            if code not in pad.axes_info:
+                continue
             try:
                 value = pad.dev.absinfo(code).value
             except Exception:
@@ -814,6 +919,36 @@ class Gamepads:
                 pad.hat[code - ABS_HAT0X] = (value > 0) - (value < 0)
             else:
                 pad.axes[code] = pad.normalize(code, value)
+
+    @staticmethod
+    def _pending(pad: _Pad) -> bool:
+        """Events are waiting on the fd (they will bring our state up to date)."""
+        import select
+
+        try:
+            return bool(select.select([pad.fd], [], [], 0)[0])
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _resync_blind(self, pad: _Pad) -> None:
+        """Re-read the pad from the kernel: another program's grab may have hidden events.
+
+        Skipped while events are queued (then we aren't blind, and they come next).
+        Nothing fires from what is read here: a direction that changed is blocked
+        until it changes again; the chord only lets go.
+        """
+        if pad.dev is None or self._pending(pad):
+            return
+        self._resync(pad)
+        d, src = self._direction(pad)
+        if d != pad.dir:
+            pad.dir, pad.dir_src = d, src
+            pad.dir_blocked = d is not None
+            pad.repeat_at = None
+        if not self._chord_held(pad):
+            pad.chord_since = None
+            pad.chord_latched = False
+        pad.mod_held = self._mod_held(pad)
 
     # ------------------------------------------------------ directions/repeat
     def _direction(self, pad: _Pad):
@@ -844,6 +979,11 @@ class Gamepads:
         if d is None:
             pad.repeat_at = None
             return
+        if pad.mod_held:
+            # the shortcut's modifier is down: the D-pad belongs to the shortcut
+            pad.dir_blocked = True
+            pad.repeat_at = None
+            return
         if self.navigate:
             self._emit(pad, d, False, now)
             pad.repeat_at = now + self.repeat_delay
@@ -860,14 +1000,85 @@ class Gamepads:
 
     # ------------------------------------------------------------- chord
     def _chord_held(self, pad: _Pad) -> bool:
-        if not self.chord:
+        return self._all_held(pad.chord_names() if self.chord_dpad else pad.held_names(), self.chord)
+
+    def _mod_held(self, pad: _Pad) -> bool:
+        return self._all_held(pad.held_names(), self.chord_mod)
+
+    @staticmethod
+    def _all_held(names: set[str], wants) -> bool:
+        if not wants:
             return False
-        names = pad.held_names()
-        for want in self.chord:
+        for want in wants:
             options = GROUPS.get(want, (want,))
             if not any(o in names for o in options):
                 return False
         return True
+
+    # ------------------------------------------- the D-pad chord's modifier
+    def _update_modifier(self, pad: _Pad, now: float) -> None:
+        """The chord's modifier went down or up: widen/narrow the mask, hold/let go."""
+        held = self._mod_held(pad)
+        if held == pad.mod_held:
+            return
+        pad.mod_held = held
+        if held:
+            if self.chord_grab and not self._want_grab:
+                self._mod_grab(pad, now)
+            self._apply_mask(pad)
+            if not self.navigate:
+                # widened only now: read the hat (a D-pad pressed first still counts)
+                self._resync_axes(pad, (ABS_HAT0X, ABS_HAT0Y))
+            if not self.navigate or pad.mod_grabbed:
+                pad.mod_check_at = now + self.chord_grab_s
+        else:
+            pad.mod_check_at = None
+            self._mod_release(pad)
+            self._apply_mask(pad)
+            if not self.navigate and pad.abs_hat and self.chord_mod:
+                pad.hat = [0, 0]           # masked from now on: unknown until the next widen
+
+    def _mod_grab(self, pad: _Pad, now: float) -> None:
+        with self._lock:
+            if pad.mod_grabbed or pad.grabbed or pad.fd is None:
+                return
+            try:
+                pad.dev.grab()
+            except OSError as e:
+                _warn_once(("modgrab", pad.key, pad.name),
+                           "can't hold %s for the controller shortcut (%s; another program holds it?); "
+                           "the game will also see the D-pad press", pad.name, e.strerror or e,
+                           level=logging.INFO)
+                return
+            pad.mod_grabbed = True
+            pad.mod_since = now
+        self._start_watchdog_thread()
+
+    def _mod_release(self, pad: _Pad) -> None:
+        with self._lock:
+            if not pad.mod_grabbed:
+                return
+            pad.mod_grabbed = False
+            pad.mod_since = None
+            try:
+                pad.dev.ungrab()
+            except Exception as e:  # already gone
+                log.debug("ungrab %s: %s", pad.key, e)
+
+    def _check_modifier(self, pad: _Pad, now: float) -> None:
+        """Timer while the modifier is held: the grab watchdog, and a re-read of the
+        keys (we may have missed the release while someone else held the pad)."""
+        if pad.mod_grabbed:
+            log.warning("controller shortcut: %s held for %.0f s; giving the controller back",
+                        pad.name, self.chord_grab_s)
+            self._mod_release(pad)
+        if not self._pending(pad):
+            self._resync(pad, axes=False)
+        if self._mod_held(pad):
+            pad.mod_check_at = now + self.chord_grab_s
+            return
+        pad.mod_held = True                # (so the update below sees the release)
+        self._update_modifier(pad, now)
 
     def _update_chord(self, pad: _Pad, now: float) -> None:
         if not self._chord_held(pad):
@@ -901,6 +1112,10 @@ class Gamepads:
                 due.append(pad.chord_since + self.hold)
             if pad.grab_wait_since is not None and not pad.grabbed:
                 due.append(pad.grab_wait_since + self.grab_wait_s)
+                if pad.grab_poll_at is not None:
+                    due.append(pad.grab_poll_at)
+            if pad.mod_check_at is not None:
+                due.append(pad.mod_check_at)
         if self._want_grab and self.watchdog_s:
             due.append(self._activity + self.watchdog_s)
         if self._grab_lost_pending:
@@ -925,6 +1140,8 @@ class Gamepads:
                     self._update_chord(pad, now)
                 if pad.grab_wait_since is not None:
                     self._check_pending_grab(pad, now)
+                if pad.mod_check_at is not None and now >= pad.mod_check_at - 1e-9:
+                    self._check_modifier(pad, now)
             with self._lock:
                 if self._want_grab and self.watchdog_s and now - self._activity >= self.watchdog_s:
                     log.warning("controller grab watchdog: nothing for %.0f s; giving the controllers back",
@@ -1000,6 +1217,7 @@ class Gamepads:
         self._activity = self.clock() if now is None else now
 
     def ungrab(self) -> None:
+        """Give every pad back (the bar's grab and the shortcut's modifier hold)."""
         with self._lock:
             self._want_grab = False
             self._release_grab()
@@ -1009,7 +1227,9 @@ class Gamepads:
         self._want_grab = False
         for pad in list(self.pads.values()):
             pad.grab_wait_since = None
+            pad.busy_since = pad.grab_poll_at = None
             pad.grab_failed = False
+            self._mod_release(pad)
             if pad.grabbed:
                 pad.grabbed = False
                 try:
@@ -1036,24 +1256,76 @@ class Gamepads:
     def _try_grab(self, pad: _Pad, now: float) -> None:
         if not self._want_grab or pad.grabbed or pad.grab_failed or pad.fd is None:
             return
+        if pad.mod_grabbed:                 # already ours (the shortcut's hold): keep it
+            pad.mod_grabbed, pad.mod_since = False, None
+            pad.grab_wait_since = pad.busy_since = pad.grab_poll_at = None
+            pad.grabbed = True
+            return
+        waited = pad.grab_wait_since is not None
+        if waited:
+            self._resync_blind(pad)     # another program's grab may have hidden the releases
         if not self._idle(pad):
             if pad.grab_wait_since is None:
                 pad.grab_wait_since = now
             if now - pad.grab_wait_since < self.grab_wait_s - 1e-9:
+                pad.grab_poll_at = now + GRAB_POLL_S
                 return
-        pad.grab_wait_since = None
         try:
             pad.dev.grab()
         except OSError as e:
+            if e.errno == errno.EBUSY:
+                # the daemon may still hold it for the shortcut: it lets go within
+                # CHORD_GRAB_S, so keep trying a little before sharing the pad
+                if pad.busy_since is None:
+                    pad.busy_since = now
+                if now - pad.busy_since < self.grab_busy_s - 1e-9:
+                    if pad.grab_wait_since is None:
+                        pad.grab_wait_since = now
+                    pad.grab_poll_at = now + GRAB_POLL_S
+                    return
+            pad.grab_wait_since = pad.busy_since = pad.grab_poll_at = None
             pad.grab_failed = True
             _warn_once(("grab", pad.key, pad.name),
                        "can't take %s exclusively (%s; another program holds it?); "
                        "the game will also see presses while the bar is open", pad.name, e.strerror or e)
             return
+        pad.grab_wait_since = pad.busy_since = pad.grab_poll_at = None
         pad.grabbed = True
+        if waited:
+            self._resync_blind(pad)     # what happened while someone else held it
+
+    def _wd_period(self) -> float:
+        period = max(0.5, min(5.0, self.watchdog_s / 4)) if self.watchdog_s else 5.0
+        if self.chord_grab:
+            period = min(period, max(0.25, self.chord_grab_s / 4))
+        return period
+
+    def _watchdog_check(self, period: float) -> bool:
+        """The thread's check (under the lock); False once there is nothing to watch."""
+        now = self.clock()
+        alive = False
+        if self._want_grab and self.watchdog_s:
+            if now - self._activity >= self.watchdog_s + period:
+                log.warning("controller grab watchdog (thread): releasing the controllers")
+                self._release_grab()
+                self._grab_lost_pending = True
+            else:
+                alive = True
+        try:
+            pads = list(self.pads.values())
+        except RuntimeError:  # changed under us by the loop thread: look again later
+            return True
+        for pad in pads:
+            if pad.mod_grabbed:
+                if now - (pad.mod_since or now) >= self.chord_grab_s + period:
+                    log.warning("controller shortcut watchdog (thread): giving %s back", pad.name)
+                    self._mod_release(pad)
+                else:
+                    alive = True
+        return alive
 
     def _start_watchdog_thread(self) -> None:
-        if not self._watchdog_thread_on or not self.watchdog_s:
+        if not self._watchdog_thread_on:
             return
         if self._wd_thread is not None and self._wd_thread.is_alive() and not self._wd_stop.is_set():
             return  # still watching this grab
@@ -1061,7 +1333,7 @@ class Gamepads:
         self._wd_stop = threading.Event()
         ref = weakref.ref(self)
         stop = self._wd_stop
-        period = max(0.5, min(5.0, self.watchdog_s / 4))
+        period = self._wd_period()
 
         def run():  # last line of defence if the event loop itself is stuck
             while not stop.wait(period):
@@ -1069,12 +1341,7 @@ class Gamepads:
                 if hub is None:
                     return
                 with hub._lock:
-                    if not hub._want_grab:
-                        return
-                    if hub.clock() - hub._activity >= hub.watchdog_s + period:
-                        log.warning("controller grab watchdog (thread): releasing the controllers")
-                        hub._release_grab()
-                        hub._grab_lost_pending = True
+                    if not hub._watchdog_check(period):
                         return
                 del hub
 
@@ -1258,6 +1525,9 @@ class FakeDevice:
     and makes the fd readable, so it also works under a real event loop.
     ``grab_error`` (an errno) makes :meth:`grab` fail like a device someone else
     already holds; ``unplug()`` makes the next read fail with ENODEV.
+    ``mask_honoured`` drops pushed events the event mask filters out, and
+    ``grabbed_by_other`` (with ``grab_error=EBUSY``) hides all of them, as the
+    kernel does; the device state (``held``, ``axes``) changes either way.
     """
 
     XBOX_KEYS = (BTN_SOUTH, BTN_EAST, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START,
@@ -1278,10 +1548,13 @@ class FakeDevice:
         self.axes = axes
         self.held: set[int] = set()
         self.grab_error = grab_error
+        self.grabbed_by_other = False
+        self.mask_honoured = False
         self.grabbed = False
         self.grab_calls = 0
         self.ungrab_calls = 0
         self.mask = "all"
+        self.mask_codes = None
         self.closed = False
         self._queue: list[_Event] = []
         self._unplugged = False
@@ -1331,8 +1604,17 @@ class FakeDevice:
             raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
         self.grabbed = False
 
-    def set_event_mask(self, types):
+    def set_event_mask(self, types, codes=None):
         self.mask = "all" if types is None else tuple(sorted(types))
+        self.mask_codes = {t: tuple(sorted(c)) for t, c in codes.items()} if codes else None
+
+    def masked(self, t, code) -> bool:
+        """Would the kernel keep this event from us (EVIOCSMASK)? EV_SYN never is."""
+        if t == EV_SYN or self.mask == "all":
+            return False
+        if t not in self.mask:
+            return True
+        return bool(self.mask_codes and t in self.mask_codes and code not in self.mask_codes[t])
 
     def close(self):
         if not self.closed:
@@ -1350,6 +1632,8 @@ class FakeDevice:
             (self.held.add if value else self.held.discard)(code)
         elif t == EV_ABS and code in self.axes:
             self.axes[code].value = value
+        if self.grabbed_by_other or (self.mask_honoured and self.masked(t, code)):
+            return                          # the kernel state changed, but we see nothing
         self._queue.append(_Event(t, code, value))
         if syn:
             self._queue.append(_Event(EV_SYN, SYN_REPORT, 0))
@@ -1401,7 +1685,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m momento.gamepad",
                                  description="List game controllers Momento can use; --watch prints their input.")
     ap.add_argument("--watch", action="store_true", help="print actions and the shortcut (read only, no grab)")
-    ap.add_argument("--chord", default="+".join(DEFAULT_CHORD), help="shortcut buttons, e.g. select+start")
+    ap.add_argument("--chord", default="+".join(DEFAULT_CHORD), help="shortcut buttons, e.g. mode+dpad_down")
     ap.add_argument("--hold-ms", type=int, default=DEFAULT_HOLD_MS,
                     help="how long to hold the shortcut, in ms (default: 0, fire on press)")
     args = ap.parse_args(argv)

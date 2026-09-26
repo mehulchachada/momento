@@ -167,7 +167,10 @@ Commands (fields are in ``COMMANDS``)
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
-open bar reads the controllers itself and releases them when it hides.
+open bar reads the controllers itself and releases them when it hides. For a
+chord with a D-pad direction (the default ``["mode", "dpad_down"]``) the daemon
+holds that controller (EVIOCGRAB) while the chord's other button is down, when
+``exclusive`` is on, so the game doesn't see the D-pad press.
 ``configure`` {changes, force?}
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
@@ -334,8 +337,9 @@ SETTING_VALUES = {
     "audio_source": (("string",), True),   # "default" | "off" | monitor source name
     "mic": (("string",), True),            # "on" | "off"
     "mic_device": (("string",), True),     # "default" | source name
-    # "off" | a preset ("view_menu", "left_paddle", "right_paddle", "l3_r3") | buttons
-    # joined with "+" ("select+mode"); configure also takes "on" (enable, keep the shortcut)
+    # "off" | a preset ("ps_down" (mode+dpad_down, the default), "view_menu", "left_paddle",
+    # "right_paddle", "l3_r3") | buttons joined with "+" ("select+mode"); configure also
+    # takes "on" (enable, keep the shortcut)
     "controller": (("string",), False),
     "controller_exclusive": (("string",), False),   # "on" | "off"
     # "tap" (hold_ms = 0, the default: opens on press) | "hold" ([controller] hold_ms above 0, 300 when chosen)

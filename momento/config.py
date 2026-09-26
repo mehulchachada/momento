@@ -96,11 +96,13 @@ DEFAULTS = {
         # Game controllers (needs python-evdev): press the shortcut to open or close
         # the clip bar, then use the D-pad / stick and A / B.
         "enabled": True,
-        # Buttons held together, by position: select (View / Share / Minus),
-        # start (Menu / Options / Plus), mode (Guide / PS / Home), thumbl / thumbr
-        # (stick clicks), tl / tr (bumpers), south / east / north / west, or
-        # left_paddle / right_paddle (back buttons on Elite-style pads and handhelds).
-        "open_chord": ["select", "start"],
+        # Buttons held together, by position: mode (PS / Xbox / Home), dpad_up /
+        # dpad_down / dpad_left / dpad_right, select (View / Share / Minus), start
+        # (Menu / Options / Plus), thumbl / thumbr (stick clicks), tl / tr (bumpers),
+        # south / east / north / west, or left_paddle / right_paddle (back buttons on
+        # Elite-style pads and handhelds). With a D-pad direction, the controller is
+        # held while the other button is down, so the game doesn't see the D-pad.
+        "open_chord": ["mode", "dpad_down"],
         "hold_ms": 0,     # 0 = open on a tap; HOLD_MS for "Open with: Hold"
         # Take the controller over while the bar is open, so the game doesn't see
         # the presses (falls back to sharing it where that isn't possible).

@@ -28,8 +28,9 @@ KEYS = {
     "audio_source": "default, off, or an output's monitor source name",
     "mic": "on, off",
     "mic_device": "default, or an input source name",
-    "controller": "off, on, or the shortcut that opens the bar: view_menu, left_paddle, right_paddle, "
-                  "l3_r3, or buttons joined with + (e.g. select+start)",
+    "controller": "off, on, or the shortcut that opens the bar: ps_down (PS / Xbox / Home + D-pad "
+                  "Down, the default), view_menu, left_paddle, right_paddle, l3_r3, or buttons joined "
+                  "with + (e.g. select+start)",
     "controller_exclusive": "on, off (take the controller over while the bar is open)",
     "controller_open": "hold, tap (tap, the default, opens the bar the instant the buttons are "
                        "down; hold waits until they have been held for 0.3 s)",
@@ -181,7 +182,7 @@ def normalize(key: str, value):
 
 
 def controller_label(value: str) -> str:
-    """"view_menu" -> "View + Menu", "select+mode" -> "Select + Mode", "off" -> "Off"."""
+    """"ps_down" -> "PS / Xbox + Down", "select+mode" -> "Select + Mode", "off" -> "Off"."""
     from . import gamepad
 
     if value in ("off", "on"):

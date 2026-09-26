@@ -21,7 +21,7 @@ Momento keeps the last hour of your game in the background. Something great happ
 
 <p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento bar: Recording Ember Rift, 42:17 recorded, 742 GB free, the lengths 15s to 60m with 5m selected, and pause, stop, screenshot and settings buttons"></p>
 
-Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or press **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
+Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or **PS + D-pad Down** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
 
 ## Features
 
@@ -30,7 +30,7 @@ Press play once and Momento records in the background. When something worth keep
 - **MP4 in seconds.** No re-encoding: a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
 - **Just the game.** Window mode (the default) records only your game, so the bar, chats and notifications stay out of your clips. The bar shows what it's recording: *Recording Ember Rift*. Prefer everything? Switch to Full screen.
 - **Screenshots.** One button. The bar gets out of the way first, then the picture lands in `~/Videos/Momento/Images`.
-- **Made for controllers.** Press View + Menu to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
+- **Made for controllers.** Press PS (or Xbox / Home) + D-pad Down to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
 - **Opens instantly.** The bar is kept ready, so it's on screen the moment you ask.
 - **Pause and stop** whenever you want.
 - **Keep history, if you want it.** Keep your replay after you stop or quit the game, and get every full hour saved as a video.
@@ -153,7 +153,9 @@ momento stop            # stop recording
 
 ## Using a controller
 
-Press **View + Menu** (the two small buttons in the middle) together to open the bar. Do it again to close it. On a PlayStation controller that's **Create + Options**, on a Nintendo-style one **− and +**.
+Press the **PS** (or **Xbox** / **Home**) button and **D-pad Down** together to open the bar. Do it again to close it. That's the **PS** button on a PlayStation controller, the **Xbox** button on an Xbox one, **Home** on a Nintendo-style one, and on a handheld the button your system uses as Home. Your game doesn't see the D-pad press.
+
+Prefer the old **View + Menu**? It's still there, with the paddles and L3 + R3, under [Controller settings](#controller).
 
 | Button | In the bar |
 |---|---|
@@ -203,10 +205,10 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 ### Controller
 
-<img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: Controller shortcut Off, View + Menu, Left paddle, Right paddle or L3 + R3, and Exclusive Off or On">
+<img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: Controller shortcut Off, PS / Xbox + Down, View + Menu, Left paddle, Right paddle or L3 + R3, and Exclusive Off or On">
 
-- **Controller**: the button combo that opens the bar: **View + Menu** (default), **Left paddle** or **Right paddle** (the back buttons on the ROG Ally and Xbox Elite controllers), **L3 + R3** (press both sticks in), or **Off**.
-- **Exclusive: On** (default): while the bar is open, Momento takes the controller so your game doesn't react to your presses. It gives it back when the bar closes.
+- **Controller**: the button combo that opens the bar: **PS / Xbox + Down** (default: the PS, Xbox or Home button with D-pad Down), **View + Menu**, **Left paddle** or **Right paddle** (the back buttons on the ROG Ally and Xbox Elite controllers), **L3 + R3** (press both sticks in), or **Off**.
+- **Exclusive: On** (default): while the bar is open, Momento takes the controller so your game doesn't react to your presses. It gives it back when the bar closes. It also keeps the D-pad press of **PS / Xbox + Down** from your game.
 - **Open with: Tap** (default) opens the bar the moment you press the combo. **Hold** waits until you've held it for 0.3 s.
 
 ### Misc
@@ -290,8 +292,9 @@ ASUS ROG Ally (Z1 Extreme, 16 GB), Bazzite 44, KDE Plasma 6.7 on Wayland, on AC 
 - **Screenshots come from the recording**, so they work only while Momento is recording (not paused or stopped).
 - **With Keep history off, stopping clears your replay.** So does the game closing. Save first.
 - **Momento needs free space for a full hour** before it starts: about 8 GB at the default settings.
-- **The controller shortcut also reaches your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
-- **Emulators that use Select + Start** (the same buttons as View + Menu) would open the bar too. Switch **Open with** to **Hold**, or pick another shortcut.
+- **Steam may react to the PS / Xbox button too** (its overlay or Big Picture), since it reads controllers its own way. If it gets in the way, pick another shortcut in settings → **Controller**.
+- **View + Menu, the paddles and L3 + R3 also reach your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
+- **Emulators that use Select + Start** (the same buttons as View + Menu) would open the bar too if you pick View + Menu. Switch **Open with** to **Hold**, or keep the default shortcut.
 
 ## FAQ
 
@@ -325,7 +328,7 @@ Controller: settings → **Controller**. Keyboard: on KDE, *System Settings → 
 </details>
 <details><summary><b>My controller doesn't open the bar</b></summary>
 
-Press the two small middle buttons together: **View + Menu** (Xbox, ROG Ally, Steam Deck), **Create + Options** (PlayStation), **− and +** (Nintendo). Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
+Press the **PS** / **Xbox** / **Home** button and **D-pad Down** together (PS button first is easiest). If you picked **View + Menu**, that's the two small middle buttons: **Create + Options** on PlayStation, **− and +** on Nintendo. Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
 </details>
 <details><summary><b>How do I turn off Keep history or the hour warning?</b></summary>
 

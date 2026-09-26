@@ -457,7 +457,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Up)
         self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())   # On
         self.key(Qt.Key_Up)
-        self.assertTrue(bar.row("controller").buttons[1].hasFocus())             # View + Menu
+        self.assertTrue(bar.row("controller").buttons[1].hasFocus())             # PS / Xbox + Down
         self.key(Qt.Key_PageUp)                  # back on Audio: Sound
         self.assertTrue(bar.row("audio_source").buttons[1].hasFocus())
         pump(self.app, 0.05)
@@ -1958,6 +1958,7 @@ class ControllerBar(unittest.TestCase):
         self.devs, self.hubs, self.made = [], [], []
         self.grab_error = None
         self.held = set()
+        self.hat_y = 0
         self.addCleanup(setattr, overlay, "PAD_FACTORY", overlay.PAD_FACTORY)
         overlay.PAD_FACTORY = self.factory
         self.cfg = config.default_path()
@@ -1973,6 +1974,7 @@ class ControllerBar(unittest.TestCase):
         self.made.append(kw)
         dev = gamepad.FakeDevice(name="Test pad", path=f"/fake/pad{len(self.devs)}", grab_error=self.grab_error)
         dev.held |= self.held
+        dev.axes[gamepad.ABS_HAT0Y].value = self.hat_y
         self.devs.append(dev)
         hub = gamepad.Gamepads(lister=lambda: [dev.path], opener=lambda _p: dev, hotplug="off",
                                watchdog_thread=False, **kw)
@@ -2021,7 +2023,7 @@ class ControllerBar(unittest.TestCase):
         bar = self.open(FakeDaemon(True))
         self.assertTrue(self.dev.grabbed)
         self.assertEqual(bar.pads.grab_state(), "exclusive")
-        self.assertEqual(self.made[-1]["chord"], ("select", "start"))
+        self.assertEqual(self.made[-1]["chord"], ("mode", "dpad_down"))
         self.assertEqual(self.made[-1]["hold_ms"], 0)            # the default: a tap
         self.assertTrue(self.made[-1]["navigate"])
         first = self.dev
@@ -2069,9 +2071,13 @@ class ControllerBar(unittest.TestCase):
         self.press(self.Y)
         self.wait_for(lambda: bar.mode == "settings")
 
+    def use_view_menu(self):
+        config.set_value("controller", "open_chord", ["select", "start"], self.cfg)
+
     def test_held_chord_grabbed_after_release(self):
         """Opened by the chord: the pad is taken over only once it is released, so the
         game sees the release and nothing stays pressed in it."""
+        self.use_view_menu()
         self.held = {gamepad.BTN_SELECT, gamepad.BTN_START}
         bar = self.open(FakeDaemon(True))
         self.assertFalse(self.dev.grabbed)
@@ -2079,6 +2085,36 @@ class ControllerBar(unittest.TestCase):
         self.dev.push(gamepad.EV_KEY, gamepad.BTN_START, 0)
         self.wait_for(lambda: self.dev.grabbed)
         self.assertTrue(bar.isVisible())               # the release didn't re-toggle it
+
+    def test_default_chord_held_at_open(self):
+        """Opened by PS + Down, still held: no focus move, no second toggle; the pad is
+        taken once both are let go."""
+        self.held, self.hat_y = {gamepad.BTN_MODE}, 1
+        bar = self.open(FakeDaemon(True))
+        focus = QApplication.focusWidget()
+        self.assertFalse(self.dev.grabbed)
+        self.dev.push(gamepad.EV_ABS, gamepad.ABS_HAT0Y, 0)
+        self.dev.push(gamepad.EV_KEY, gamepad.BTN_MODE, 0)
+        self.wait_for(lambda: self.dev.grabbed)
+        self.assertTrue(bar.isVisible())
+        self.assertIs(QApplication.focusWidget(), focus)
+
+    def test_takes_the_pad_from_the_daemon(self):
+        """The daemon still holds the pad for PS + Down (EBUSY, and the bar sees none of
+        its events): the bar keeps trying and takes it once PS is let go."""
+        self.grab_error = 16
+        self.held = {gamepad.BTN_MODE}
+        bar = self.open(FakeDaemon(True))
+        self.dev.grabbed_by_other = True
+        pump(self.app, 0.2)
+        self.assertFalse(self.dev.grabbed)
+        self.dev.push(gamepad.EV_KEY, gamepad.BTN_MODE, 0)          # unseen by the bar
+        self.dev.grab_error, self.dev.grabbed_by_other = None, False  # the daemon lets go
+        self.wait_for(lambda: self.dev.grabbed, timeout=2)
+        self.assertEqual(bar.pads.grab_state(), "exclusive")
+        bar.resident = True
+        self.down()                                     # a plain Down navigates; it doesn't close
+        self.assertTrue(bar.isVisible())
 
     def test_clip_view(self):
         overlay.LAST_FILE.unlink(missing_ok=True)      # default length: 1m
@@ -2162,8 +2198,10 @@ class ControllerBar(unittest.TestCase):
         ctl = bar.row("controller")
         self.assertTrue(ctl.buttons[1].hasFocus())
         self.assertEqual([b.text() for b in ctl.buttons],
-                         ["Off", "View + Menu", "Left paddle", "Right paddle", "L3 + R3"])
+                         ["Off", "PS / Xbox + Down", "View + Menu", "Left paddle", "Right paddle", "L3 + R3"])
         self.assertEqual(ctl.icon.kind, "gamepad")
+        self.right()                                   # View + Menu
+        self.assertEqual(ctl.value, "view_menu")
         self.right()                                   # Left paddle
         self.assertEqual(ctl.value, "left_paddle")
         self.assertEqual(bar.changes(), {"controller": "left_paddle"})
@@ -2256,13 +2294,27 @@ class ControllerBar(unittest.TestCase):
         self.wait_for(lambda: calls == [1])
 
     def test_chord_closes_on_a_tap_by_default(self):
+        """PS + Down (the default) on a tap closes the bar, without moving the focus first."""
         bar = self.open(FakeDaemon(True))
         bar.resident = True
-        self.press(gamepad.BTN_SELECT, gamepad.BTN_START)          # a quick press is enough
+        focus = QApplication.focusWidget()
+        self.dev.push(gamepad.EV_KEY, gamepad.BTN_MODE, 1)
+        pump(self.app, 0.03)
+        self.assertIs(QApplication.focusWidget(), focus)
+        self.dev.push(gamepad.EV_ABS, gamepad.ABS_HAT0Y, 1)       # a quick press is enough
+        pump(self.app, 0.03)
         self.assertFalse(bar.isVisible())
         self.assertFalse(self.dev.grabbed)
 
+    def test_view_menu_still_closes(self):
+        self.use_view_menu()
+        bar = self.open(FakeDaemon(True))
+        bar.resident = True
+        self.press(gamepad.BTN_SELECT, gamepad.BTN_START)
+        self.assertFalse(bar.isVisible())
+
     def test_chord_closes_when_held(self):
+        self.use_view_menu()
         config.set_value("controller", "hold_ms", 300, self.cfg)   # Open with: Hold
         bar = self.open(FakeDaemon(True))
         bar.resident = True
@@ -2276,6 +2328,7 @@ class ControllerBar(unittest.TestCase):
         """A shared pad's chord also reaches the daemon, which toggles the bar: the bar
         must not close it as well (that would close and reopen it)."""
         self.grab_error = 16
+        self.use_view_menu()
         bar = self.open(FakeDaemon(True))
         bar.resident = True
         self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.7)

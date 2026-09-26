@@ -403,10 +403,13 @@ class Daemon:
     def _sync_controller(self) -> None:
         """Watch the controllers for the chord while [controller] enabled (else let go).
 
-        Chord only: the daemon never navigates and never grabs a controller; its hub
-        reads key events alone, so stick movement in a game doesn't wake it up. While
-        the bar is open it takes the controllers over, and then its own hub sees the
-        chord (and closes it).
+        Chord only: the daemon never navigates; its hub reads key events alone, so
+        stick movement in a game doesn't wake it up. A shortcut with a D-pad direction
+        (the default, PS/Xbox/Home + D-pad Down) also reads the D-pad while its first
+        button is held, and with ``exclusive`` holds that controller meanwhile, so the
+        game never sees the D-pad press (gamepad.py, "Shortcut with a D-pad
+        direction"). While the bar is open it takes the controllers over, and then
+        its own hub sees the chord (and closes it).
         """
         if not self._pads_managed:
             return
@@ -416,12 +419,13 @@ class Daemon:
             return
         if self.pads is not None:
             self.pads.set_chord(ctl["chord"], ctl["hold_ms"])
+            self.pads.set_chord_grab(ctl["exclusive"])
             return
         from . import gamepad
 
         factory = self.pad_factory or gamepad.Gamepads
         hub = factory(navigate=False, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
-                      on_chord=self._on_pad_chord)
+                      chord_grab=ctl["exclusive"], on_chord=self._on_pad_chord)
         try:
             started = hub.start()
         except Exception:  # noqa: BLE001 - a controller problem must not stop the recorder
