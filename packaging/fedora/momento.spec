@@ -1,4 +1,4 @@
-# Fedora / COPR spec for Momento. Publish: see docs/PUBLISHING.md ("Fedora COPR").
+# Fedora / COPR spec for Momento.
 #
 # Build locally:  spectool -g momento.spec && rpmbuild -ba momento.spec
 #   (or: fedpkg --release f44 mockbuild,  or: copr-cli build momento momento-*.src.rpm)

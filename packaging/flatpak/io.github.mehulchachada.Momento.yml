@@ -4,7 +4,7 @@
 #   flatpak run org.flatpak.Builder --user --install --force-clean \
 #       --install-deps-from=flathub build-dir packaging/flatpak/io.github.mehulchachada.Momento.yml
 #   (for an uncommitted tree, swap the momento module's source for
-#    `- type: dir` / `path: ../..` — see docs/PUBLISHING.md)
+#    `- type: dir` / `path: ../..`)
 #
 # Runtime choice: org.kde.Platform 6.11 + io.qt.PySide.BaseApp 6.11.
 #  * The BaseApp's PySide6 is built against the runtime's own Qt, so the
