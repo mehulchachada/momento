@@ -7,6 +7,10 @@ Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3}-*.pn
 stands in for the game.
 """
 
+try:
+    from tests import _sandbox  # noqa: F401  -- must come before any momento import
+except ImportError:  # run as a script from tests/
+    import _sandbox  # noqa: F401
 import os
 import sys
 import tempfile

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+try:
+    from tests import _sandbox  # noqa: F401  -- must come before any momento import
+except ImportError:  # run as a script from tests/
+    import _sandbox  # noqa: F401
+
 import json
 import os
 import shutil

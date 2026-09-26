@@ -3,6 +3,10 @@
 Runs with pytest, or standalone: python3 tests/test_pipeline_live.py
 """
 
+try:
+    from tests import _sandbox  # noqa: F401  -- must come before any momento import
+except ImportError:  # run as a script from tests/
+    import _sandbox  # noqa: F401
 import copy
 import json
 import shutil
