@@ -31,8 +31,8 @@ KEYS = {
     "controller": "off, on, or the shortcut that opens the bar: view_menu, left_paddle, right_paddle, "
                   "l3_r3, or buttons joined with + (e.g. select+start)",
     "controller_exclusive": "on, off (take the controller over while the bar is open)",
-    "controller_open": "hold, tap (hold the shortcut for a moment to open the bar, or open it the "
-                       "instant the buttons are down)",
+    "controller_open": "hold, tap (tap, the default, opens the bar the instant the buttons are "
+                       "down; hold waits until they have been held for 0.3 s)",
     "keep_history": "off, on (keep the replay when recording stops, and save every full hour "
                     "to your clips folder)",
     "hour_warning": "10, 5, 3 (minutes before the hour mark to warn; any whole number 3-10)",
@@ -62,8 +62,8 @@ _RECORD_ALIASES = {"screen": "screen", "full": "screen", "fullscreen": "screen",
                    "app": "window"}
 
 # How the controller shortcut opens the bar: user-facing value -> clip-bar label.
-# "hold" is [controller] hold_ms above 0 (the default, 0.3 s), "tap" is hold_ms = 0
-# (open the instant every button of the shortcut is down).
+# "tap" is [controller] hold_ms = 0 (the default: open the instant every button of
+# the shortcut is down), "hold" is hold_ms above 0 (config.HOLD_MS, 0.3 s).
 CONTROLLER_OPEN_LABELS = {"hold": "Hold", "tap": "Tap"}
 _OPEN_ALIASES = {"hold": "hold", "long": "hold", "tap": "tap", "press": "tap", "instant": "tap"}
 
@@ -269,7 +269,7 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
     if key == "controller_exclusive":
         return [("controller", "exclusive", value == "on")]
     if key == "controller_open":
-        hold = config.DEFAULTS["controller"]["hold_ms"] if value == "hold" else 0
+        hold = config.HOLD_MS if value == "hold" else 0
         return [("controller", "hold_ms", hold)]
     if key == "keep_history":
         return [("buffer", "keep_history", value == "on")]

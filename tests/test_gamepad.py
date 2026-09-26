@@ -323,7 +323,7 @@ class Repeat(Base):
 
 class Chord(Base):
     def test_both_held_fires_once(self):
-        hub = self.hub()
+        hub = self.hub(hold_ms=300)
         d = self.dev()
         hub.add_device(d)
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
@@ -338,7 +338,7 @@ class Chord(Base):
         self.assertEqual(len(self.chords), 1)
 
     def test_released_early_does_not_fire(self):
-        hub = self.hub()
+        hub = self.hub(hold_ms=300)
         d = self.dev()
         hub.add_device(d)
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
@@ -354,7 +354,7 @@ class Chord(Base):
         self.assertEqual(self.chords, [101.3])
 
     def test_rearm_after_release(self):
-        hub = self.hub()
+        hub = self.hub(hold_ms=300)
         d = self.dev()
         hub.add_device(d)
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
@@ -382,7 +382,7 @@ class Chord(Base):
 
     def test_held_when_opened_needs_release(self):
         """The bar opens while the chord that opened it is still down: no second fire."""
-        hub = self.hub()
+        hub = self.hub(hold_ms=300)
         d = self.dev()
         d.held |= {BTN_SELECT, BTN_START}
         hub.add_device(d)
@@ -454,6 +454,17 @@ class Chord(Base):
         self.push(hub, d, EV_KEY, BTN_SELECT, 1)
         self.assertEqual(self.chords, [100.1])
 
+    def test_default_opens_on_press(self):
+        """The default (like [controller] hold_ms) is a tap: no hold, no timer."""
+        hub = self.hub()
+        self.assertEqual(hub.hold, 0)
+        d = self.dev()
+        hub.add_device(d)
+        self.push(hub, d, EV_KEY, BTN_SELECT, 1)
+        self.push(hub, d, EV_KEY, BTN_START, 1)
+        self.assertEqual(self.chords, [100.0])
+        self.assertIsNone(hub.next_timeout())
+
     def test_disabled(self):
         hub = self.hub(chord=None)
         d = self.dev()
@@ -477,7 +488,9 @@ class Chord(Base):
             g.normalize_chord(buttons)
         self.assertEqual(g.chord_label(["mode", "south"]), "Mode + South")
         self.assertEqual(g.DEFAULT_CHORD, ("select", "start"))
-        self.assertEqual(g.DEFAULT_HOLD_MS, 300)
+        self.assertEqual(g.DEFAULT_HOLD_MS, 0)                 # a tap, like [controller] hold_ms
+        from momento import config
+        self.assertEqual(g.DEFAULT_HOLD_MS, config.DEFAULTS["controller"]["hold_ms"])
 
 
 class Grab(Base):

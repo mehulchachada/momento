@@ -150,7 +150,7 @@ keep_bar_loaded = true
 # SteamOS-likes and most gaming distros already have).
 enabled = true
 
-# Hold these buttons together to open or close the bar. Buttons are named by
+# Press these buttons together to open or close the bar. Buttons are named by
 # position, so they work on any brand:
 #   select = View / Share / Minus      start = Menu / Options / Plus
 #   mode = Guide / PS / Home           thumbl / thumbr = left / right stick click
@@ -159,10 +159,11 @@ enabled = true
 # Examples: ["select", "start"], ["left_paddle"], ["thumbl", "thumbr"]
 open_chord = ["select", "start"]
 
-# How long to hold them, in milliseconds (0-5000). 0 opens the bar the instant
-# they are all down (a tap; "Open with: Tap" in the bar's settings). A tap can
-# clash with emulators that use Select + Start, so the default is a short hold.
-hold_ms = 300
+# How long to hold them, in milliseconds (0-5000). 0 (the default) opens the bar
+# the instant they are all down: a tap ("Open with: Tap" in the bar's settings).
+# If an emulator you play uses Select + Start, set 300 ("Open with: Hold") so a
+# quick press there doesn't open the bar too.
+hold_ms = 0
 
 # While the bar is open, take the controller over so the game doesn't see the
 # presses. If another program already holds it, Momento shares it instead.

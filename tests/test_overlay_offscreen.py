@@ -404,7 +404,7 @@ class OverlayOffscreen(unittest.TestCase):
                          {"record": "window", "keep_history": "history", "resolution": "display",
                           "fps": "gauge", "quality": "sliders", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "controller_exclusive": "lock",
-                          "controller_open": "press_hold", "hour_warning": "hourglass", "instant_bar": "bolt"})
+                          "controller_open": "press_tap", "hour_warning": "hourglass", "instant_bar": "bolt"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
@@ -453,7 +453,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.tab_names[bar.tab], "Controller")
         self.assertTrue(bar.apply_btn.hasFocus())
         self.key(Qt.Key_Up)                      # the tab's last row
-        self.assertTrue(bar.row("controller_open").buttons[0].hasFocus())        # Hold
+        self.assertTrue(bar.row("controller_open").buttons[1].hasFocus())        # Tap (the default)
         self.key(Qt.Key_Up)
         self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())   # On
         self.key(Qt.Key_Up)
@@ -1357,22 +1357,22 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual((bar.height(), bar.y() + bar.height()), (h0 + self.PANEL + 1, bottom0))
         row = bar.row("controller_open")
         self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.value, row.icon.kind),
-                         ("Open with", ["Hold", "Tap"], "hold", "press_hold"))
+                         ("Open with", ["Hold", "Tap"], "tap", "press_tap"))        # a tap by default
         self.assertTrue(row.has_divider())
-        self.shot(bar, "settings-controller-hold", "controller")
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)
-        self.assertTrue(row.buttons[0].hasFocus())
-        self.key(Qt.Key_Right)                                    # Tap
-        self.assertEqual((row.value, row.icon.kind), ("tap", "press_tap"))
-        self.assertEqual(bar.changes(), {"controller_open": "tap"})
-        pump(self.app, 0.05)
         self.shot(bar, "settings-controller-tap", "controller")
-        daemon.configure_reply = {"ok": True, "changed": {"controller_open": "tap"}, "restarted": False,
+        self.key(Qt.Key_Down)
+        self.key(Qt.Key_Down)
+        self.assertTrue(row.buttons[1].hasFocus())
+        self.key(Qt.Key_Left)                                     # Hold
+        self.assertEqual((row.value, row.icon.kind), ("hold", "press_hold"))
+        self.assertEqual(bar.changes(), {"controller_open": "hold"})
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-controller-hold", "controller")
+        daemon.configure_reply = {"ok": True, "changed": {"controller_open": "hold"}, "restarted": False,
                                   "paused": False}
         self.key(Qt.Key_Return)
         self.wait_for(lambda: bar.apply_state == "done")
-        self.assertEqual(daemon.configures, [{"controller_open": "tap"}])
+        self.assertEqual(daemon.configures, [{"controller_open": "hold"}])
         self.assertIn("controller updated", bar.foot.text())
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
 
@@ -2011,7 +2011,7 @@ class ControllerBar(unittest.TestCase):
         self.assertTrue(self.dev.grabbed)
         self.assertEqual(bar.pads.grab_state(), "exclusive")
         self.assertEqual(self.made[-1]["chord"], ("select", "start"))
-        self.assertEqual(self.made[-1]["hold_ms"], 300)
+        self.assertEqual(self.made[-1]["hold_ms"], 0)            # the default: a tap
         self.assertTrue(self.made[-1]["navigate"])
         first = self.dev
         bar.hide()
@@ -2159,7 +2159,7 @@ class ControllerBar(unittest.TestCase):
         self.down()
         self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())
         self.down()
-        self.assertTrue(bar.row("controller_open").buttons[0].hasFocus())       # Hold
+        self.assertTrue(bar.row("controller_open").buttons[1].hasFocus())       # Tap (the default)
         self.down()                                    # the footer
         self.assertTrue(bar.apply_btn.hasFocus())
         self.right()
@@ -2245,7 +2245,15 @@ class ControllerBar(unittest.TestCase):
         self.press(self.A)                             # play starts Momento
         self.wait_for(lambda: calls == [1])
 
+    def test_chord_closes_on_a_tap_by_default(self):
+        bar = self.open(FakeDaemon(True))
+        bar.resident = True
+        self.press(gamepad.BTN_SELECT, gamepad.BTN_START)          # a quick press is enough
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(self.dev.grabbed)
+
     def test_chord_closes_when_held(self):
+        config.set_value("controller", "hold_ms", 300, self.cfg)   # Open with: Hold
         bar = self.open(FakeDaemon(True))
         bar.resident = True
         self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.2)

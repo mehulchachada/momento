@@ -703,7 +703,7 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
-             "controller_exclusive": "lock", "controller_open": "press_hold", "keep_history": "history",
+             "controller_exclusive": "lock", "controller_open": "press_tap", "keep_history": "history",
              "hour_warning": "hourglass", "instant_bar": "bolt"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
 ROW_TITLES = {"record": "Record", "keep_history": "Keep history", "resolution": "Resolution",

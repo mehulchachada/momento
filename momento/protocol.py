@@ -322,7 +322,7 @@ SETTING_VALUES = {
     # joined with "+" ("select+mode"); configure also takes "on" (enable, keep the shortcut)
     "controller": (("string",), False),
     "controller_exclusive": (("string",), False),   # "on" | "off"
-    # "hold" ([controller] hold_ms above 0, default 300) | "tap" (hold_ms = 0: opens on press)
+    # "tap" (hold_ms = 0, the default: opens on press) | "hold" ([controller] hold_ms above 0, 300 when chosen)
     "controller_open": (("string",), False),
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
     "hour_warning": (("integer",), False),  # minutes before the hour mark to warn: 3-10 (UI: 10, 5, 3)

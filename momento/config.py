@@ -32,6 +32,9 @@ def _videos_dir() -> Path:
     return Path.home() / "Videos"
 
 
+# The hold that "Open with: Hold" writes to [controller] hold_ms, in ms.
+HOLD_MS = 300
+
 DEFAULTS = {
     "capture": {
         # auto | portal | gamescope | x11 | test
@@ -88,7 +91,7 @@ DEFAULTS = {
         "keep_bar_loaded": True,
     },
     "controller": {
-        # Game controllers (needs python-evdev): hold the shortcut to open or close
+        # Game controllers (needs python-evdev): press the shortcut to open or close
         # the clip bar, then use the D-pad / stick and A / B.
         "enabled": True,
         # Buttons held together, by position: select (View / Share / Minus),
@@ -96,7 +99,7 @@ DEFAULTS = {
         # (stick clicks), tl / tr (bumpers), south / east / north / west, or
         # left_paddle / right_paddle (back buttons on Elite-style pads and handhelds).
         "open_chord": ["select", "start"],
-        "hold_ms": 300,
+        "hold_ms": 0,     # 0 = open on a tap; HOLD_MS for "Open with: Hold"
         # Take the controller over while the bar is open, so the game doesn't see
         # the presses (falls back to sharing it where that isn't possible).
         "exclusive": True,

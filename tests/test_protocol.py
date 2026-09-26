@@ -433,7 +433,11 @@ class DaemonContractTest(_DaemonCase):
 
     def test_controller_open(self):
         r = self.check({"cmd": "settings"}, ok=True)
-        self.assertEqual((r["values"]["controller_open"], r["choices"]["controller_open"]), ("hold", ["hold", "tap"]))
+        self.assertEqual((r["values"]["controller_open"], r["choices"]["controller_open"]), ("tap", ["hold", "tap"]))
+        r = self.check({"cmd": "configure", "changes": {"controller_open": "hold"}}, ok=True)
+        self.assertEqual((r["changed"], r["restarted"], r["state"]), ({"controller_open": "hold"}, False, "recording"))
+        self.assertIn("hold_ms = 300", self.path.read_text())
+        self.assertEqual(self.check({"cmd": "settings"}, ok=True)["values"]["controller_open"], "hold")
         r = self.check({"cmd": "configure", "changes": {"controller_open": "tap"}}, ok=True)
         self.assertEqual((r["changed"], r["restarted"], r["state"]), ({"controller_open": "tap"}, False, "recording"))
         self.assertIn("hold_ms = 0", self.path.read_text())
