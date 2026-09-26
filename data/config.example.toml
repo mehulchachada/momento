@@ -124,3 +124,24 @@ trigger = "LOGO+SHIFT+g"
 # on every press instead: no memory used between presses, but the bar takes
 # about 0.3-0.5 s to appear.
 keep_bar_loaded = true
+
+[controller]
+# Use a game controller with the clip bar (needs python-evdev, which Bazzite,
+# SteamOS-likes and most gaming distros already have).
+enabled = true
+
+# Hold these buttons together to open or close the bar. Buttons are named by
+# position, so they work on any brand:
+#   select = View / Share / Minus      start = Menu / Options / Plus
+#   mode = Guide / PS / Home           thumbl / thumbr = left / right stick click
+#   tl / tr = bumpers                  south / east / north / west = face buttons
+#   left_paddle / right_paddle = back buttons (Elite pads, ROG Ally, Legion Go...)
+# Examples: ["select", "start"], ["left_paddle"], ["thumbl", "thumbr"]
+open_chord = ["select", "start"]
+
+# How long to hold them, in milliseconds (0-5000).
+hold_ms = 500
+
+# While the bar is open, take the controller over so the game doesn't see the
+# presses. If another program already holds it, Momento shares it instead.
+exclusive = true

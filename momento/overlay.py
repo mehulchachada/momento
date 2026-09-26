@@ -102,6 +102,9 @@ RING = "#EDEDED"         # keyboard focus ring around a white pill
 GREEN = "#4CC38A"
 YELLOW = "#F5C542"
 
+# Builds the bar's controller hub (momento.gamepad.Gamepads); tests swap in fakes.
+PAD_FACTORY = None
+
 PAUSED_HINT = "Paused · saving uses the footage so far"
 NO_WINDOW_HINT = "Game closed · press play to pick a window"
 
@@ -503,15 +506,48 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "back":
         p.drawLine(P(x - 6, y), P(x + 6, y))
         p.drawPolyline(QPolygonF([P(x - 1.5, y - 4.5), P(x - 6, y), P(x - 1.5, y + 4.5)]))
+    elif kind == "gamepad":
+        # a controller: body with two grips, a D-pad cross and two face buttons
+        body = QPainterPath(P(x - 4, y - 4.5))
+        body.lineTo(x + 4, y - 4.5)
+        body.cubicTo(x + 7, y - 4.5, x + 8, y - 2.5, x + 8.2, y + 1.5)
+        body.cubicTo(x + 8.4, y + 5, x + 7.4, y + 6.2, x + 6, y + 6.2)
+        body.cubicTo(x + 4.6, y + 6.2, x + 4, y + 4.4, x + 2.6, y + 3.2)
+        body.lineTo(x - 2.6, y + 3.2)
+        body.cubicTo(x - 4, y + 4.4, x - 4.6, y + 6.2, x - 6, y + 6.2)
+        body.cubicTo(x - 7.4, y + 6.2, x - 8.4, y + 5, x - 8.2, y + 1.5)
+        body.cubicTo(x - 8, y - 2.5, x - 7, y - 4.5, x - 4, y - 4.5)
+        p.drawPath(body)
+        thin = QPen(pen)
+        thin.setWidthF(max(1.2, width - 0.2))
+        p.setPen(thin)
+        p.drawLine(P(x - 4.6, y - 0.6), P(x - 1.8, y - 0.6))
+        p.drawLine(P(x - 3.2, y - 2), P(x - 3.2, y + 0.8))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(P(x + 3.8, y - 1.6), 0.95, 0.95)
+        p.drawEllipse(P(x + 2.4, y + 0.6), 0.95, 0.95)
     p.restore()
 
 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
-             "audio_source": "speaker", "mic": "mic", "mic_device": "micdev"}
+             "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad"}
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
+
+
+class _PadKey:
+    """A controller action dressed as the key event ``Bar.handle_key`` expects."""
+
+    __slots__ = ("_k",)
+
+    def __init__(self, k):
+        self._k = k
+
+    def key(self):
+        return self._k
 
 
 def _build(argv=None):  # noqa: C901 - one cohesive UI builder
@@ -521,7 +557,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                                    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
-    from . import config, ipc, quality, settings
+    from . import config, gamepad, ipc, quality, settings
 
     class Bridge(QObject):
         # Every result carries the open it belongs to (Bar.gen): a resident bar
@@ -1063,6 +1099,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.live_ticking = False
             self.max_seconds = 3600.0
             self.change_btn = None    # settings: "Change window" (window mode)
+            self.applied = None       # settings: the changes the last Apply sent
+            self.pads = None          # game controllers while the bar is on screen
+            self.pads_handle = None
             self.bridge = Bridge()
             self.bridge.status.connect(self._sig_status)
             self.bridge.saved.connect(self._sig_saved)
@@ -1071,6 +1110,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.bridge.control.connect(self._sig_control)
             self.bridge.started.connect(self._sig_started)
             QApplication.instance().focusChanged.connect(self.on_focus_changed)
+            QApplication.instance().aboutToQuit.connect(self.pads_close)  # one-shot bar: let go first
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAutoFillBackground(False)
             self.setWindowTitle("Momento")
@@ -1527,10 +1567,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.shown_at = time.time()
             if self.live_ticking:
                 self.ticker.start()   # the timer only runs while the bar is on screen
+            self.after(0, self.pads_open)  # after the first paint: opening devices takes a few ms
             super().showEvent(ev)
 
         def hideEvent(self, ev):
             self.ticker.stop()
+            self.pads_close()         # a hidden bar holds no controller (and no fds)
             super().hideEvent(ev)
 
         def choose(self, opt):
@@ -1852,6 +1894,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 SettingRow(self, "mic_device", "Mic device", micdev, vals["mic_device"], avail,
                            cycle=len(micdev) - 1 > CYCLE_OVER),
             ]
+            if "controller" in vals and data.get("controller_available", True):
+                ctl = [("off", "Off")] + [(k, label) for k, label, _b in gamepad.CHORD_PRESETS]
+                if vals["controller"] not in [c[0] for c in ctl]:
+                    ctl.append((vals["controller"], settings.controller_label(vals["controller"]), True))
+                self.rows.append(SettingRow(self, "controller", "Controller", ctl, vals["controller"], avail))
             for r in self.rows:
                 self.panel_lay.addWidget(r)
             self.row("mic_device").setHidden(vals["mic"] != "on")
@@ -1986,6 +2033,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.close_settings()
                 return
             self.apply_state = "busy"
+            self.applied = dict(changes)
             self.idle.stop()
             self.foot.setText("Applying…")
             online, path = bool(self.sdata.get("online")), self.sdata.get("config")
@@ -2034,14 +2082,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                                     "recording": False, "error": r.get("warning")}
                 self.after(APPLY_CLOSE_MS, self.after_apply)
                 return
+            # Controller settings apply at once, without restarting the recording.
+            pads_only = bool(self.applied) and set(self.applied) <= set(settings.CONTROLLER_KEYS)
             if not r.get("online"):
                 tail = "takes effect when Momento starts"
+            elif pads_only:
+                tail = "controller updated"
             elif r.get("paused"):
                 tail = "applies when you resume"
             else:
                 tail = "recording restarted"
             self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— {tail}</span>")
-            if r.get("online") and not r.get("paused"):
+            if r.get("online") and not r.get("paused") and not pads_only:
                 # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
                                     "recording": False}
@@ -2113,6 +2165,102 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.cancel_confirm()
             return True
 
+        # ---------------- game controllers
+        # While the bar is on screen it reads the controllers itself and (with
+        # [controller] exclusive) takes them over, so the game doesn't see the
+        # presses. Actions go through the same paths as the keyboard.
+        PAD_KEYS = {"up": Qt.Key_Up, "down": Qt.Key_Down, "left": Qt.Key_Left, "right": Qt.Key_Right,
+                    "accept": Qt.Key_Return, "back": Qt.Key_Escape}
+
+        def pads_open(self):
+            if self.pads is not None or not self.isVisible():
+                return
+            try:
+                ctl = config.load_controller()
+            except Exception:  # noqa: BLE001 - never let the controller break the bar
+                log.exception("cannot read the controller settings")
+                return
+            if not ctl["enabled"]:
+                return
+            factory = PAD_FACTORY or gamepad.Gamepads
+            hub = factory(navigate=True, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
+                          on_action=self.on_pad_action, on_chord=self.on_pad_chord)
+            try:
+                ok = hub.start()
+            except Exception:  # noqa: BLE001
+                log.exception("controller support failed to start")
+                ok = False
+            if not ok:
+                hub.close()
+                return
+            self.pads = hub
+            self.pads_handle = hub.attach_qt(self)
+            if ctl["exclusive"]:
+                hub.grab()
+
+        def pads_close(self):
+            hub, self.pads = self.pads, None
+            handle, self.pads_handle = self.pads_handle, None
+            try:
+                if handle is not None:
+                    handle.detach()
+            finally:
+                if hub is not None:
+                    hub.close()       # ungrabs first
+
+        def on_pad_action(self, action, repeat=False):
+            if not self.isVisible():
+                return
+            if not self.saving and not self.done:
+                self.idle.start()     # like a key press: restart the auto-hide
+            self.set_focus_visible(True)
+            if action in ("prev_section", "next_section"):
+                self.pad_section(-1 if action == "prev_section" else 1)
+                return
+            k = self.PAD_KEYS.get(action)
+            if action == "settings" and self.mode == "clip":
+                k = Qt.Key_S          # Y / Triangle: settings
+            elif action == "pause" and self.mode == "clip":
+                k = Qt.Key_P          # X / Square: pause / resume (play when off)
+            if k is not None:
+                self.handle_key(_PadKey(k))
+
+        def pad_section(self, d):
+            """Bumpers: jump between groups (clip lengths / buttons; first row / Apply)."""
+            if self.mode == "settings":
+                if self.apply_state in ("busy", "done"):
+                    return
+                rows = self.visible_rows()
+                if d < 0 and rows:
+                    rows[0].focus()
+                elif d > 0:
+                    (self.apply_btn if self.apply_btn.isEnabled() else self.back_btn).setFocus(Qt.TabFocusReason)
+            elif self.mode == "confirm":
+                self.confirm_key(Qt.Key_Left)
+            elif not (self.saving or self.done or self.control_busy):
+                items = self.focusables()
+                opts = [w for w in items if w in self.options]
+                rest = [w for w in items if w not in self.options]
+                if d < 0 and opts:
+                    if QApplication.focusWidget() in opts:
+                        opts[0].setFocus(Qt.TabFocusReason)
+                    else:
+                        self.focus_default()
+                elif d > 0 and rest:
+                    rest[0].setFocus(Qt.TabFocusReason)
+
+        def on_pad_chord(self):
+            """The controller shortcut while the bar is open: close it (it toggles).
+
+            Only for a controller we hold: a shared one also reaches the daemon, which
+            toggles the bar itself (both reacting would close and reopen it).
+            """
+            hub = self.pads
+            if hub is None or not self.isVisible():
+                return
+            if hub.is_grabbed(hub.last_chord_key) or not self.running:
+                self.close_bar()
+
         # ---------------- input
         def on_idle(self):
             if self.apply_state == "busy" or self.control_busy:
@@ -2160,6 +2308,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.control_busy = self.stopping = self.loading_settings = False
             self.status_inflight = False
             self.apply_state = None
+            self.applied = None
             self.mode = "clip"
             self.sdata = None
             self.clear_rows()

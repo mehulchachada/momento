@@ -28,7 +28,13 @@ KEYS = {
     "audio_source": "default, off, or an output's monitor source name",
     "mic": "on, off",
     "mic_device": "default, or an input source name",
+    "controller": "off, on, or the shortcut that opens the bar: view_menu, left_paddle, right_paddle, "
+                  "l3_r3, or buttons joined with + (e.g. select+start)",
+    "controller_exclusive": "on, off (take the controller over while the bar is open)",
 }
+
+# Settings that only concern the controller: changing them never restarts recording.
+CONTROLLER_KEYS = ("controller", "controller_exclusive")
 
 # What gets recorded: user-facing value -> label (the bar, `momento settings`).
 RECORD_LABELS = {"screen": "Full screen", "window": "Game window"}
@@ -108,7 +114,68 @@ def normalize(key: str, value):
         if v.lower() in ("default", DEFAULT_SOURCE.lower()):
             return "default"
         return _device(v)
+    if key == "controller":
+        return _controller(value)
+    if key == "controller_exclusive":
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        v = str(value).strip().lower()
+        if v in _ON:
+            return "on"
+        if v in _OFF:
+            return "off"
+        raise ValueError("choose one of: on, off")
     raise ValueError(f"unknown setting {key!r} (choose: {', '.join(KEYS)})")
+
+
+def controller_label(value: str) -> str:
+    """"view_menu" -> "View + Menu", "select+mode" -> "Select + Mode", "off" -> "Off"."""
+    from . import gamepad
+
+    if value in ("off", "on"):
+        return value.capitalize()
+    for key, label, _buttons in gamepad.CHORD_PRESETS:
+        if key == value:
+            return label
+    try:
+        return gamepad.chord_label(value)
+    except ValueError:
+        return str(value)
+
+
+def _chord_value(buttons) -> str:
+    """A preset key when the buttons match one, else "a+b"."""
+    from . import gamepad
+
+    names = gamepad.normalize_chord(buttons)
+    for key, _label, preset in gamepad.CHORD_PRESETS:
+        if tuple(preset) == names:
+            return key
+    return "+".join(names)
+
+
+def _controller(value) -> str:
+    """off | on | a preset key | "a+b" (validated button names)."""
+    from . import gamepad
+
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (list, tuple)):
+        return _chord_value(value)
+    v = " ".join(str(value).strip().lower().split())
+    if v in _ON:
+        return "on"
+    if v in _OFF:
+        return "off"
+    for key, label, buttons in gamepad.CHORD_PRESETS:
+        if v in (key, label.lower(), key.replace("_", " "), key.replace("_", "-")):
+            return key
+    try:
+        return _chord_value(v)
+    except ValueError as e:
+        presets = ", ".join(k for k, _l, _b in gamepad.CHORD_PRESETS)
+        why = str(e).split(";")[0]  # "unknown controller button 'turbo'"
+        raise ValueError(f"choose off, on, {presets}, or buttons joined with + ({why})") from None
 
 
 def validate(changes: dict) -> dict:
@@ -145,6 +212,16 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
         return [("audio", "microphone", value == "on")]
     if key == "mic_device":
         return [("audio", "microphone_device", DEFAULT_SOURCE if value == "default" else value)]
+    if key == "controller":
+        if value in ("on", "off"):
+            return [("controller", "enabled", value == "on")]
+        from . import gamepad
+
+        buttons = next((list(b) for k, _l, b in gamepad.CHORD_PRESETS if k == value), None)
+        return [("controller", "enabled", True),
+                ("controller", "open_chord", buttons or list(gamepad.normalize_chord(value)))]
+    if key == "controller_exclusive":
+        return [("controller", "exclusive", value == "on")]
     raise ValueError(f"unknown setting {key!r}")
 
 
@@ -153,6 +230,7 @@ def current(cfg: dict) -> dict:
     cap, a = cfg["capture"], cfg["audio"]
     dev = a.get("desktop_device") or DEFAULT_MONITOR
     mic_dev = a.get("microphone_device") or DEFAULT_SOURCE
+    ctl = config.controller(cfg)
     return {
         "record": config.capture_target(cap),
         "resolution": str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower(),
@@ -162,6 +240,8 @@ def current(cfg: dict) -> dict:
         "audio_source": "off" if not a.get("desktop") else "default" if dev == DEFAULT_MONITOR else dev,
         "mic": "on" if a.get("microphone") else "off",
         "mic_device": "default" if mic_dev == DEFAULT_SOURCE else mic_dev,
+        "controller": _chord_value(ctl["chord"]) if ctl["enabled"] else "off",
+        "controller_exclusive": "on" if ctl["exclusive"] else "off",
     }
 
 
@@ -177,7 +257,8 @@ def apply(changes: dict, path: Path | str | None = None) -> dict:
     for key, value in clean.items():
         for section, name, val in writes(key, value):
             config.set_value(section, name, val, path)
-    return {k: v for k, v in clean.items() if before.get(k) != v}
+    after = current(config.load(path))  # "controller": "on" reads back as the shortcut it enables
+    return {k: after.get(k, v) for k, v in clean.items() if before.get(k) != after.get(k, v)}
 
 
 def preview(cfg: dict, changes: dict) -> dict:
@@ -193,11 +274,16 @@ def preview(cfg: dict, changes: dict) -> dict:
 
 def describe(cfg: dict, devices: dict | None = None) -> dict:
     """Everything a settings UI needs: current values, choices, audio devices."""
+    from . import gamepad
+
     return {
         "ok": True,
         "values": current(cfg),
         "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
-                    "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES)},
+                    "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
+                    "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS]},
+        # python-evdev importable: without it the controller settings are saved but unused
+        "controller_available": gamepad.available(),
         "devices": list_audio_devices() if devices is None else devices,
         "fps": quality.fps(cfg["capture"]),
         "max_seconds": int(cfg["buffer"]["max_seconds"]),

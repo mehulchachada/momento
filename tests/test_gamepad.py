@@ -165,6 +165,15 @@ class Mapping(Base):
         self.push(hub, withhat, EV_KEY, BTN_TRIGGER_HAPPY1, 1)
         self.assertEqual(self.actions, [])
         self.assertEqual(self.buttons[-1], ("extra1", True))
+        # hid-steam style: a D-pad made of BTN_DPAD_* keys, and HAPPY1-4 for other buttons
+        steam = self.dev(path="/fake/c", keys=FakeDevice.XBOX_KEYS + (BTN_DPAD_DOWN, g.BTN_DPAD_UP,
+                         BTN_TRIGGER_HAPPY1), axes={ABS_X: _AbsInfo(0), ABS_Y: _AbsInfo(0)})
+        hub.add_device(steam)
+        self.push(hub, steam, EV_KEY, BTN_TRIGGER_HAPPY1, 1)
+        self.assertEqual(self.actions, [])
+        self.clock.t += 1                         # (not the same press as the xpad pad's "down")
+        self.push(hub, steam, EV_KEY, BTN_DPAD_DOWN, 1)
+        self.assertEqual(self.actions, [("down", False)])
 
     def test_stick_deadzone_xbox_range(self):
         hub = self.hub()
@@ -765,7 +774,15 @@ class QtLoop(unittest.TestCase):
     def test_repeat_on_a_qt_loop(self):
         from PySide6.QtCore import QCoreApplication, QEventLoop
 
-        app = QCoreApplication.instance() or QCoreApplication([])
+        app = QCoreApplication.instance()
+        if app is None:
+            # A widgets-capable app (later offscreen bar tests reuse it) that doesn't
+            # take over GLib's default context, which other tests run in a thread.
+            from PySide6.QtWidgets import QApplication
+
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            with mock.patch.dict(os.environ, {"QT_NO_GLIB": "1"}):
+                app = QApplication(["test"])
         got = []
         hub = Gamepads(on_action=lambda a, r: got.append((a, r)), hotplug="off", watchdog_thread=False,
                        repeat_delay_ms=60, repeat_interval_ms=30)

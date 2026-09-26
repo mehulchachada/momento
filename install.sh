@@ -164,7 +164,7 @@ detect_gpu() {
 
 # ------------------------------------------------ package names per need --
 # Verified in containers: Fedora 44, Ubuntu 24.04, Debian 13, Arch, Tumbleweed.
-# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl
+# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl evdev
 pkgs_for() {
     case "$FAMILY:$1" in
         fedora:python)   echo "python3" ;;
@@ -182,6 +182,7 @@ pkgs_for() {
                          if [ "$GPU_INTEL" = 1 ]; then echo "libva-intel-media-driver"; fi ;;
         fedora:layer)    echo "layer-shell-qt" ;;
         fedora:pactl)    echo "pulseaudio-utils" ;;
+        fedora:evdev)    echo "python3-evdev" ;;
 
         arch:python)     echo "python" ;;
         arch:gi)         echo "python-gobject gstreamer gst-plugins-base-libs" ;;
@@ -196,6 +197,7 @@ pkgs_for() {
                          if [ "$GPU_INTEL" = 1 ]; then echo "intel-media-driver"; fi ;;
         arch:layer)      echo "layer-shell-qt" ;;
         arch:pactl)      echo "libpulse" ;;
+        arch:evdev)      echo "python-evdev" ;;
 
         debian:python)   echo "python3" ;;
         debian:gi)       echo "python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools" ;;
@@ -211,6 +213,7 @@ pkgs_for() {
                          if [ "$GPU_INTEL" = 1 ]; then echo "intel-media-va-driver"; fi ;;
         debian:layer)    echo "layer-shell-qt" ;;
         debian:pactl)    echo "pulseaudio-utils" ;;
+        debian:evdev)    echo "python3-evdev" ;;
         debian:venv)     echo "python3-venv" ;;
 
         suse:python)     echo "python3" ;;
@@ -227,6 +230,7 @@ pkgs_for() {
                          if [ "$GPU_INTEL" = 1 ]; then echo "intel-media-driver"; fi ;;
         suse:layer)      echo "layer-shell-qt6" ;;
         suse:pactl)      echo "pulseaudio-utils" ;;
+        suse:evdev)      echo "python3-evdev" ;;
 
         *:python)   echo "python3 (3.11 or newer)" ;;
         *:gi)       echo "PyGObject + GStreamer introspection data (Gst, GstVideo)" ;;
@@ -240,6 +244,7 @@ pkgs_for() {
         *:h264)     echo "a GStreamer H.264 encoder: va (gst-plugins-bad) + your GPU's VA-API driver, nvcodec, x264 or openh264" ;;
         *:layer)    echo "layer-shell-qt (Qt 6)" ;;
         *:pactl)    echo "pactl (pulseaudio-utils / libpulse)" ;;
+        *:evdev)    echo "python-evdev" ;;
         *)          echo "" ;;
     esac
 }
@@ -406,6 +411,8 @@ check_deps() {
     if [ "$layer" = 1 ]; then ok "layer-shell-qt (clip bar above fullscreen games on KDE/wlroots)"
     else optneed layer "layer-shell-qt (clip bar above fullscreen games on KDE/wlroots)"; fi
     if have pactl; then ok "pactl (sound device menu)"; else optneed pactl "pactl (sound device menu)"; fi
+    if py_try 'import evdev'; then ok "python-evdev (game controllers)"
+    else optneed evdev "python-evdev (open and use the clip bar with a game controller)"; fi
 
     [ ${#MISSING[@]} -eq 0 ]
 }
@@ -548,7 +555,7 @@ deps_steamos() {
 deps_nixos() {
     warn "NixOS: this installer can't add system packages. Add these to your configuration"
     note "(or a nix-shell) and point MOMENTO_PYTHON at a Python that has them:"
-    note "  (python3.withPackages (p: [ p.pygobject3 p.dbus-python p.pyside6 ])) ffmpeg"
+    note "  (python3.withPackages (p: [ p.pygobject3 p.dbus-python p.pyside6 p.evdev ])) ffmpeg"
     note "  gst_all_1.{gstreamer,gst-plugins-base,gst-plugins-good,gst-plugins-bad,gst-plugins-ugly,gst-libav}"
     note "  pipewire (its GStreamer plugin), layer-shell-qt"
 }

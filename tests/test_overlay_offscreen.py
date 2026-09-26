@@ -28,7 +28,7 @@ from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPixmap  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from momento import config, ipc, overlay, quality, settings  # noqa: E402
+from momento import config, gamepad, ipc, overlay, quality, settings  # noqa: E402
 
 SHOT_DIR = Path(os.environ.get("MOMENTO_SHOT_DIR", "/tmp/claude-1000"))
 REAL_REQUEST = ipc.request  # the resident bar's control socket is always reached for real
@@ -366,7 +366,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.row("mic_device").isHidden())
         self.assertEqual({r.key: r.icon.kind for r in bar.rows},
                          {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
-                          "audio_source": "speaker", "mic": "mic", "mic_device": "micdev"})
+                          "audio_source": "speaker", "mic": "mic", "mic_device": "micdev",
+                          "controller": "gamepad"})
         xs = {r.icon.mapTo(bar, r.icon.rect().topLeft()).x() for r in bar.visible_rows()}
         self.assertEqual(len(xs), 1)             # one icon column
         self.assertTrue(all(r.height() == overlay.ROW_H for r in bar.rows))
@@ -395,6 +396,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Down)
         self.assertTrue(bar.row("mic_device").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
+        self.assertTrue(bar.row("controller").buttons[1].hasFocus())  # View + Menu
+        self.key(Qt.Key_Down)
         self.assertTrue(bar.apply_btn.hasFocus())
         pump(self.app, 0.05)
         self.shot(bar, "settings-apply", "v3")
@@ -402,6 +405,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.back_btn.hasFocus())
         self.key(Qt.Key_Left)
         self.assertTrue(bar.apply_btn.hasFocus())
+        self.key(Qt.Key_Up)
         self.key(Qt.Key_Up)
         self.key(Qt.Key_Up)
         self.key(Qt.Key_Up)                      # back on Sound
@@ -717,7 +721,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Return)                   # Enter does not apply
         pump(self.app, 0.1)
         self.assertEqual((bar.apply_state, daemon.configures), (None, []))
-        for _ in range(5):
+        for _ in range(6):                        # ... Mic, Controller, then the footer
             self.key(Qt.Key_Down)
         self.assertTrue(bar.back_btn.hasFocus())  # Apply is skipped
         self.key(Qt.Key_Left)
@@ -1306,6 +1310,338 @@ class ResidentBar(unittest.TestCase):
         self.assertEqual(box, [0])
         self.assertEqual(launched, [[], ["--resident"]])
         self.assertTrue(bar.isVisible())
+
+
+class ControllerBar(unittest.TestCase):
+    """The bar driven by a game controller (FakeDevice pads; no real device is touched)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(["test"])
+        SHOT_DIR.mkdir(parents=True, exist_ok=True)
+        cls._orig = ipc.request
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._last = overlay.LAST_FILE
+        overlay.LAST_FILE = Path(cls._tmp.name) / "overlay.last"
+
+    @classmethod
+    def tearDownClass(cls):
+        ipc.request = cls._orig
+        overlay.LAST_FILE = cls._last
+        cls._tmp.cleanup()
+
+    make = OverlayOffscreen.make
+    shot = OverlayOffscreen.shot
+    wait_for = OverlayOffscreen.wait_for
+    NO_WINDOW = OverlayOffscreen.NO_WINDOW
+
+    def setUp(self):
+        self.devs, self.hubs, self.made = [], [], []
+        self.grab_error = None
+        self.held = set()
+        self.addCleanup(setattr, overlay, "PAD_FACTORY", overlay.PAD_FACTORY)
+        overlay.PAD_FACTORY = self.factory
+        self.cfg = config.default_path()
+        self.assertTrue(str(self.cfg).startswith(os.environ["MOMENTO_TEST_SANDBOX"]))
+        self.addCleanup(self.cfg.unlink, True)
+
+    def tearDown(self):
+        for d in self.devs:
+            d.close()
+
+    def factory(self, **kw):
+        """A hub over one fake pad (a fresh one per open, like re-opening /dev/input)."""
+        self.made.append(kw)
+        dev = gamepad.FakeDevice(name="Test pad", path=f"/fake/pad{len(self.devs)}", grab_error=self.grab_error)
+        dev.held |= self.held
+        self.devs.append(dev)
+        hub = gamepad.Gamepads(lister=lambda: [dev.path], opener=lambda _p: dev, hotplug="off",
+                               watchdog_thread=False, **kw)
+        self.hubs.append(hub)
+        return hub
+
+    @property
+    def dev(self):
+        return self.devs[-1]
+
+    def press(self, *codes, hold=0.0):
+        for c in codes:
+            self.dev.push(gamepad.EV_KEY, c, 1)
+        pump(self.app, max(0.03, hold))
+        for c in codes:
+            self.dev.push(gamepad.EV_KEY, c, 0)
+        pump(self.app, 0.03)
+
+    def dpad(self, axis, value):
+        self.dev.push(gamepad.EV_ABS, axis, value)
+        self.dev.push(gamepad.EV_ABS, axis, 0)
+        pump(self.app, 0.03)
+
+    def right(self):
+        self.dpad(gamepad.ABS_HAT0X, 1)
+
+    def left(self):
+        self.dpad(gamepad.ABS_HAT0X, -1)
+
+    def down(self):
+        self.dpad(gamepad.ABS_HAT0Y, 1)
+
+    def up(self):
+        self.dpad(gamepad.ABS_HAT0Y, -1)
+
+    A, B, X, Y = gamepad.BTN_SOUTH, gamepad.BTN_EAST, gamepad.BTN_X, gamepad.BTN_Y   # xbox layout
+    LB, RB = gamepad.BTN_TL, gamepad.BTN_TR
+
+    def open(self, daemon):
+        bar = self.make(daemon)
+        self.wait_for(lambda: bar.pads is not None)
+        return bar
+
+    # ------------------------------------------------------------------ tests
+    def test_grab_on_show_release_on_hide(self):
+        bar = self.open(FakeDaemon(True))
+        self.assertTrue(self.dev.grabbed)
+        self.assertEqual(bar.pads.grab_state(), "exclusive")
+        self.assertEqual(self.made[-1]["chord"], ("select", "start"))
+        self.assertEqual(self.made[-1]["hold_ms"], 500)
+        self.assertTrue(self.made[-1]["navigate"])
+        first = self.dev
+        bar.hide()
+        self.assertIsNone(bar.pads)
+        self.assertFalse(first.grabbed)
+        self.assertTrue(first.closed)                  # a hidden bar holds no fds
+        bar.show()
+        self.wait_for(lambda: bar.pads is not None)
+        self.assertIsNot(self.dev, first)
+        self.assertTrue(self.dev.grabbed)
+
+    def test_resident_present_and_dismiss(self):
+        bar = self.make(FakeDaemon(True))
+        bar.hide()
+        bar.resident = True
+        bar.present()
+        self.wait_for(lambda: bar.pads is not None)
+        self.assertTrue(self.dev.grabbed)
+        bar.dismiss()
+        self.assertFalse(self.dev.grabbed)
+        self.assertIsNone(bar.pads)
+
+    def test_config_off_and_shared(self):
+        config.set_value("controller", "exclusive", False, self.cfg)
+        bar = self.open(FakeDaemon(True))
+        self.assertFalse(self.dev.grabbed)
+        self.assertEqual(bar.pads.grab_state(), "off")
+        self.right()                                    # still navigates, just shared
+        self.assertTrue(bar.options[overlay.PRESETS.index(next(p for p in overlay.PRESETS
+                        if p[0] == overlay._last_choice())) + 1].hasFocus())
+        bar.hide()
+        config.set_value("controller", "enabled", False, self.cfg)
+        n = len(self.made)
+        bar.show()
+        pump(self.app, 0.1)
+        self.assertIsNone(bar.pads)
+        self.assertEqual(len(self.made), n)            # not even opened
+
+    def test_grab_failure_keeps_working(self):
+        self.grab_error = 16                           # EBUSY: someone else holds it
+        bar = self.open(FakeDaemon(True))
+        self.assertFalse(self.dev.grabbed)
+        self.assertEqual(bar.pads.grab_state(), "shared")
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+
+    def test_held_chord_grabbed_after_release(self):
+        """Opened by the chord: the pad is taken over only once it is released, so the
+        game sees the release and nothing stays pressed in it."""
+        self.held = {gamepad.BTN_SELECT, gamepad.BTN_START}
+        bar = self.open(FakeDaemon(True))
+        self.assertFalse(self.dev.grabbed)
+        self.dev.push(gamepad.EV_KEY, gamepad.BTN_SELECT, 0)
+        self.dev.push(gamepad.EV_KEY, gamepad.BTN_START, 0)
+        self.wait_for(lambda: self.dev.grabbed)
+        self.assertTrue(bar.isVisible())               # the release didn't re-toggle it
+
+    def test_clip_view(self):
+        overlay.LAST_FILE.unlink(missing_ok=True)      # default length: 1m
+        daemon = FakeDaemon(True)
+        bar = self.open(daemon)
+        i = next(i for i, o in enumerate(bar.options) if o.hasFocus())
+        self.right()
+        self.assertTrue(bar.options[i + 1].hasFocus())
+        self.left()
+        self.left()
+        self.assertTrue(bar.options[i - 1].hasFocus())
+        self.down()                                    # down = next, like the keyboard
+        self.assertTrue(bar.options[i].hasFocus())
+        self.press(self.RB)                            # bumpers jump between groups
+        self.assertTrue(bar.controls[0]["gear"].hasFocus())
+        self.press(self.LB)
+        self.assertTrue(bar.options[i].hasFocus())
+        self.press(self.LB)
+        self.assertTrue(bar.options[0].hasFocus())
+        self.assertTrue(bar.focus_visible)
+        bar.options[i].setFocus()
+        pump(self.app, 0.05)
+        self.shot(bar, "clip-controller-focus", "v6")
+        self.press(self.A)                             # save
+        self.wait_for(lambda: daemon.saves == [bar.options[i].seconds])
+        self.wait_for(lambda: bar.done)
+
+    def test_back_closes_and_x_pauses(self):
+        daemon = FakeDaemon(True)
+        bar = self.open(daemon)
+        self.press(self.X)
+        self.wait_for(lambda: daemon.controls == ["pause"])
+        self.wait_for(lambda: bar.view == "paused")
+        bar.resident = True
+        self.press(self.B)
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(self.devs[-1].grabbed)
+
+    def test_settings_view(self):
+        daemon = FakeDaemon(True)
+        bar = self.open(daemon)
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+        pump(self.app, 0.05)
+        self.assertTrue(bar.row("record").buttons[0].hasFocus())
+        self.down()
+        self.right()                                   # 1440p
+        self.assertEqual(bar.row("resolution").value, "1440p")
+        self.left()
+        self.press(self.RB)                            # to Apply
+        self.assertTrue(bar.apply_btn.hasFocus())
+        self.right()
+        self.assertTrue(bar.back_btn.hasFocus())
+        self.press(self.LB)                            # back to the first row
+        self.assertTrue(bar.row("record").buttons[0].hasFocus())
+        self.right()                                   # Game window
+        self.assertEqual(bar.row("record").value, "window")
+        self.left()
+        for _ in range(6):                             # resolution ... mic, controller
+            self.down()
+        ctl = bar.row("controller")
+        self.assertTrue(ctl.buttons[1].hasFocus())
+        self.assertEqual([b.text() for b in ctl.buttons],
+                         ["Off", "View + Menu", "Left paddle", "Right paddle", "L3 + R3"])
+        self.assertEqual(ctl.icon.kind, "gamepad")
+        self.right()                                   # Left paddle
+        self.assertEqual(ctl.value, "left_paddle")
+        self.assertEqual(bar.changes(), {"controller": "left_paddle"})
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-controller", "v6")
+        self.press(self.A)                             # apply
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertEqual(daemon.configures, [{"controller": "left_paddle"}])
+        self.assertIn("controller updated", bar.foot.text())
+        self.shot(bar, "settings-controller-saved", "v6")
+        self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
+
+    def test_settings_back_and_change_window(self):
+        daemon = FakeDaemon(True, values={"record": "window"}, extra={"target": "window"})
+        bar = self.open(daemon)
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+        pump(self.app, 0.05)
+        self.right()                                   # past "Game window": Change window
+        self.assertTrue(bar.change_btn.hasFocus())
+        self.press(self.B)                             # Back
+        self.assertEqual(bar.mode, "clip")
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+        pump(self.app, 0.05)
+        self.right()
+        bar.resident = True
+        self.press(self.A)                             # Change window
+        self.wait_for(lambda: daemon.controls == ["pick_window"])
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+        self.assertEqual(daemon.configures, [])
+
+    def test_stop_confirmation(self):
+        daemon = FakeDaemon(True)
+        bar = self.open(daemon)
+        self.press(self.RB)                            # gear
+        self.right()
+        self.right()                                   # stop
+        self.assertTrue(bar.controls[0]["stop"].hasFocus())
+        self.press(self.A)
+        self.assertEqual(bar.mode, "confirm")
+        self.assertTrue(bar.stop_no.hasFocus())        # the safe choice first
+        self.right()
+        self.assertTrue(bar.stop_yes.hasFocus())
+        self.press(self.LB)
+        self.assertTrue(bar.stop_no.hasFocus())
+        self.press(self.B)                             # cancel
+        self.assertEqual(bar.mode, "clip")
+        self.assertEqual(daemon.controls, [])
+        self.press(self.A)                             # stop again (focus is back on it)
+        self.left()
+        self.press(self.A)                             # Stop
+        self.wait_for(lambda: daemon.controls == ["stop"])
+
+    def test_no_window_and_off(self):
+        daemon = FakeDaemon(True, extra=dict(self.NO_WINDOW))
+        bar = self.open(daemon)
+        bar.resident = True
+        self.press(self.X)                             # play = pick a window
+        self.wait_for(lambda: daemon.controls == ["pick_window"])
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+        self.assertFalse(self.dev.grabbed)
+
+        calls = []
+        orig = overlay.start_daemon
+        overlay.start_daemon = lambda: (calls.append(1), setattr(off, "running", True))
+        self.addCleanup(setattr, overlay, "start_daemon", orig)
+        off = FakeDaemon(False)
+        bar = self.open(off)
+        self.assertEqual(bar.view, "off")
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())
+        self.press(self.A)                             # play starts Momento
+        self.wait_for(lambda: calls == [1])
+
+    def test_chord_closes_when_held(self):
+        bar = self.open(FakeDaemon(True))
+        bar.resident = True
+        self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.2)
+        self.assertTrue(bar.isVisible())               # too short
+        self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.7)
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(self.dev.grabbed)
+
+    def test_chord_left_to_daemon_when_shared(self):
+        """A shared pad's chord also reaches the daemon, which toggles the bar: the bar
+        must not close it as well (that would close and reopen it)."""
+        self.grab_error = 16
+        bar = self.open(FakeDaemon(True))
+        bar.resident = True
+        self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.7)
+        self.assertTrue(bar.isVisible())
+
+    def test_custom_chord_and_hold_from_config(self):
+        config.set_value("controller", "open_chord", ["left_paddle"], self.cfg)
+        config.set_value("controller", "hold_ms", 100, self.cfg)
+        bar = self.open(FakeDaemon(True))
+        self.assertEqual((self.made[-1]["chord"], self.made[-1]["hold_ms"]), (("left_paddle",), 100))
+        bar.resident = True
+        self.press(gamepad.BTN_TRIGGER_HAPPY1 + 6, hold=0.3)   # paddle 3 (upper left)
+        self.assertFalse(bar.isVisible())
+
+    def test_settings_row_custom_and_unavailable(self):
+        daemon = FakeDaemon(True, values={"controller": "select+mode"})
+        bar = self.open(daemon)
+        self.press(self.Y)
+        self.wait_for(lambda: bar.mode == "settings")
+        ctl = bar.row("controller")
+        self.assertEqual((ctl.value, ctl.labels[-1]), ("select+mode", "Select + Mode"))
+        self.press(self.B)
+        orig = gamepad.available
+        gamepad.available = lambda: False                # no python-evdev: no row
+        self.addCleanup(setattr, gamepad, "available", orig)
+        bar.sdata = settings_reply()
+        bar.sdata["controller_available"] = False
+        bar.build_rows()
+        self.assertNotIn("controller", [r.key for r in bar.rows])
+        bar.clear_rows()
 
 
 if __name__ == "__main__":

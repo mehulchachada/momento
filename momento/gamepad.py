@@ -25,7 +25,7 @@ Actions (brand independent, positional)
 ---------------------------------------
 ============  ==========================================================
 up/down/...   D-pad (``ABS_HAT0X/Y``, ``BTN_DPAD_*``, xpad's
-              ``BTN_TRIGGER_HAPPY1-4`` on hat-less pads) and the left stick
+              ``BTN_TRIGGER_HAPPY1-4`` on pads with neither) and the left stick
               past ``deadzone``; auto-repeat after 350 ms, then every 90 ms
 accept        bottom face button (``BTN_SOUTH``: A / Cross)
 back          right face button (``BTN_EAST``: B / Circle)
@@ -70,6 +70,11 @@ watchdog when nothing happened for ``watchdog_s`` (60 s). The kernel drops a
 grab by itself when the process exits.
 
 The chord is watched without grabbing, so its own presses reach the game.
+
+Under the test sandbox (``MOMENTO_TEST_SANDBOX``, see tests/_sandbox.py) the
+real device layer is off: :func:`open_device` and :func:`probe` find nothing and
+:meth:`Gamepads.start` with the default opener does nothing. Tests use
+:class:`FakeDevice`.
 """
 
 from __future__ import annotations
@@ -295,10 +300,15 @@ def set_event_mask(fd: int, types: Iterable[int] | None) -> bool:
         return False
 
 
+def _sandboxed() -> bool:
+    """Under tests/_sandbox.py: never read (let alone grab) the user's real controllers."""
+    return bool(os.environ.get("MOMENTO_TEST_SANDBOX"))
+
+
 def open_device(path: str):
     """Open ``path`` with python-evdev; the device if it is a gamepad, else None."""
     evdev = _import_evdev()
-    if evdev is None:
+    if evdev is None or _sandboxed():
         return None
     if _sysfs_has_key(path, BTN_SOUTH) is False:
         return None
@@ -485,6 +495,7 @@ class Gamepads:
 
         self._last_action: dict[str, tuple[float, object]] = {}
         self._last_chord: tuple[float, object] | None = None
+        self.last_chord_key = None                        # the pad the last chord came from
         self._listeners: list[Callable[[], None]] = []   # loop adapters: fds/timer changed
         _live.add(self)
 
@@ -518,6 +529,9 @@ class Gamepads:
         if self._opener is open_device and not available():
             _warn_once("no-evdev", "python-evdev is not installed; controller support is off",
                        level=logging.INFO)
+            return False
+        if self._opener is open_device and _sandboxed():
+            log.debug("test sandbox: not opening real controllers")
             return False
         self._started = True
         if self._hotplug_mode == "auto" and self._lister is list_candidates:
@@ -631,6 +645,9 @@ class Gamepads:
                 has_hat = True
             if info is not None:
                 axes_info[code] = (info.min, info.max)
+        # BTN_TRIGGER_HAPPY1-4 are the D-pad only on pads that have no other one (xpad's
+        # D-pad-as-buttons); hid-steam, for one, has BTN_DPAD_* and uses them for other buttons.
+        has_hat = has_hat or BTN_DPAD_UP in caps.get(EV_KEY, ())
         vendor = getattr(getattr(dev, "info", None), "vendor", 0) or 0
         name = getattr(dev, "name", "") or str(key)
         layout = layout_for(vendor, getattr(dev, "driver", "") or "", name)
@@ -866,6 +883,7 @@ class Gamepads:
             if self._last_chord and self._last_chord[1] != pad.key and now - self._last_chord[0] < CHORD_DEDUP_S:
                 return
             self._last_chord = (now, pad.key)
+            self.last_chord_key = pad.key
             log.info("controller shortcut on %s", pad.name)
             if self.on_chord:
                 self._call(self.on_chord)
@@ -947,6 +965,11 @@ class Gamepads:
     def grabbing(self) -> bool:
         """True while a grab is wanted (between :meth:`grab` and :meth:`ungrab`)."""
         return self._want_grab
+
+    def is_grabbed(self, key) -> bool:
+        """Is the pad ``key`` (e.g. :attr:`last_chord_key`) held exclusively by us?"""
+        pad = self.pads.get(key)
+        return bool(pad and pad.grabbed)
 
     def grab_state(self) -> str:
         """"exclusive" (every pad grabbed), "partial", "shared" (none) or "off"."""
@@ -1031,9 +1054,9 @@ class Gamepads:
     def _start_watchdog_thread(self) -> None:
         if not self._watchdog_thread_on or not self.watchdog_s:
             return
-        if self._wd_thread is not None and self._wd_thread.is_alive():
-            self._wd_stop.clear()
-            return
+        if self._wd_thread is not None and self._wd_thread.is_alive() and not self._wd_stop.is_set():
+            return  # still watching this grab
+        # (a stopped thread may still be winding down: it keeps its own, set, Event)
         self._wd_stop = threading.Event()
         ref = weakref.ref(self)
         stop = self._wd_stop
@@ -1342,6 +1365,8 @@ class FakeDevice:
 def probe(paths: Iterable[str] | None = None) -> list[dict]:
     """Read-only description of the connected pads (no grab)."""
     out = []
+    if _sandboxed():
+        return out
     for path in (paths if paths is not None else list_candidates()):
         try:
             dev = open_device(path)
@@ -1355,7 +1380,8 @@ def probe(paths: Iterable[str] | None = None) -> list[dict]:
             keys = set(caps.get(EV_KEY, ()))
             layout = layout_for(dev.info.vendor, getattr(dev, "driver", ""), dev.name)
             pad = _Pad(None, path, layout=layout,
-                       has_hat=any(c in (ABS_HAT0X, ABS_HAT0Y) for c, _ in caps.get(EV_ABS, ())))
+                       has_hat=any(c in (ABS_HAT0X, ABS_HAT0Y) for c, _ in caps.get(EV_ABS, ()))
+                       or BTN_DPAD_UP in keys)
             out.append({
                 "path": path, "name": dev.name, "vendor": f"{dev.info.vendor:04x}",
                 "product": f"{dev.info.product:04x}", "driver": getattr(dev, "driver", ""),
@@ -1386,7 +1412,8 @@ def main(argv=None) -> int:
         print("no readable game controllers")
     for p in pads:
         if "error" in p:
-            print(f"{p['path']}: {p['error']}")
+            print(f"{p['path']}: can't read it ({p['error']}); usually one that InputPlumber or "
+                  "Steam has taken over, which Momento then sees through its virtual controller")
             continue
         print(f"{p['path']}: {p['name']} [{p['vendor']}:{p['product']} {p['driver'] or '-'}, "
               f"{p['layout']} layout]\n  buttons: {' '.join(p['buttons'])}")

@@ -47,6 +47,7 @@ Recommends:     layer-shell-qt
 Recommends:     pipewire-utils
 Recommends:     xdg-user-dirs
 Recommends:     mesa-va-drivers
+Recommends:     python3-evdev
 
 %description
 Momento is instant replay for Linux gaming, like the Create button on a

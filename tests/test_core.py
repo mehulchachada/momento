@@ -478,6 +478,34 @@ class CLITest(unittest.TestCase):
             req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "2160p"}}, timeout=30)
             self.assertIn("35.2 GB", err.getvalue())
 
+    def test_set_controller(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, config, ipc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            config.set_value("controller", "open_chord", ["left_paddle"], path)
+            out = io.StringIO()
+            reply = {"ok": True, "changed": {"controller": "left_paddle"}, "restarted": False, "paused": True}
+            with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "set", "controller", "on"]), 0)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"controller": "on"}}, timeout=30)
+            text = out.getvalue()
+            self.assertIn("controller = left_paddle", text)
+            self.assertIn("Hold Left paddle (0.5 s) to open or close the bar", text)
+            self.assertNotIn("paused", text)             # a controller change never waits for resume
+            out = io.StringIO()
+            with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "set", "controller", "off"]), 0)
+                self.assertEqual(cli.main(["--config", str(path), "settings"]), 0)
+            self.assertIn("controller: off", out.getvalue())
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main(["set", "controllr", "on"])
+
     def test_storage_line(self):
         from momento import cli
 
@@ -1862,6 +1890,182 @@ class PortalWindowTest(unittest.TestCase):
         got, options = self.run_portal("window", source_types=1)
         self.assertIsNone(options)
         self.assertEqual(got, {"error": "this desktop cannot share single windows"})
+
+
+class ControllerSettingTest(unittest.TestCase):
+    """[controller] in config.py / settings.py (no devices involved)."""
+
+    def setUp(self):
+        from momento import config, settings
+
+        self.config, self.settings = config, settings
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "config.toml"
+        self.path.write_text("# mine\n[capture]\nresolution = \"1080p\"\n")
+
+    def test_defaults(self):
+        cfg = self.config.load(self.path)
+        self.assertEqual(self.config.controller(cfg),
+                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 500, "exclusive": True})
+        self.assertEqual(self.config.load_controller(self.path), self.config.controller(cfg))
+        cur = self.settings.current(cfg)
+        self.assertEqual((cur["controller"], cur["controller_exclusive"]), ("view_menu", "on"))
+        d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["choices"]["controller"], ["off", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
+        self.assertIsInstance(d["controller_available"], bool)
+
+    def test_bad_values_fall_back(self):
+        self.path.write_text('[controller]\nopen_chord = ["select", "turbo"]\nhold_ms = -3\n')
+        with self.assertLogs("momento.config", "WARNING"):
+            ctl = self.config.load_controller(self.path)
+        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 500))
+        self.path.write_text("[controller\n")                       # broken TOML: defaults
+        self.assertTrue(self.config.load_controller(self.path)["enabled"])
+        self.assertTrue(self.config.load_controller(Path(self._tmp.name) / "missing.toml")["enabled"])
+
+    def test_normalize(self):
+        v = self.settings.validate
+        self.assertEqual(v({"controller": "View + Menu"}), {"controller": "view_menu"})
+        self.assertEqual(v({"controller": "left paddle"}), {"controller": "left_paddle"})
+        self.assertEqual(v({"controller": "l3+r3"}), {"controller": "l3_r3"})
+        self.assertEqual(v({"controller": "Guide+South"}), {"controller": "mode+south"})
+        self.assertEqual(v({"controller": ["view", "menu"]}), {"controller": "view_menu"})
+        self.assertEqual(v({"controller": False, "controller_exclusive": "no"}),
+                         {"controller": "off", "controller_exclusive": "off"})
+        self.assertEqual(v({"controller": "yes"}), {"controller": "on"})
+        for bad in ({"controller": "turbo"}, {"controller": "select+turbo"}, {"controller_exclusive": "maybe"}):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                v(bad)
+            self.assertTrue(str(cm.exception).startswith(next(iter(bad))))
+        self.assertEqual(self.settings.controller_label("select+mode"), "Select + Mode")
+        self.assertEqual(self.settings.controller_label("right_paddle"), "Right paddle")
+
+    def test_apply_writes_a_list_and_reads_back(self):
+        changed = self.settings.apply({"controller": "left_paddle"}, self.path)
+        self.assertEqual(changed, {"controller": "left_paddle"})
+        text = self.path.read_text()
+        self.assertIn("# mine", text)
+        self.assertIn('open_chord = ["left_paddle"]', text)
+        self.assertEqual(self.config.controller(self.config.load(self.path))["chord"], ("left_paddle",))
+        self.assertEqual(self.settings.apply({"controller": "off"}, self.path), {"controller": "off"})
+        self.assertFalse(self.config.load(self.path)["controller"]["enabled"])
+        # "on" re-enables and reports the shortcut it turned back on
+        self.assertEqual(self.settings.apply({"controller": "on"}, self.path), {"controller": "left_paddle"})
+        self.assertEqual(self.settings.apply({"controller": "on"}, self.path), {})
+        self.assertEqual(self.settings.apply({"controller": "select+mode"}, self.path),
+                         {"controller": "select+mode"})
+        self.assertEqual(self.config.load(self.path)["controller"]["open_chord"], ["select", "mode"])
+        self.assertEqual(self.settings.apply({"controller_exclusive": "off"}, self.path),
+                         {"controller_exclusive": "off"})
+        self.assertFalse(self.config.controller(self.config.load(self.path))["exclusive"])
+
+    def test_example_config_matches_defaults(self):
+        import tomllib
+
+        from momento import config
+
+        example = tomllib.loads((Path(__file__).resolve().parent.parent / "data/config.example.toml").read_text())
+        self.assertEqual(example["controller"], config.DEFAULTS["controller"])
+
+
+class DaemonControllerTest(unittest.TestCase):
+    """The daemon's controller hub: chord only, never grabs, follows the config."""
+
+    call = DaemonControlTest.call
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        DaemonControlTest.setUp(self)
+        from momento import gamepad
+
+        self.gamepad = gamepad
+        self.clock = [100.0]
+        self.devs, self.hubs, self.made = [], [], []
+        self.opened = []
+        self.d.open_bar = lambda: self.opened.append(self.clock[0])
+        self.d.pad_factory = self.factory
+        self.d._pads_managed = True               # what start() sets
+
+    def factory(self, **kw):
+        self.made.append(kw)
+        dev = self.gamepad.FakeDevice(path=f"/fake/pad{len(self.devs)}")
+        self.devs.append(dev)
+        self.addCleanup(dev.close)
+        hub = self.gamepad.Gamepads(lister=lambda: [dev.path], opener=lambda _p: dev, hotplug="off",
+                                    watchdog_thread=False, clock=lambda: self.clock[0], **kw)
+        self.hubs.append(hub)
+        return hub
+
+    def chord(self, hold=0.5):
+        g, dev, hub = self.gamepad, self.devs[-1], self.d.pads
+        for code in (g.BTN_SELECT, g.BTN_START):
+            dev.push(g.EV_KEY, code, 1)
+        hub.process(dev.fileno())
+        self.clock[0] += hold
+        hub.tick()
+        for code in (g.BTN_SELECT, g.BTN_START):
+            dev.push(g.EV_KEY, code, 0)
+        hub.process(dev.fileno())
+
+    def test_chord_opens_bar_without_grabbing(self):
+        self.d._sync_controller()
+        self.assertEqual(self.made[-1]["navigate"], False)
+        self.assertEqual(self.devs[-1].mask, (self.gamepad.EV_KEY,))   # key events only
+        self.chord(hold=0.3)
+        self.assertEqual(self.opened, [])
+        self.chord()
+        self.assertEqual(len(self.opened), 1)
+        self.assertAlmostEqual(self.opened[0], 100.8)                # pressed at 100.3, held 0.5 s
+        self.assertEqual(self.devs[-1].grab_calls, 0)
+        self.assertFalse(self.d.pads.grabbing)
+
+    def test_configure_controller_does_not_restart_recording(self):
+        self.d._sync_controller()
+        rec = self.d.recorder
+        r = self.call({"cmd": "configure", "changes": {"controller": "l3_r3"}})
+        self.assertEqual((r["ok"], r["restarted"], r["changed"]), (True, False, {"controller": "l3_r3"}))
+        self.assertIs(self.d.recorder, rec)
+        self.assertEqual(rec.stopped, 0)
+        self.assertEqual(self.d.pads.chord, ("thumbl", "thumbr"))
+        self.assertEqual(len(self.hubs), 1)                            # same hub, new chord
+        r = self.call({"cmd": "configure", "changes": {"controller": "off"}})
+        self.assertEqual(r["changed"], {"controller": "off"})
+        self.assertIsNone(self.d.pads)
+        self.assertTrue(self.devs[-1].closed)
+        r = self.call({"cmd": "configure", "changes": {"controller": "on"}})
+        self.assertEqual(r["changed"], {"controller": "l3_r3"})
+        self.assertIsNotNone(self.d.pads)
+        self.assertEqual(self.d.pads.chord, ("thumbl", "thumbr"))
+        r = self.call({"cmd": "configure", "changes": {"controller": "on"}})
+        self.assertEqual((r["ok"], r["changed"], r["restarted"]), (True, {}, False))
+        self.assertIs(self.d.recorder, rec)
+
+    def test_mixed_change_reloads_once(self):
+        self.d._sync_controller()
+        r = self.call({"cmd": "configure", "changes": {"controller": "right_paddle", "resolution": "720p"}})
+        self.assertEqual((r["ok"], r["restarted"]), (True, True))
+        self.assertEqual(self.d.pads.chord, ("right_paddle",))
+
+    def test_disabled_and_stop(self):
+        from momento import config
+
+        config.set_value("controller", "enabled", False, self.path)
+        self.d.cfg = config.load(self.path)
+        self.d._sync_controller()
+        self.assertEqual(self.made, [])
+        config.set_value("controller", "enabled", True, self.path)
+        self.call({"cmd": "reload"})
+        self.assertIsNotNone(self.d.pads)
+        dev = self.devs[-1]
+        self.d.stop()
+        self.assertIsNone(self.d.pads)
+        self.assertTrue(dev.closed)
+
+    def test_real_devices_never_opened_in_tests(self):
+        self.d.pad_factory = None                  # the real Gamepads: refuses under the sandbox
+        self.d._sync_controller()
+        self.assertIsNone(self.d.pads)
 
 
 if __name__ == "__main__":

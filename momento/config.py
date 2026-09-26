@@ -80,6 +80,20 @@ DEFAULTS = {
         # (about 0.3-0.5 s until it appears).
         "keep_bar_loaded": True,
     },
+    "controller": {
+        # Game controllers (needs python-evdev): hold the shortcut to open or close
+        # the clip bar, then use the D-pad / stick and A / B.
+        "enabled": True,
+        # Buttons held together, by position: select (View / Share / Minus),
+        # start (Menu / Options / Plus), mode (Guide / PS / Home), thumbl / thumbr
+        # (stick clicks), tl / tr (bumpers), south / east / north / west, or
+        # left_paddle / right_paddle (back buttons on Elite-style pads and handhelds).
+        "open_chord": ["select", "start"],
+        "hold_ms": 500,
+        # Take the controller over while the bar is open, so the game doesn't see
+        # the presses (falls back to sharing it where that isn't possible).
+        "exclusive": True,
+    },
 }
 
 
@@ -107,6 +121,53 @@ def forget_portal_token(target: str) -> bool:
         return True
     except OSError:  # not there (nothing to forget) or not removable
         return False
+
+
+def controller(cfg: dict) -> dict:
+    """The [controller] table, checked: {"enabled", "chord" (tuple), "hold_ms", "exclusive"}.
+
+    A hand-edited value that makes no sense falls back to its default (and is logged),
+    so a typo never takes controller support down with it.
+    """
+    import logging
+
+    from . import gamepad
+
+    c = cfg.get("controller")
+    c = c if isinstance(c, dict) else {}
+    d = DEFAULTS["controller"]
+    out = {"enabled": bool(c.get("enabled", d["enabled"])),
+           "exclusive": bool(c.get("exclusive", d["exclusive"]))}
+    try:
+        out["chord"] = gamepad.normalize_chord(c.get("open_chord") or d["open_chord"])
+    except (ValueError, TypeError) as e:
+        logging.getLogger(__name__).warning("[controller] open_chord: %s; using %s", e,
+                                            " + ".join(d["open_chord"]))
+        out["chord"] = tuple(d["open_chord"])
+    try:
+        hold = int(c.get("hold_ms", d["hold_ms"]))
+        if isinstance(c.get("hold_ms"), bool) or not 0 <= hold <= 5000:
+            raise ValueError
+    except (ValueError, TypeError):
+        logging.getLogger(__name__).warning("[controller] hold_ms must be 0-5000; using %d", d["hold_ms"])
+        hold = d["hold_ms"]
+    out["hold_ms"] = hold
+    return out
+
+
+def load_controller(path: Path | None = None) -> dict:
+    """``controller()`` of the saved file, without the rest of ``load()`` (the bar reads
+    this on every open, so it skips the Videos-folder lookup)."""
+    data = {}
+    try:
+        with open(path or default_path(), "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        pass
+    except (OSError, tomllib.TOMLDecodeError):
+        data = {}  # a broken file: the defaults (load() reports the error elsewhere)
+    table = data.get("controller")
+    return controller({"controller": table if isinstance(table, dict) else {}})
 
 
 def _merge(base: dict, over: dict) -> dict:
@@ -142,6 +203,8 @@ def _toml_value(value) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 

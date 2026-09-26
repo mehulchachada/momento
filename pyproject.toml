@@ -33,7 +33,8 @@ dependencies = []
 gui = ["PySide6>=6.5"]
 gst = ["PyGObject>=3.42"]
 dbus = ["dbus-python>=1.3"]
-all = ["PySide6>=6.5", "PyGObject>=3.42", "dbus-python>=1.3"]
+controller = ["evdev>=1.4"]
+all = ["PySide6>=6.5", "PyGObject>=3.42", "dbus-python>=1.3", "evdev>=1.4"]
 
 [project.scripts]
 momento = "momento.cli:main"

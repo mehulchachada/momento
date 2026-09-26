@@ -125,10 +125,18 @@ Commands (fields are in ``COMMANDS``)
     (``SETTING_VALUES``), ``choices``, ``devices`` (outputs are monitor sources;
     empty without pactl), ``fps``, ``max_seconds``, ``config`` path and
     ``storage`` (``STORAGE_REQUIREMENTS``: bytes per ``"<res>/<quality>/<fps>"``).
+    ``controller_available`` is false when python-evdev is missing (the
+    controller values are then saved but unused).
+
+Game controllers use no IPC of their own: the daemon watches for the
+``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
+open bar reads the controllers itself and releases them when it hides.
 ``configure`` {changes, force?}
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
-    = nothing to do). Refused with ``code: no_storage`` (nothing written) only
+    = nothing to do). Changes that only touch ``controller`` /
+    ``controller_exclusive`` apply without a reload (``restarted: false``);
+    ``changed`` holds the value read back (``"on"`` -> the shortcut it enables). Refused with ``code: no_storage`` (nothing written) only
     when the new settings do not fit AND raise the requirement over the saved
     ones AND ``force`` is not true; so shrinking always works. With ``force``
     the reply is ok with ``restarted: false``, ``state: "no_storage"`` and a
@@ -239,6 +247,10 @@ SETTING_VALUES = {
     "audio_source": (("string",), True),   # "default" | "off" | monitor source name
     "mic": (("string",), True),            # "on" | "off"
     "mic_device": (("string",), True),     # "default" | source name
+    # "off" | a preset ("view_menu", "left_paddle", "right_paddle", "l3_r3") | buttons
+    # joined with "+" ("select+mode"); configure also takes "on" (enable, keep the shortcut)
+    "controller": (("string",), False),
+    "controller_exclusive": (("string",), False),   # "on" | "off"
 }
 
 SETTING_CHOICES = {
@@ -246,6 +258,7 @@ SETTING_CHOICES = {
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),
+    "controller": (("array",), False),     # ["off", <preset keys>]
 }
 
 AUDIO_DEVICES = {
@@ -385,6 +398,7 @@ COMMANDS: dict[str, dict] = {
             "max_seconds": (("integer",), True),
             "config": (("string",), True),        # path of config.toml
             "storage": ((STORAGE_REQUIREMENTS,), True),
+            "controller_available": (("boolean",), False),  # python-evdev present
         },
         "error": {},
     },

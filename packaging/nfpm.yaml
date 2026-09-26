@@ -131,6 +131,7 @@ overrides:
       - mesa-va-drivers
       - layer-shell-qt
       - pipewire-bin
+      - python3-evdev
       - xdg-user-dirs
     suggests:
       - gstreamer1.0-plugins-ugly
@@ -156,6 +157,7 @@ overrides:
       - mesa-va-drivers
       - layer-shell-qt
       - pipewire-utils
+      - python3-evdev
       - xdg-user-dirs
   archlinux:
     depends:

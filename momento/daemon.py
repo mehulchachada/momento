@@ -99,6 +99,10 @@ class Daemon:
         self._bar_backoff = BAR_BACKOFF_MIN
         self._bar_timer = 0
         self._bar_managed = False  # set by start(): only a started daemon runs the bar
+        # Game controllers: watched for the "open the bar" chord only ([controller]).
+        self.pads = None
+        self._pads_handle = None
+        self._pads_managed = False  # set by start(), like the bar
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -134,6 +138,8 @@ class Daemon:
                 log.warning("global shortcut unavailable: %s", e)
         self._bar_managed = True
         self.start_bar()
+        self._pads_managed = True
+        self._sync_controller()
 
     def stop(self, clear_buffer: bool = False) -> None:
         """Shut down. The buffer is kept (SIGTERM, service restart, reboot) unless
@@ -158,6 +164,7 @@ class Daemon:
             except Exception:  # noqa: BLE001
                 pass
         self.stop_bar()
+        self._close_controller()
         if self.server is not None:
             self.server.close()
         if clear_buffer:
@@ -263,6 +270,60 @@ class Daemon:
             self.start_bar()
         else:
             self.stop_bar()
+
+    # --- game controllers ---------------------------------------------------------
+
+    # Builds the hub; tests swap in one with fake devices.
+    pad_factory = None
+
+    def _sync_controller(self) -> None:
+        """Watch the controllers for the chord while [controller] enabled (else let go).
+
+        Chord only: the daemon never navigates and never grabs a controller; its hub
+        reads key events alone, so stick movement in a game doesn't wake it up. While
+        the bar is open it takes the controllers over, and then its own hub sees the
+        chord (and closes it).
+        """
+        if not self._pads_managed:
+            return
+        ctl = config.controller(self.cfg)
+        if not ctl["enabled"] or self._stopping:
+            self._close_controller()
+            return
+        if self.pads is not None:
+            self.pads.set_chord(ctl["chord"], ctl["hold_ms"])
+            return
+        from . import gamepad
+
+        factory = self.pad_factory or gamepad.Gamepads
+        hub = factory(navigate=False, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
+                      on_chord=self._on_pad_chord)
+        try:
+            started = hub.start()
+        except Exception:  # noqa: BLE001 - a controller problem must not stop the recorder
+            log.exception("controller support failed to start")
+            started = False
+        if not started:
+            hub.close()
+            return
+        self.pads = hub
+        try:
+            self._pads_handle = hub.attach_glib()
+        except Exception:  # noqa: BLE001 - no GLib main loop (tests)
+            log.debug("controller hub not attached to a main loop", exc_info=True)
+        log.info("controller shortcut: %s held %.1f s", " + ".join(ctl["chord"]), ctl["hold_ms"] / 1000)
+
+    def _close_controller(self) -> None:
+        hub, self.pads = self.pads, None
+        handle, self._pads_handle = self._pads_handle, None
+        if handle is not None:
+            handle.detach()
+        if hub is not None:
+            hub.close()
+
+    def _on_pad_chord(self) -> None:
+        """The controller shortcut: open the bar, or close it (same as the hotkey)."""
+        self.open_bar()
 
     def _on_state(self, state: str, detail: str | None) -> None:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
@@ -399,6 +460,7 @@ class Daemon:
             self.recorder.stop()
         self.cfg = cfg
         self._sync_bar()
+        self._sync_controller()
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
         started = False
         if not self.paused:
@@ -456,8 +518,15 @@ class Daemon:
         except (OSError, ValueError) as e:
             reply({"ok": False, "error": str(e)})
             return
-        if not changed:
-            reply({"ok": True, "changed": {}, "restarted": False, "paused": self.paused,
+        if not changed or set(changed) <= set(settings.CONTROLLER_KEYS):
+            # Controller settings take effect without restarting the recording.
+            if changed:
+                try:
+                    self.cfg["controller"] = config.load(self._cfg_path())["controller"]
+                except (OSError, ValueError) as e:
+                    log.warning("controller settings not reloaded: %s", e)
+                self._sync_controller()
+            reply({"ok": True, "changed": changed, "restarted": False, "paused": self.paused,
                    "state": self._idle_state(), "storage": self._storage_status()})
             return
         # Switching what is recorded is the user's choice: in window mode the new

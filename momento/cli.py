@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
                         description=f"Settings: {keys}.")
     st.add_argument("key", choices=list(settings.KEYS))
     st.add_argument("value")
+    ctl = sub.add_parser("controller", help="list the game controllers Momento can use")
+    ctl.add_argument("--watch", action="store_true",
+                     help="print what each button does until Ctrl+C (to check the buttons; "
+                          "the controller keeps working in games)")
     sub.add_parser("pause", help="pause recording (what is buffered can still be saved)")
     sub.add_parser("resume", help="resume recording (earlier footage stays in the replay buffer)")
     sub.add_parser("stop", help="stop recording and clear the replay history (Momento keeps running; "
@@ -74,6 +78,22 @@ def storage_line(st: dict) -> str:
     return f"{free}, needs {storage.human(st.get('required', 0))} \u2014 {verdict}"
 
 
+def controller_line(cfg: dict) -> str:
+    """"hold View + Menu (0.5 s) to open or close the bar" / "off"."""
+    from . import gamepad
+
+    ctl = config.controller(cfg)
+    if not ctl["enabled"]:
+        return "off"
+    label = settings.controller_label(settings.current(cfg)["controller"])
+    line = f"hold {label} ({ctl['hold_ms'] / 1000:g} s) to open or close the bar"
+    if not ctl["exclusive"]:
+        line += "; the game also sees the presses"
+    if not gamepad.available():
+        line += " (needs python-evdev, not installed)"
+    return line
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
@@ -93,6 +113,17 @@ def main(argv: list[str] | None = None) -> int:
         if overlay.toggle():
             return 0
         return overlay.main([]) or 0
+
+    if args.command == "controller":
+        from . import gamepad
+
+        try:
+            ctl = config.controller(config.load(args.config))
+        except (OSError, ValueError):
+            ctl = config.controller({})
+        print(f"shortcut: {controller_line(config.load(args.config)) if ctl['enabled'] else 'off'}")
+        return gamepad.main((["--watch"] if args.watch else [])
+                            + ["--chord", "+".join(ctl["chord"]), "--hold-ms", str(ctl["hold_ms"])])
 
     if args.command == "daemon":
         from . import daemon
@@ -170,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg))))),
             ("sound", sound),
             ("mic", mic),
+            ("controller", controller_line(cfg)),
             ("clips", cfg["output"]["dir"]),
             ("config", cfg["_path"]),
         ]
@@ -204,8 +236,12 @@ def main(argv: list[str] | None = None) -> int:
             if not r.get("ok"):
                 print(f"momento: {r.get('error', 'not saved')}", file=sys.stderr)
                 return 1
-            print(f"{args.key} = {clean[args.key]}")
-            if r.get("warning"):
+            changed = r.get("changed") or {}
+            print(f"{args.key} = {changed.get(args.key, clean[args.key])}")
+            if set(clean) <= set(settings.CONTROLLER_KEYS):
+                line = controller_line(config.load(args.config))
+                print(f"Saved. {line[:1].upper()}{line[1:]}." if changed else "Saved (nothing changed).")
+            elif r.get("warning"):
                 print(f"momento: warning: {r['warning']}. Recording stays off until there is room.",
                       file=sys.stderr)
             elif r.get("paused"):

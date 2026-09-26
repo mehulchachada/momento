@@ -12,7 +12,7 @@ and one key saves what just happened, from the last 15 seconds up to the full ho
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](#install)
 [![Wayland and X11](https://img.shields.io/badge/Wayland%20%26%20X11-supported-5C3EE8)](#install)
-[![Steam Deck and handhelds](https://img.shields.io/badge/Steam%20Deck%20%26%20handhelds-friendly-1A9FFF?logo=steam&logoColor=white)](#controller-button)
+[![Steam Deck and handhelds](https://img.shields.io/badge/Steam%20Deck%20%26%20handhelds-friendly-1A9FFF?logo=steam&logoColor=white)](#using-a-controller)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#faq)
 
 </div>
@@ -32,6 +32,7 @@ Momento is the Linux version of the PS5's Create button. It records in the backg
 - **MP4 in seconds.** No re-encoding, so a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
 - **One shortcut.** Super + Shift + G opens a slim bar at the bottom of the screen.
 - **Settings in the bar.** Resolution, 60 or 120 fps, quality, sound and mic.
+- **Works with a controller.** Hold View + Menu to open the bar, then pick with the D-pad and A.
 - **Pause and stop** from the bar whenever you want.
 - **Keeps your history** through restarts and reboots.
 - **Protects your game.** Uses little memory and never fills your disk.
@@ -146,18 +147,33 @@ momento resume          # resume
 momento stop            # stop recording and clear the history
 ```
 
-## Controller button
+## Using a controller
 
-Use Steam Input to turn a button, or a two-button chord, into the shortcut:
+Hold **View + Menu** (the two small buttons in the middle) for half a second to open the bar. Do it again to close it.
 
-1. In Steam, open the game's **Controller settings** (for apps outside Steam: *Settings → Controller → Desktop Layout*).
-2. Pick a spare button or a chord such as **View + a back button**.
-3. Map it to **Keyboard key → Super + Shift + G**.
+| Button | In the bar |
+|---|---|
+| **D-pad** or left stick | Move around |
+| **A** | Save the selected length, or choose |
+| **B** | Back, or close the bar |
+| **Y** | Settings |
+| **X** | Pause or resume recording |
+| **LB / RB** | Jump between the lengths and the buttons |
 
-- **ROG Ally / Ally X:** the back paddles, or the Armoury Crate and Command Center buttons.
-- **Legion Go:** the Legion L/R buttons or the rear Y1-Y3 buttons.
-- **Steam Deck:** the back grips (L4, L5, R4, R5).
-- **Gaming Mode:** the bar can't appear over the game yet. Bind a button to `momento save 30s` instead.
+Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back.
+
+While the bar is open, Momento takes over the controller so your game doesn't react to your presses, and gives it back when the bar closes. If another app already holds the controller, the game may still see them. The shortcut itself does reach the game, so pick one your game doesn't use.
+
+To change the shortcut, open settings (**Y**) and choose under **Controller**:
+
+- **View + Menu** (the default)
+- **Left paddle** or **Right paddle**: the back buttons on the ROG Ally and Xbox Elite controllers
+- **L3 + R3**: press both sticks in
+- **Off**
+
+Or in a terminal: `momento set controller left_paddle`. If a paddle seems swapped or a button does nothing, run `momento controller --watch` and press it to see what Momento gets.
+
+**Steam Gaming Mode:** the bar can't appear over the game there yet. Use Steam Input to bind a button to `momento save 30s` instead.
 
 ## Video quality
 
@@ -216,6 +232,7 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 | Microphone | `[audio] microphone` | `false` |
 | Clip folder | `[output] dir` | your Videos folder + `/Momento` |
 | Shortcut | `[hotkey] trigger` | `LOGO+SHIFT+g` (Super + Shift + G) |
+| Controller shortcut | `[controller] open_chord` | `["select", "start"]` (View + Menu), held `hold_ms = 500`. `enabled = false` turns controllers off |
 | History length | `[buffer] max_seconds` | `3600` (60 min, the maximum) |
 | Instant bar | `[ui] keep_bar_loaded` | `true`: keeps the bar ready so it opens immediately; uses ~100 MB. Set `false` to save memory |
 
@@ -274,7 +291,6 @@ An unrelated developer tool is also called `momento`. Check with `command -v mom
 
 - Flatpak on Flathub, including SteamOS
 - The clip bar in Steam Gaming Mode
-- Full controller navigation in the bar
 - Smaller files (HEVC and AV1)
 - Microphone on its own audio track
 

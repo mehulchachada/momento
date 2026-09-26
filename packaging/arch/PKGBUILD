@@ -30,6 +30,7 @@ optdepends=(
   'intel-media-driver: VA-API driver for Intel graphics'
   'gst-plugins-ugly: x264enc software encoder fallback'
   'layer-shell-qt: clip bar above fullscreen games on KDE Plasma and wlroots'
+  'python-evdev: open and use the clip bar with a game controller'
   'xdg-user-dirs: save clips to your (localized) Videos folder'
 )
 makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
