@@ -30,3 +30,8 @@ htmlcov/
 
 # Installer temp files
 *.new
+
+# Local AI assistant notes (per-developer, never committed)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
