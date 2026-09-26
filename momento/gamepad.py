@@ -147,7 +147,7 @@ ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode",
            "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2"}
 
 DEFAULT_CHORD = ("select", "start")
-DEFAULT_HOLD_MS = 300
+DEFAULT_HOLD_MS = 0        # open on a tap, like [controller] hold_ms
 # (key, label, buttons): the choices the settings UI offers
 CHORD_PRESETS = (
     ("view_menu", "View + Menu", ("select", "start")),
@@ -513,7 +513,8 @@ class Gamepads:
 
     # ---------------------------------------------------------- configuration
     def set_chord(self, buttons, hold_ms: int | None = None) -> None:
-        """Buttons that must be held together for ``hold_ms``; ``()``/None disables."""
+        """Buttons that must be held together for ``hold_ms`` (0: fires the moment
+        they are all down); ``()``/None disables."""
         self.chord = normalize_chord(buttons) if buttons else ()
         if hold_ms is not None:
             self.hold = max(0, int(hold_ms)) / 1000.0
@@ -1449,7 +1450,8 @@ def main(argv=None) -> int:
                                  description="List game controllers Momento can use; --watch prints their input.")
     ap.add_argument("--watch", action="store_true", help="print actions and the shortcut (read only, no grab)")
     ap.add_argument("--chord", default="+".join(DEFAULT_CHORD), help="shortcut buttons, e.g. select+start")
-    ap.add_argument("--hold-ms", type=int, default=DEFAULT_HOLD_MS)
+    ap.add_argument("--hold-ms", type=int, default=DEFAULT_HOLD_MS,
+                    help="how long to hold the shortcut, in ms (default: 0, fire on press)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if not available():

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "momento"
 dynamic = ["version"]
-description = "PS5-style instant replay for Linux: always records the last hour, save the last 15 s to 60 min with one hotkey."
+description = "Instant replay and screenshots for Linux gaming: keeps the last hour, save the last 15 s to 60 min with one hotkey."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

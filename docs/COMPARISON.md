@@ -14,7 +14,7 @@ Only Momento's numbers were measured by us (see [Performance](../README.md#perfo
 | Memory for an hour at 1080p | About 150 MB | Kept on disk | About 6.8 GB (see below) | About 6.8 GB in RAM mode |
 | Replay kept after a restart | Yes | Not documented | No (RAM) | No in RAM mode |
 | Keyboard shortcut on Wayland | Yes, no plugins | Steam's shortcuts | Needs a plugin [O6] | Yes; reads input devices directly, can clash with key remappers [G3] |
-| Controller | Hold View + Menu, then the D-pad | Steam button combos [S6] | Through Steam Input, once hotkeys work | Built-in button combos [G4] |
+| Controller | Press View + Menu, then the D-pad | Steam button combos [S6] | Through Steam Input, once hotkeys work | Built-in button combos [G4] |
 | In-game overlay | Slim bar | Steam overlay with a timeline [S1] | None (the OBS window) | Fullscreen overlay [G3] |
 | Steam Gaming Mode | Records; the bar is coming | Built in [S6] | Not designed for it | Not verified |
 | Formats | H.264 MP4 | MP4 | H.264, HEVC, AV1 | H.264, HEVC, AV1 and more [G1] |

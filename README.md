@@ -6,7 +6,7 @@
 
 **Never miss the moment.**
 
-Instant replay and screenshots for Linux gaming.<br>
+Instant replay and screenshots for Linux. Made for games, handy for anything on your screen.<br>
 Momento keeps the last hour of your game in the background. Something great happens? Save it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -21,7 +21,7 @@ Momento keeps the last hour of your game in the background. Something great happ
 
 <p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento bar: Recording Ember Rift, 42:17 recorded, 742 GB free, the lengths 15s to 60m with 5m selected, and pause, stop, screenshot and settings buttons"></p>
 
-Think of it as the PS5's Create button for your Linux PC or handheld. Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or hold **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
+Press play once and Momento records in the background. When something worth keeping happens, press **Super + Shift + G** (or press **View + Menu** on your controller), pick how far back to go, and the clip is in `~/Videos/Momento` a few seconds later.
 
 ## Features
 
@@ -30,7 +30,7 @@ Think of it as the PS5's Create button for your Linux PC or handheld. Press play
 - **MP4 in seconds.** No re-encoding: a 1-minute clip is ready in about 3 seconds. Plays and uploads anywhere.
 - **Just the game.** Window mode (the default) records only your game, so the bar, chats and notifications stay out of your clips. The bar shows what it's recording: *Recording Ember Rift*. Prefer everything? Switch to Full screen.
 - **Screenshots.** One button. The bar gets out of the way first, then the picture lands in `~/Videos/Momento/Images`.
-- **Made for controllers.** Hold View + Menu to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
+- **Made for controllers.** Press View + Menu to open the bar, move with the D-pad, save with A. No mouse needed on a handheld.
 - **Opens instantly.** The bar is kept ready, so it's on screen the moment you ask.
 - **Pause and stop** whenever you want.
 - **Keep history, if you want it.** Keep your replay after you stop or quit the game, and get every full hour saved as a video.
@@ -153,7 +153,7 @@ momento stop            # stop recording
 
 ## Using a controller
 
-Hold **View + Menu** (the two small buttons in the middle) for a moment to open the bar. Do it again to close it. On a PlayStation controller that's **Create + Options**, on a Nintendo-style one **− and +**.
+Press **View + Menu** (the two small buttons in the middle) together to open the bar. Do it again to close it. On a PlayStation controller that's **Create + Options**, on a Nintendo-style one **− and +**.
 
 | Button | In the bar |
 |---|---|
@@ -166,7 +166,7 @@ Hold **View + Menu** (the two small buttons in the middle) for a moment to open 
 
 Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back.
 
-Want a different shortcut, or a quick tap instead of a hold? See [Controller settings](#controller).
+Want a different shortcut, or a short hold instead of a tap? See [Controller settings](#controller).
 
 **Steam Gaming Mode:** the bar can't appear over the game there yet. Use Steam Input to bind a button to `momento save 30s` instead.
 
@@ -188,6 +188,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 <img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p to Native, Frame rate 60 or 120 fps, Quality Standard, High or Ultra">
 
 - **Resolution**: 720p, 1080p (default), 1440p, 4K, or Native (your screen's own).
+  Sizes bigger than your screen (or the window you record) aren't offered: they would only take more space, not look sharper.
 - **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
 - **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
 - The line at the bottom shows how much space a full hour will take. See [Video quality](#video-quality) for picks.
@@ -206,7 +207,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 - **Controller**: the button combo that opens the bar: **View + Menu** (default), **Left paddle** or **Right paddle** (the back buttons on the ROG Ally and Xbox Elite controllers), **L3 + R3** (press both sticks in), or **Off**.
 - **Exclusive: On** (default): while the bar is open, Momento takes the controller so your game doesn't react to your presses. It gives it back when the bar closes.
-- **Open with: Hold** (default) opens the bar after holding the combo for 0.3 s. **Tap** opens it the moment you press it.
+- **Open with: Tap** (default) opens the bar the moment you press the combo. **Hold** waits until you've held it for 0.3 s.
 
 ### Misc
 
@@ -291,7 +292,7 @@ ASUS ROG Ally (Z1 Extreme, 16 GB), Bazzite 44, KDE Plasma 6.7 on Wayland, on AC 
 - **With Keep history off, stopping clears your replay.** So does the game closing. Save first.
 - **Momento needs free space for a full hour** before it starts: about 8 GB at the default settings.
 - **The controller shortcut also reaches your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
-- **Tap can clash with emulators** that use Select + Start (the same buttons as View + Menu). Keep **Hold**, or pick another shortcut.
+- **Emulators that use Select + Start** (the same buttons as View + Menu) would open the bar too. Switch **Open with** to **Hold**, or pick another shortcut.
 
 ## FAQ
 
@@ -302,6 +303,10 @@ Clips are in `~/Videos/Momento`, screenshots in `~/Videos/Momento/Images`. The n
 <details><summary><b>Why did recording stop?</b></summary>
 
 In Window mode, recording stops when the game's window closes. It also stops if your disk gets almost full. A notification tells you which. Press play in the bar to start again.
+</details>
+<details><summary><b>Can I use it outside games?</b></summary>
+
+Yes. Momento records whatever is on your screen, or one window you pick: a bug you just hit, the last minutes of a call or a stream. Everything works the same.
 </details>
 <details><summary><b>Can I record only the game?</b></summary>
 
@@ -321,7 +326,7 @@ Controller: settings → **Controller**. Keyboard: on KDE, *System Settings → 
 </details>
 <details><summary><b>My controller doesn't open the bar</b></summary>
 
-Hold the two small middle buttons for a moment: **View + Menu** (Xbox, ROG Ally, Steam Deck), **Create + Options** (PlayStation), **− and +** (Nintendo). Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
+Press the two small middle buttons together: **View + Menu** (Xbox, ROG Ally, Steam Deck), **Create + Options** (PlayStation), **− and +** (Nintendo). Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
 </details>
 <details><summary><b>How do I turn off Keep history or the hour warning?</b></summary>
 

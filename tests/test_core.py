@@ -532,7 +532,7 @@ class CLITest(unittest.TestCase):
             req.assert_called_once_with({"cmd": "configure", "changes": {"controller": "on"}}, timeout=30)
             text = out.getvalue()
             self.assertIn("controller = left_paddle", text)
-            self.assertIn("Hold Left paddle (0.3 s) to open or close the bar", text)
+            self.assertIn("Saved. Press Left paddle to open or close the bar.", text)   # a tap by default
             self.assertNotIn("paused", text)             # a controller change never waits for resume
             out = io.StringIO()
             with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
@@ -542,6 +542,28 @@ class CLITest(unittest.TestCase):
             self.assertIn("controller: off", out.getvalue())
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 cli.main(["set", "controllr", "on"])
+
+    def test_controller_watch_follows_config(self):
+        """`momento controller --watch` hands the configured shortcut to the watch tool: a tap by default."""
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, config, gamepad
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            out = io.StringIO()
+            with mock.patch.object(gamepad, "main", return_value=0) as watch, contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "controller", "--watch"]), 0)
+            watch.assert_called_once_with(["--watch", "--chord", "select+start", "--hold-ms", "0"])
+            self.assertIn("press View + Menu to open or close the bar", out.getvalue())
+            config.set_value("controller", "hold_ms", config.HOLD_MS, path)    # Open with: Hold
+            out = io.StringIO()
+            with mock.patch.object(gamepad, "main", return_value=0) as watch, contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["--config", str(path), "controller", "--watch"]), 0)
+            watch.assert_called_once_with(["--watch", "--chord", "select+start", "--hold-ms", "300"])
+            self.assertIn("hold View + Menu (0.3 s) to open or close the bar", out.getvalue())
 
     def test_set_controller_open(self):
         import contextlib
@@ -1200,6 +1222,144 @@ class DaemonControlTest(unittest.TestCase):
         self.assertEqual(st["required"]["1080p/high/60"], storage.required_bytes(self.d.cfg))
 
 
+class SizedRecorder(FakeRecorder):
+    """A fake recorder that "negotiates" a picture size, as the real one learns it from the caps."""
+
+    size = (1920, 1080)
+
+    def start(self, interactive=False):
+        self.source_size = SizedRecorder.size
+        super().start(interactive)
+
+
+class DaemonResolutionCapTest(unittest.TestCase):
+    """The daemon caps the resolution by the recorded picture: status, settings, storage."""
+
+    setUp = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def use_sized(self, size):
+        SizedRecorder.size = size
+        sys.modules["momento.pipeline"].Recorder = SizedRecorder
+        self.d.recorder.stop()
+        self.d.recorder = SizedRecorder(self.d.cfg, self.d.ring, self.d._on_state)
+        self.d.recorder.start()
+
+    def need(self, source=None, **capture):
+        from momento import storage
+
+        return storage.required_bytes({**self.d.cfg, "capture": {**self.d.cfg["capture"], **capture}}, source)
+
+    def settings_reply(self):
+        from unittest import mock
+
+        from momento import settings
+
+        with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}):
+            return self.call({"cmd": "settings"})
+
+    def test_unknown_source_changes_nothing(self):
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]), (None, "1080p", 15000))
+        r = self.settings_reply()
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "1440p", "2160p", "native"])
+        self.assertIsNone(r["source_size"])
+
+    def test_4k_setting_on_a_1080p_screen(self):
+        from momento import config
+
+        self.use_sized((1920, 1080))
+        self.assertEqual(self.d.source_size, (1920, 1080))
+        # 4K would not fit on this disk, what is really recorded (1080p) does
+        self.free = self.need(resolution="1080p") + 10
+        self.assertGreater(self.need(resolution="2160p"), self.free)
+        r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["restarted"], r["state"]), (True, "recording"))
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")   # saved as asked
+        st = self.d.status()
+        self.assertEqual((st["resolution"], st["resolution_effective"], st["source_size"]),
+                         ("2160p", "native", [1920, 1080]))
+        self.assertEqual(st["bitrate_kbps"], 15000)
+        self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
+        self.assertTrue(st["storage"]["ok"])
+        r = self.settings_reply()
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
+        self.assertEqual((r["values"]["resolution"], r["resolution_effective"], r["source_size"]),
+                         ("2160p", "native", [1920, 1080]))
+        req = r["storage"]["required"]
+        self.assertEqual(req["2160p/high/60"], req["1080p/high/60"])
+        self.assertEqual(req["1440p/ultra/120"], req["1080p/ultra/120"])
+        self.assertLess(req["720p/high/60"], req["1080p/high/60"])
+        # a pause keeps what is known; so does a reload
+        self.call({"cmd": "pause"})
+        self.assertEqual(self.d.status()["source_size"], [1920, 1080])
+        self.call({"cmd": "reload"})
+        self.assertEqual(self.d.status()["resolution_effective"], "native")
+
+    def test_screen_change_is_followed(self):
+        self.use_sized((3840, 2160))
+        self.call({"cmd": "configure", "changes": {"resolution": "1440p"}})
+        st = self.d.status()
+        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1440p", 24000))
+        SizedRecorder.size = (1920, 1200)                 # another monitor on the next start
+        self.call({"cmd": "reload"})
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]),
+                         ([1920, 1200], "native", 24000))  # 1200 lines: the 1440p class
+
+    def test_new_window_forgets_the_size(self):
+        self.use_sized((1280, 720))
+        self.assertEqual(self.d.status()["resolution_effective"], "native")
+        SizedRecorder.size = None                         # the next picker is still open
+        self.call({"cmd": "configure", "changes": {"record": "window"}})
+        st = self.d.status()
+        self.assertEqual((st["source_size"], st["resolution_effective"]), (None, "1080p"))
+        SizedRecorder.size = (1001, 701)
+        r = self.call({"cmd": "pick_window"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.d.status()["source_size"], [1001, 701])
+        SizedRecorder.size = None
+        self.call({"cmd": "stop"})
+        self.call({"cmd": "resume"})                      # play from stopped: a new window
+        self.assertIsNone(self.d.status()["source_size"])
+
+    def test_low_storage_warning_counts_what_is_recorded(self):
+        from momento import config, storage
+
+        self.use_sized((1920, 1080))
+        self.path.write_text(self.path.read_text().replace('resolution = "1080p"', 'resolution = "2160p"'))
+        self.call({"cmd": "reload"})
+        self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")
+        self.free = self.need((1920, 1080)) + 10        # 4K wouldn't fit; the 1080p really recorded does
+        st = self.d.status()["storage"]
+        self.assertEqual((st["ok"], st["low"], st["label"]), (True, False, "1080p High"))
+        self.assertEqual(st["needed"], self.need(resolution="1080p"))
+        self.free = self.need((1920, 1080)) - 10
+        st = self.d.status()["storage"]
+        self.assertTrue(st["low"])
+        self.assertTrue(storage.low_message(st, 3600).startswith("Low storage: 60 min at 1080p High needs "))
+        # Keep history counts the saved hour at the recorded size too
+        self.d.cfg["buffer"]["keep_history"] = True
+        self.d.cfg["output"]["dir"] = self._tmp.name      # clips on the buffer's disk
+        self.free = 10**13
+        st = self.d.status()["storage"]
+        self.assertEqual(st["needed"], self.need(resolution="1080p") + storage.buffer_bytes(
+            {**self.d.cfg, "capture": {**self.d.cfg["capture"], "resolution": "1080p"}}))
+
+    def test_configure_refusal_counts_the_source(self):
+        self.use_sized((1920, 1080))
+        # 1440p Ultra records as 1080p Ultra here: refused only when that doesn't fit
+        self.free = self.need((1920, 1080), resolution="1440p", quality="ultra") - 1
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.assertEqual((r["ok"], r.get("code")), (False, "no_storage"))
+        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p", quality="ultra"))
+        self.free += 1
+        r = self.call({"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}})
+        self.assertTrue(r["ok"], r)
+
+
 class StorageTest(unittest.TestCase):
     def cfg(self, **capture):
         from momento import config
@@ -1357,6 +1517,99 @@ def _feed(ring: RingBuffer, paths, session: str, t0: float, length: float = 10.0
 
 def _index_lines(d: Path) -> list[dict]:
     return [json.loads(line) for line in (d / "index.jsonl").read_text().splitlines()]
+
+
+class ResolutionCapTest(unittest.TestCase):
+    """Presets taller than the recorded picture are not offered and never upscaled."""
+
+    ALL = ["720p", "1080p", "1440p", "2160p", "native"]
+
+    def test_allowed_table(self):
+        from momento import quality
+
+        table = {
+            (1920, 1080): ["720p", "1080p", "native"],
+            (2560, 1440): ["720p", "1080p", "1440p", "native"],
+            (3440, 1440): ["720p", "1080p", "1440p", "native"],       # ultrawide: by height
+            (2560, 1080): ["720p", "1080p", "native"],                 # 21:9 1080p
+            (3840, 2160): self.ALL,
+            (5120, 2880): self.ALL,
+            (1920, 1200): ["720p", "1080p", "native"],                 # 16:10: not 1440p
+            (1280, 800): ["720p", "native"],                           # Steam Deck
+            (1280, 720): ["720p", "native"],                           # a 720p window
+            (1270, 710): ["720p", "native"],                           # within 2 % of 720
+            (1001, 701): ["native"],                                   # 720 is more than 2 % taller
+            (1000, 600): ["native"],                                   # a small window
+            (1920, 1070): ["720p", "1080p", "native"],                 # a window a bit short of 1080
+            (1080, 1920): ["720p", "1080p", "1440p", "native"],        # portrait
+        }
+        for source, want in table.items():
+            self.assertEqual(quality.allowed_resolutions(source), want, source)
+            self.assertEqual(quality.allowed_resolutions(list(source)), want, source)
+        for unknown in (None, [], [0, 1080], ["1920", "1080"], [True, 1080], (1920,), "1920x1080"):
+            self.assertEqual(quality.allowed_resolutions(unknown), self.ALL, unknown)
+            self.assertIsNone(quality.source_size(unknown))
+
+    def test_effective_and_rate_class(self):
+        from momento import quality
+
+        self.assertEqual(quality.effective_resolution("2160p", (1920, 1080)), "native")
+        self.assertEqual(quality.effective_resolution("1440p", (1920, 1200)), "native")
+        self.assertEqual(quality.effective_resolution("1080p", (1920, 1200)), "1080p")
+        self.assertEqual(quality.effective_resolution("1440p", (3440, 1440)), "1440p")
+        self.assertEqual(quality.effective_resolution("native", (640, 480)), "native")
+        self.assertEqual(quality.effective_resolution("2160p", None), "2160p")      # unknown: as set
+        self.assertEqual(quality.effective_resolution("1080P", (1280, 720)), "native")
+        for source, cls in (((1920, 1080), "1080p"), ((1920, 1200), "1440p"), ((3440, 1440), "1440p"),
+                            ((1280, 720), "720p"), ((1001, 701), "720p"), ((640, 480), "720p"),
+                            ((3840, 2160), "2160p"), ((5120, 2880), "native"), (None, "native")):
+            self.assertEqual(quality.rate_class(source), cls, source)
+        self.assertEqual(quality.height_label((2560, 1440)), "1440p")
+        self.assertIsNone(quality.height_label(None))
+
+    def test_bitrate_uses_what_is_recorded(self):
+        from momento import quality
+
+        def kbps(source=None, **cap):
+            return quality.bitrate_kbps({"resolution": "2160p", "quality": "high", "fps": 60, **cap}, source)
+
+        self.assertEqual(kbps(), 45_000)                          # unknown source: as configured
+        self.assertEqual(kbps((3840, 2160)), 45_000)
+        self.assertEqual(kbps((1920, 1080)), 15_000)              # 4K on 1080p costs 1080p
+        self.assertEqual(kbps((2560, 1440)), 24_000)
+        self.assertEqual(kbps((1280, 720)), 10_000)
+        self.assertEqual(kbps((1920, 1080), fps=120), 22_000)     # round(15 x 1.5), like 1080p at 120
+        self.assertEqual(kbps((1920, 1080), bitrate_kbps=50_000), 50_000)   # explicit wins
+        self.assertEqual(kbps((1920, 1080), resolution="720p"), 10_000)     # fits: unchanged
+        self.assertEqual(kbps((1920, 1080), resolution="native"), 24_000)   # native as before
+
+    def test_storage_uses_what_is_recorded(self):
+        from unittest import mock
+
+        from momento import config, storage
+
+        cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
+        cfg["capture"].update(resolution="2160p", quality="high", fps=60)
+        p1080 = {**cfg, "capture": {**cfg["capture"], "resolution": "1080p"}}
+        on_1080 = storage.required_bytes(cfg, (1920, 1080))
+        self.assertEqual(on_1080, storage.required_bytes(p1080))
+        self.assertLess(on_1080, storage.required_bytes(cfg))
+        self.assertEqual(storage.required_bytes(cfg, (3840, 2160)), storage.required_bytes(cfg))
+        self.assertEqual(storage.buffer_bytes(cfg, (1920, 1080)), storage.buffer_bytes(p1080))
+        with mock.patch.object(storage, "free_bytes", return_value=on_1080):
+            self.assertTrue(storage.check(cfg, source=(1920, 1080))["ok"])
+            self.assertFalse(storage.check(cfg)["ok"])
+            req = storage.requirements(cfg, source=(1920, 1080))
+        self.assertEqual(storage.label(cfg, (1920, 1080)), "1080p High")        # what is recorded
+        self.assertEqual(storage.label(cfg, (1920, 1200)), "1200p High")
+        self.assertEqual(storage.label(cfg, (3840, 2160)), "2160p High")
+        self.assertEqual(storage.label(cfg), "2160p High")
+        self.assertEqual(req["current"], "2160p/high/60")               # the saved setting, as is
+        self.assertEqual(req["required"]["2160p/high/60"], on_1080)
+        self.assertEqual(req["required"]["1440p/high/60"], on_1080)
+        self.assertEqual(req["required"]["1080p/high/60"], on_1080)
+        self.assertLess(req["required"]["720p/high/60"], on_1080)
+        self.assertEqual(cfg["capture"]["resolution"], "2160p")          # not mutated
 
 
 class LiveBufferedTest(unittest.TestCase):
@@ -2421,10 +2674,11 @@ class ControllerSettingTest(unittest.TestCase):
     def test_defaults(self):
         cfg = self.config.load(self.path)
         self.assertEqual(self.config.controller(cfg),
-                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 300, "exclusive": True})
+                         {"enabled": True, "chord": ("select", "start"), "hold_ms": 0, "exclusive": True})
         self.assertEqual(self.config.load_controller(self.path), self.config.controller(cfg))
         cur = self.settings.current(cfg)
-        self.assertEqual((cur["controller"], cur["controller_exclusive"]), ("view_menu", "on"))
+        self.assertEqual((cur["controller"], cur["controller_exclusive"], cur["controller_open"]),
+                         ("view_menu", "on", "tap"))
         d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
         self.assertEqual(d["choices"]["controller"], ["off", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
         self.assertIsInstance(d["controller_available"], bool)
@@ -2433,7 +2687,7 @@ class ControllerSettingTest(unittest.TestCase):
         self.path.write_text('[controller]\nopen_chord = ["select", "turbo"]\nhold_ms = -3\n')
         with self.assertLogs("momento.config", "WARNING"):
             ctl = self.config.load_controller(self.path)
-        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 300))
+        self.assertEqual((ctl["chord"], ctl["hold_ms"]), (("select", "start"), 0))       # the defaults
         self.path.write_text("[controller\n")                       # broken TOML: defaults
         self.assertTrue(self.config.load_controller(self.path)["enabled"])
         self.assertTrue(self.config.load_controller(Path(self._tmp.name) / "missing.toml")["enabled"])
@@ -2475,9 +2729,9 @@ class ControllerSettingTest(unittest.TestCase):
         self.assertFalse(self.config.controller(self.config.load(self.path))["exclusive"])
 
     def test_controller_open(self):
-        """Open with: hold (hold_ms > 0, default 300) or tap (hold_ms = 0)."""
+        """Open with: tap (hold_ms = 0, the default) or hold (hold_ms > 0, config.HOLD_MS when chosen)."""
         cfg = self.config.load(self.path)
-        self.assertEqual(self.settings.current(cfg)["controller_open"], "hold")
+        self.assertEqual(self.settings.current(cfg)["controller_open"], "tap")
         d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
         self.assertEqual(d["choices"]["controller_open"], ["hold", "tap"])
         v = self.settings.validate
@@ -2488,14 +2742,17 @@ class ControllerSettingTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad) as cm:
                 v({"controller_open": bad})
             self.assertTrue(str(cm.exception).startswith("controller_open: choose one of: hold, tap"))
-        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {"controller_open": "tap"})
+        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {})   # already a tap
+        self.assertNotIn("hold_ms", self.path.read_text())
+        self.assertEqual(self.settings.apply({"controller_open": "hold"}, self.path), {"controller_open": "hold"})
         self.assertIn("# mine", self.path.read_text())
+        self.assertIn("hold_ms = 300", self.path.read_text())
+        self.assertEqual(self.config.HOLD_MS, 300)
+        self.assertEqual(self.config.load_controller(self.path)["hold_ms"], self.config.HOLD_MS)
+        self.assertEqual(self.settings.apply({"controller_open": "hold"}, self.path), {})
+        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {"controller_open": "tap"})
         self.assertIn("hold_ms = 0", self.path.read_text())
         self.assertEqual(self.config.load_controller(self.path)["hold_ms"], 0)
-        self.assertEqual(self.settings.apply({"controller_open": "tap"}, self.path), {})
-        self.assertEqual(self.settings.apply({"controller_open": "hold"}, self.path), {"controller_open": "hold"})
-        self.assertEqual(self.config.load_controller(self.path)["hold_ms"],
-                         self.config.DEFAULTS["controller"]["hold_ms"])
         # a hand-edited hold reads as "hold" and survives unless the row changes
         self.config.set_value("controller", "hold_ms", 500, self.path)
         cfg = self.config.load(self.path)
@@ -2555,11 +2812,19 @@ class DaemonControllerTest(unittest.TestCase):
             dev.push(g.EV_KEY, code, 0)
         hub.process(dev.fileno())
 
+    def use_hold(self):
+        """Open with: Hold ([controller] hold_ms = 300), as the settings row writes it."""
+        from momento import config
+
+        config.set_value("controller", "hold_ms", 300, self.path)
+        self.d.cfg = config.load(self.path)
+
     def test_chord_opens_bar_without_grabbing(self):
+        self.use_hold()
         self.d._sync_controller()
         self.assertEqual(self.made[-1]["navigate"], False)
         self.assertEqual(self.devs[-1].mask, (self.gamepad.EV_KEY,))   # key events only
-        self.chord(hold=0.2)                                         # shorter than the 0.3 s default
+        self.chord(hold=0.2)                                         # shorter than the 0.3 s hold
         self.assertEqual(self.opened, [])
         self.chord()
         self.assertEqual(len(self.opened), 1)
@@ -2588,7 +2853,21 @@ class DaemonControllerTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["changed"], r["restarted"]), (True, {}, False))
         self.assertIs(self.d.recorder, rec)
 
+    def test_default_opens_on_press(self):
+        """No [controller] hold_ms: a tap opens the bar, nothing to wait for."""
+        self.d._sync_controller()
+        hub = self.d.pads
+        self.assertEqual((self.made[-1]["hold_ms"], hub.hold), (0, 0))
+        g, dev = self.gamepad, self.devs[-1]
+        for code in (g.BTN_SELECT, g.BTN_START):
+            dev.push(g.EV_KEY, code, 1)
+        hub.process(dev.fileno())                                      # no tick: fires on press
+        self.assertEqual(self.opened, [100.0])
+        self.assertEqual(self.devs[-1].grab_calls, 0)
+        self.assertEqual(self.call({"cmd": "settings"})["values"]["controller_open"], "tap")
+
     def test_tap_applies_live_and_opens_on_press(self):
+        self.use_hold()
         self.d._sync_controller()
         rec, hub = self.d.recorder, self.d.pads
         self.assertAlmostEqual(hub.hold, 0.3)
@@ -2765,6 +3044,61 @@ class CLIStatusTest(unittest.TestCase):
         self.assertIn("state: stopped (the recorded window closed)", text)
         self.assertIn("record: window: Elden Ring", text)
         self.assertIn("history: kept when recording stops", text)
+
+    ST = {"ok": True, "state": "recording", "recording": True, "buffered": 60.0, "max_seconds": 3600,
+          "target": "screen", "resolution": "2160p", "fps": 60, "quality": "high", "bitrate_kbps": 15000,
+          "resolution_effective": "native", "source_size": [1920, 1080]}
+
+    def test_status_shows_the_resolution_really_recorded(self):
+        _code, text = self.run_cli(["status"], [self.ST])
+        self.assertIn("video: 2160p, recording at 1080p (your screen's size), 60 fps, high (15 Mbps)", text)
+        win = {**self.ST, "target": "window", "source_size": [1280, 720], "bitrate_kbps": 10000}
+        _code, text = self.run_cli(["status"], [win])
+        self.assertIn("video: 2160p, recording at 1280\u00d7720 (the window's size), 60 fps", text)
+        for fits in ({**self.ST, "resolution": "1080p", "resolution_effective": "1080p"},
+                     {**self.ST, "resolution": "native"},
+                     {k: v for k, v in self.ST.items() if k not in ("resolution_effective", "source_size")}):
+            _code, text = self.run_cli(["status"], [fits])
+            self.assertNotIn("recording at", text)
+            self.assertIn(f"video: {fits['resolution']} 60 fps", text)
+
+    def test_set_resolution_above_the_screen_notes_it(self):
+        conf = {"ok": True, "changed": {"resolution": "2160p"}, "restarted": True, "paused": False,
+                "state": "starting"}
+        code, text = self.run_cli(["set", "resolution", "4k"], [conf, self.ST])
+        self.assertEqual(code, 0)
+        self.assertEqual(text.splitlines(), ["resolution = 2160p", "Recording restarted with the new setting.",
+                                             "Your screen is 1080p, so this records at 1080p; "
+                                             "a bigger size would only waste space."])
+        code, text = self.run_cli(["set", "resolution", "1080p"],
+                                  [{**conf, "changed": {"resolution": "1080p"}}, self.ST])
+        self.assertNotIn("waste", text)
+        win = {**self.ST, "target": "window", "source_size": [1280, 720]}
+        _code, text = self.run_cli(["set", "resolution", "1440p"], [{**conf, "changed": {"resolution": "1440p"}}, win])
+        self.assertIn("The window is 1280\u00d7720, so this records at 1280\u00d7720;", text)
+        # no size known yet (or no status): nothing to add
+        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, {**self.ST, "source_size": None}])
+        self.assertNotIn("waste", text)
+        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, OSError("gone")])
+        self.assertNotIn("waste", text)
+
+    def test_settings_show_the_resolution_really_recorded(self):
+        from unittest import mock
+
+        from momento import settings, storage
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text(f'[capture]\nresolution = "2160p"\ntarget = "screen"\n[buffer]\ndir = "{d}/buf"\n')
+            with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                    mock.patch.object(storage, "free_bytes", return_value=10**12):
+                _code, text = self.run_cli(["--config", str(path), "settings"], [self.ST])
+                self.assertIn("resolution: 2160p, records at 1080p (your screen's size)", text)
+                self.assertIn("bitrate: 15 Mbps (automatic)", text)
+                self.assertIn("disk use: about 7.2 GB for the full buffer", text)
+                _code, text = self.run_cli(["--config", str(path), "settings"], [OSError("not running")])
+                self.assertIn("resolution: 2160p\n", text)
+                self.assertIn("bitrate: 45 Mbps (automatic)", text)
 
     def test_stop_and_resume_messages(self):
         _code, text = self.run_cli(["stop"], [{"ok": True, "state": "stopped", "buffer_cleared": False}])

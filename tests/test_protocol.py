@@ -58,6 +58,8 @@ class _FakeRecorder:
         self.recording = True
         self.on_state("recording", None)
 
+    source_size = None   # the picture size the real recorder learns from the caps
+
     def stop(self):
         self.stopped += 1
         self.recording = False
@@ -318,6 +320,31 @@ class DaemonContractTest(_DaemonCase):
             self.assertEqual(validate_reply("configure", r), [], r)
             self.assertFalse(r["ok"])
 
+    def test_resolution_cap(self):
+        # Before any caps: nothing known, the setting is what is recorded.
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["source_size"], r["resolution_effective"]), (None, "1080p"))
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual(r["resolution_allowed"], r["choices"]["resolution"])
+        self.assertEqual((r["source_size"], r["resolution_effective"]), (None, "1080p"))
+        # The recorder learns a 1920x1080 screen; 4K is saved but records at 1080p.
+        _FakeRecorder.source_size = (1920, 1080)
+        self.addCleanup(setattr, _FakeRecorder, "source_size", None)
+        r = self.check({"cmd": "configure", "changes": {"resolution": "4k"}}, ok=True)
+        self.assertEqual(r["changed"], {"resolution": "2160p"})
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["resolution"], r["resolution_effective"], r["source_size"]),
+                         ("2160p", "native", [1920, 1080]))
+        self.assertEqual(r["bitrate_kbps"], 15000)
+        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p"))
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
+        self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("2160p", "native"))
+        req = r["storage"]["required"]
+        self.assertEqual(req["2160p/high/60"], req["1080p/high/60"])
+        self.assertTrue(validate_reply("status", {**self.call({"cmd": "status"}), "source_size": [1920]}))
+        self.assertTrue(validate_reply("status", {**self.call({"cmd": "status"}), "source_size": [0, 1080]}))
+
     def test_configure_storage_rules(self):
         shutil.rmtree(self.d.buffer_dir)
         self.free = self.need(resolution="1440p", quality="ultra") - 1
@@ -406,7 +433,11 @@ class DaemonContractTest(_DaemonCase):
 
     def test_controller_open(self):
         r = self.check({"cmd": "settings"}, ok=True)
-        self.assertEqual((r["values"]["controller_open"], r["choices"]["controller_open"]), ("hold", ["hold", "tap"]))
+        self.assertEqual((r["values"]["controller_open"], r["choices"]["controller_open"]), ("tap", ["hold", "tap"]))
+        r = self.check({"cmd": "configure", "changes": {"controller_open": "hold"}}, ok=True)
+        self.assertEqual((r["changed"], r["restarted"], r["state"]), ({"controller_open": "hold"}, False, "recording"))
+        self.assertIn("hold_ms = 300", self.path.read_text())
+        self.assertEqual(self.check({"cmd": "settings"}, ok=True)["values"]["controller_open"], "hold")
         r = self.check({"cmd": "configure", "changes": {"controller_open": "tap"}}, ok=True)
         self.assertEqual((r["changed"], r["restarted"], r["state"]), ({"controller_open": "tap"}, False, "recording"))
         self.assertIn("hold_ms = 0", self.path.read_text())
@@ -599,6 +630,16 @@ class ValidatorTest(unittest.TestCase):
                        "storage": {"required": {}, "current": "x", "free": 1, "reclaimable": 0, "reserve": 1,
                                    "path": "/b"}}
         self.assertEqual(validate_reply("settings", {**settings_ok, "tabs": [["General", ["record"]]]}), [])
+        # resolution cap (additive: optional)
+        self.assertEqual(validate_reply("status", {**status, "source_size": [2560, 1440],
+                                                   "resolution_effective": "native"}), [])
+        self.assertEqual(validate_reply("status", {**status, "source_size": None}), [])
+        for bad in ([1920], [1920, "1080"], [1920, 1080.5], [True, 1080], "1920x1080"):
+            self.assertTrue(validate_reply("status", {**status, "source_size": bad}), bad)
+        self.assertEqual(validate_reply("settings", {**settings_ok, "source_size": [1920, 1080],
+                                                     "resolution_allowed": ["720p", "1080p", "native"],
+                                                     "resolution_effective": "1080p"}), [])
+        self.assertTrue(validate_reply("settings", {**settings_ok, "resolution_allowed": "720p"}))
         self.assertTrue(validate_reply("settings", {**settings_ok, "tabs": [["General", "record"]]}))
         self.assertEqual(validate_reply("pick_window", {"ok": True, "state": "starting"}), [])
         self.assertEqual(validate_reply("pick_window", {"ok": False, "code": "no_storage", "error": "x",
@@ -636,6 +677,7 @@ class ValidatorTest(unittest.TestCase):
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)
             self.assertIn("ok", spec["reply"], name)
         self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 30)
+        self.assertEqual(protocol.RESOLUTION_TOLERANCE, quality.SOURCE_TOLERANCE)
 
 
 class IndexRecordTest(unittest.TestCase):
