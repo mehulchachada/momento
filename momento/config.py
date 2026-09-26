@@ -48,9 +48,10 @@ DEFAULTS = {
         # auto | vah264enc | vaapih264enc | nvh264enc | qsvh264enc | x264enc | openh264enc
         "encoder": "auto",
         "show_cursor": False,
-        # screen = the whole monitor | window = only the game window the user picks
-        # (screen-share portal only; the bar and notifications are then never recorded).
-        "target": "screen",
+        # window = only the window the user picks (screen-share portal only; the bar
+        # and notifications are then never recorded) | screen = the whole monitor.
+        # Window mode waits for the play button instead of starting at login.
+        "target": "window",
     },
     "audio": {
         "desktop": True,
@@ -64,6 +65,12 @@ DEFAULTS = {
         "max_seconds": 3600,
         "segment_seconds": 10,
         "dir": str(CACHE_DIR / "buffer"),
+        # Keep the replay when recording stops (Stop, or the recorded window closing);
+        # with this on, every full buffer length ("hour") is also saved to the clips
+        # folder. Off: stopping clears it.
+        "keep_history": False,
+        # Minutes before the hour mark to warn (3-10; the bar offers 10, 5, 3).
+        "warn_minutes": 10,
     },
     "output": {
         "dir": "",  # empty = XDG Videos dir / Momento
@@ -121,6 +128,31 @@ def forget_portal_token(target: str) -> bool:
         return True
     except OSError:  # not there (nothing to forget) or not removable
         return False
+
+
+WARN_MINUTES = (10, 5, 3)  # what the settings UI offers; any whole number 3-10 is valid
+WARN_RANGE = (3, 10)
+
+
+def keep_history(cfg: dict) -> bool:
+    """[buffer] keep_history: keep the replay when recording stops (and save each full hour)."""
+    return bool((cfg.get("buffer") or {}).get("keep_history", DEFAULTS["buffer"]["keep_history"]))
+
+
+def warn_minutes(cfg: dict) -> int:
+    """[buffer] warn_minutes, checked: a value outside 3-10 falls back to the default (logged)."""
+    import logging
+
+    value = (cfg.get("buffer") or {}).get("warn_minutes", DEFAULTS["buffer"]["warn_minutes"])
+    try:
+        minutes = int(value)
+        if isinstance(value, bool) or minutes != value or not WARN_RANGE[0] <= minutes <= WARN_RANGE[1]:
+            raise ValueError
+    except (ValueError, TypeError):
+        minutes = DEFAULTS["buffer"]["warn_minutes"]
+        logging.getLogger(__name__).warning("[buffer] warn_minutes must be %d-%d; using %d",
+                                            *WARN_RANGE, minutes)
+    return minutes
 
 
 def controller(cfg: dict) -> dict:

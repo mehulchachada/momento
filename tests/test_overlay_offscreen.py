@@ -54,6 +54,7 @@ DEVICES = {
 
 def settings_reply(devices=DEVICES, free=None, **values):
     cfg = config.load(Path("/nonexistent/momento-test.toml"))
+    values.setdefault("record", "screen")  # these tests start in full screen mode
     for k, v in values.items():
         for section, key, val in settings.writes(k, settings.normalize(k, v)):
             cfg[section][key] = val
@@ -952,7 +953,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.open_settings(bar)
         row = bar.row("record")
         self.assertIs(bar.rows[0], row)
-        self.assertEqual([b.text() for b in row.buttons], ["Full screen", "Game window"])
+        self.assertEqual([b.text() for b in row.buttons], ["Full screen", "Window"])
         self.assertEqual((row.value, row.icon.kind), ("screen", "fullscreen"))
         self.assertTrue(bar.change_btn.isHidden())                   # full screen: nothing to change
         xs = {r.icon.mapTo(bar, r.icon.rect().topLeft()).x() for r in bar.visible_rows()}

@@ -20,7 +20,7 @@ DEFAULT_SOURCE = "@DEFAULT_SOURCE@"
 
 # key -> one-line help (also the order `momento set` lists them in)
 KEYS = {
-    "record": "screen (the whole screen), window (only the game window you pick)",
+    "record": "window (only the window you pick; the default), screen (the whole screen)",
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
@@ -31,13 +31,29 @@ KEYS = {
     "controller": "off, on, or the shortcut that opens the bar: view_menu, left_paddle, right_paddle, "
                   "l3_r3, or buttons joined with + (e.g. select+start)",
     "controller_exclusive": "on, off (take the controller over while the bar is open)",
+    "keep_history": "off, on (keep the replay when recording stops, and save every full hour "
+                    "to your clips folder)",
+    "hour_warning": "10, 5, 3 (minutes before the hour mark to warn; any whole number 3-10)",
+    "instant_bar": "on, off (keep the clip bar loaded so it opens instantly; uses ~80-120 MB)",
 }
 
 # Settings that only concern the controller: changing them never restarts recording.
 CONTROLLER_KEYS = ("controller", "controller_exclusive")
+# Every setting that takes effect without restarting the recording.
+LIVE_KEYS = CONTROLLER_KEYS + ("keep_history", "hour_warning", "instant_bar")
+
+# How a settings UI groups the keys: (tab name, keys in display order). "bitrate"
+# is left out on purpose (terminal only: `momento set bitrate`).
+TABS = (
+    ("General", ("record", "keep_history")),
+    ("Video", ("resolution", "fps", "quality")),
+    ("Audio", ("audio_source", "mic", "mic_device")),
+    ("Controller", ("controller", "controller_exclusive")),
+    ("Misc", ("hour_warning", "instant_bar")),
+)
 
 # What gets recorded: user-facing value -> label (the bar, `momento settings`).
-RECORD_LABELS = {"screen": "Full screen", "window": "Game window"}
+RECORD_LABELS = {"screen": "Full screen", "window": "Window"}
 _RECORD_ALIASES = {"screen": "screen", "full": "screen", "fullscreen": "screen", "full screen": "screen",
                    "full-screen": "screen", "monitor": "screen", "display": "screen", "desktop": "screen",
                    "window": "window", "game": "window", "game window": "window", "game-window": "window",
@@ -55,6 +71,37 @@ def _device(text) -> str:
     if len(text) > 256 or any(ord(c) < 32 for c in text):
         raise ValueError("not a valid device name")
     return text
+
+
+def _on_off(value) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    v = str(value).strip().lower()
+    if v in _ON:
+        return "on"
+    if v in _OFF:
+        return "off"
+    raise ValueError("choose one of: on, off")
+
+
+def _warn_minutes(value) -> int:
+    """10 / "5" / "5m" / "3 min" -> minutes, a whole number 3-10."""
+    lo, hi = config.WARN_RANGE
+    choices = ", ".join(map(str, config.WARN_MINUTES))
+    if isinstance(value, bool):
+        raise ValueError(f"choose {choices} (minutes)")
+    text = str(value).strip().lower()
+    for unit in ("minutes", "minute", "mins", "min", "m"):
+        if text.endswith(unit):
+            text = text[: -len(unit)].strip()
+            break
+    try:
+        v = int(text)
+    except ValueError:
+        raise ValueError(f"choose {choices} (minutes)") from None
+    if not lo <= v <= hi:
+        raise ValueError(f"choose {choices} (any whole number of minutes from {lo} to {hi})")
+    return v
 
 
 def normalize(key: str, value):
@@ -100,15 +147,10 @@ def normalize(key: str, value):
         if v.lower() == "off":
             return "off"
         return _device(v)
-    if key == "mic":
-        if isinstance(value, bool):
-            return "on" if value else "off"
-        v = str(value).strip().lower()
-        if v in _ON:
-            return "on"
-        if v in _OFF:
-            return "off"
-        raise ValueError("choose one of: on, off")
+    if key in ("mic", "controller_exclusive", "keep_history", "instant_bar"):
+        return _on_off(value)
+    if key == "hour_warning":
+        return _warn_minutes(value)
     if key == "mic_device":
         v = str(value).strip()
         if v.lower() in ("default", DEFAULT_SOURCE.lower()):
@@ -116,15 +158,6 @@ def normalize(key: str, value):
         return _device(v)
     if key == "controller":
         return _controller(value)
-    if key == "controller_exclusive":
-        if isinstance(value, bool):
-            return "on" if value else "off"
-        v = str(value).strip().lower()
-        if v in _ON:
-            return "on"
-        if v in _OFF:
-            return "off"
-        raise ValueError("choose one of: on, off")
     raise ValueError(f"unknown setting {key!r} (choose: {', '.join(KEYS)})")
 
 
@@ -222,6 +255,12 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
                 ("controller", "open_chord", buttons or list(gamepad.normalize_chord(value)))]
     if key == "controller_exclusive":
         return [("controller", "exclusive", value == "on")]
+    if key == "keep_history":
+        return [("buffer", "keep_history", value == "on")]
+    if key == "hour_warning":
+        return [("buffer", "warn_minutes", int(value))]
+    if key == "instant_bar":
+        return [("ui", "keep_bar_loaded", value == "on")]
     raise ValueError(f"unknown setting {key!r}")
 
 
@@ -242,6 +281,9 @@ def current(cfg: dict) -> dict:
         "mic_device": "default" if mic_dev == DEFAULT_SOURCE else mic_dev,
         "controller": _chord_value(ctl["chord"]) if ctl["enabled"] else "off",
         "controller_exclusive": "on" if ctl["exclusive"] else "off",
+        "keep_history": "on" if config.keep_history(cfg) else "off",
+        "hour_warning": config.warn_minutes(cfg),
+        "instant_bar": "on" if (cfg.get("ui") or {}).get("keep_bar_loaded", True) else "off",
     }
 
 
@@ -273,7 +315,7 @@ def preview(cfg: dict, changes: dict) -> dict:
 
 
 def describe(cfg: dict, devices: dict | None = None) -> dict:
-    """Everything a settings UI needs: current values, choices, audio devices."""
+    """Everything a settings UI needs: current values, choices, tabs, audio devices."""
     from . import gamepad
 
     return {
@@ -281,7 +323,10 @@ def describe(cfg: dict, devices: dict | None = None) -> dict:
         "values": current(cfg),
         "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
-                    "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS]},
+                    "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS],
+                    "keep_history": ["off", "on"], "hour_warning": list(config.WARN_MINUTES),
+                    "instant_bar": ["on", "off"]},
+        "tabs": [[name, list(keys)] for name, keys in TABS],
         # python-evdev importable: without it the controller settings are saved but unused
         "controller_available": gamepad.available(),
         "devices": list_audio_devices() if devices is None else devices,

@@ -59,7 +59,8 @@ States
 ------
 See ``STATES``. Reported with precedence ``stopped`` > ``paused`` > capture
 state. Transitions: daemon start -> ``starting`` (or ``no_storage`` if a full
-buffer does not fit); ``starting`` -> ``recording`` on the first segment;
+buffer does not fit; window mode: ``stopped`` until the first ``resume``);
+``starting`` -> ``recording`` on the first segment;
 ``starting``/``recording`` -> ``error`` on failure (transient failures retry
 back to ``starting``, fatal ones - no encoder, screen-share refused - stay until
 ``reload``/``configure``); ``recording`` -> ``no_storage`` when free space drops
@@ -67,20 +68,27 @@ below 512 MiB; ``no_storage`` -> ``starting`` when space appears (checked every
 30 s) or on ``resume``; any -> ``paused`` (``pause``); any -> ``stopped``
 (``stop``); ``paused``/``stopped`` -> ``starting`` or ``no_storage``
 (``resume``); ``reload``/``configure`` restart capture unless paused/stopped.
-Window mode (``status.target`` ``"window"``): ``recording``/``starting`` ->
-``no_window`` when the picked window closes (or the picker was dismissed, or
-there is no window to restore on an automatic start); it is never retried
-automatically, and ``resume``/``pick_window`` leave it (-> ``starting``).
+Window mode (``status.target`` ``"window"``): when the recorded window closes,
+``recording`` -> ``stopped`` with ``stop_reason: "window_closed"``, exactly as
+if ``stop`` was sent (history cleared unless ``keep_history``). A dismissed
+picker (or no window to restore) goes back to ``paused`` when the session
+already has footage, else ``stopped``. None of it is retried automatically.
+``no_window`` stays in ``STATES`` for older daemons, which reported these
+cases as ``no_window``; clients treat it like ``stopped``.
 ``status.recording`` is the authoritative "frames are being written" flag.
 
 Commands (fields are in ``COMMANDS``)
 -------------------------------------
 ``status``
     What the recorder is doing; cheap, clients poll it. ``buffered`` = seconds of
-    footage on disk (footage, not wall clock; 0 after ``stop``). ``source`` /
-    ``encoder`` are null until capture has started once. ``error`` is present in
-    state ``error``/``no_storage``/``no_window``. ``storage`` is a ``STORAGE_CHECK``.
-    ``target`` is what is recorded: ``"screen"`` or ``"window"`` (absent: screen).
+    footage on disk (footage, not wall clock; 0 after ``stop`` unless
+    ``keep_history``). ``source`` / ``encoder`` are null until capture has
+    started once. ``error`` is present in state ``error``/``no_storage``
+    (``no_window`` on older daemons). ``storage`` is a ``STORAGE_CHECK``.
+    ``target`` is what is recorded: ``"screen"`` or ``"window"`` (absent: screen);
+    ``target_name`` the picked window's title (null when unknown or full screen).
+    ``stop_reason`` (``STOP_REASONS`` or null) says why it is ``stopped``;
+    ``keep_history`` whether a stop keeps the replay.
 ``save`` {seconds}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
@@ -95,10 +103,11 @@ Commands (fields are in ``COMMANDS``)
     Stop capture, keep the buffer (saves still work). Idempotent. Reply
     ``state: "paused"``.
 ``resume``
-    Start a new capture session (earlier footage stays); also leaves ``stopped``
-    and retries from ``no_storage``/``error``/``no_window`` (window mode: the stored
-    window is restored, or the window picker opens when there is none). A no-op
-    in other states. Refusal: ``code: no_storage`` with ``state`` and
+    Play. From ``paused`` it continues (window mode: the stored window is
+    restored, or the portal asks); from ``stopped`` it starts a new session (the
+    hour marks count from zero; window mode forgets the stored window, so the
+    picker opens). Earlier footage stays. Also retries from
+    ``no_storage``/``error``. A no-op in other states. Refusal: ``code: no_storage`` with ``state`` and
     ``storage``; the daemon is then unpaused in ``no_storage`` and starts by
     itself once there is room.
 ``pick_window``
@@ -108,9 +117,10 @@ Commands (fields are in ``COMMANDS``)
     ``state`` (usually ``starting``). Errors: ``Record is set to Full screen...``
     in screen mode; ``code: no_storage`` as for ``resume``.
 ``stop``
-    End recording AND clear the replay history, but keep the service and hotkey
-    running (``resume`` starts afresh). Reply ``state: "stopped"``,
-    ``buffer_cleared: true``.
+    End recording but keep the service and hotkey running (``resume`` starts a
+    new session). Clears the replay history unless ``keep_history`` is on
+    (``[buffer] keep_history``; then saves keep working). Reply
+    ``state: "stopped"``, ``buffer_cleared``.
 ``quit`` {keep_buffer?}
     Shut the daemon down (reply first, exit ~100 ms later, status 0, so
     ``Restart=on-failure`` does not bring it back). Deletes the buffer unless
@@ -126,7 +136,8 @@ Commands (fields are in ``COMMANDS``)
     empty without pactl), ``fps``, ``max_seconds``, ``config`` path and
     ``storage`` (``STORAGE_REQUIREMENTS``: bytes per ``"<res>/<quality>/<fps>"``).
     ``controller_available`` is false when python-evdev is missing (the
-    controller values are then saved but unused).
+    controller values are then saved but unused). ``tabs`` groups the keys for
+    a UI: ``[[tab name, [keys...]], ...]`` (``settings.TABS``).
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
@@ -135,7 +146,8 @@ open bar reads the controllers itself and releases them when it hides.
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` /
-    ``controller_exclusive`` apply without a reload (``restarted: false``);
+    ``controller_exclusive`` / ``keep_history`` / ``hour_warning`` /
+    ``instant_bar`` apply without a reload (``restarted: false``);
     ``changed`` holds the value read back (``"on"`` -> the shortcut it enables). Refused with ``code: no_storage`` (nothing written) only
     when the new settings do not fit AND raise the requirement over the saved
     ones AND ``force`` is not true; so shrinking always works. With ``force``
@@ -195,10 +207,18 @@ STATES = {
     "starting": "capture is being set up (pipeline built, waiting for the first segment)",
     "recording": "capture is running and segments are being written",
     "paused": "capture stopped by `pause`; the buffer is kept and saveable",
-    "stopped": "capture stopped by `stop`; the buffer was cleared; the service keeps running",
+    "stopped": ("capture stopped by `stop` or the recorded window closing (see stop_reason), or window "
+                "mode before the first play; the buffer was cleared unless keep_history; the service keeps running"),
     "no_storage": "capture blocked: a full buffer does not fit on disk (or the disk ran low)",
-    "no_window": "window mode: the picked window closed (or none is picked); `resume`/`pick_window` asks for one",
+    "no_window": ("older daemons only (window mode: the picked window closed or none is picked); "
+                  "treat like `stopped`"),
     "error": "capture failed; `error` says why (retried automatically unless fatal)",
+}
+
+# Values of `stop_reason` in a status reply (null when not stopped by either).
+STOP_REASONS = {
+    "user": "`stop` (the bar's Stop, `momento stop`)",
+    "window_closed": "window mode: the recorded window closed",
 }
 
 # Values of `code` in an error reply ({"ok": false, "code": ..., "error": ...}).
@@ -251,6 +271,9 @@ SETTING_VALUES = {
     # joined with "+" ("select+mode"); configure also takes "on" (enable, keep the shortcut)
     "controller": (("string",), False),
     "controller_exclusive": (("string",), False),   # "on" | "off"
+    "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
+    "hour_warning": (("integer",), False),  # minutes before the hour mark to warn: 3-10 (UI: 10, 5, 3)
+    "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
 }
 
 SETTING_CHOICES = {
@@ -259,6 +282,9 @@ SETTING_CHOICES = {
     "quality": (("array",), True),
     "fps": (("array",), True),
     "controller": (("array",), False),     # ["off", <preset keys>]
+    "keep_history": (("array",), False),   # ["off", "on"]
+    "hour_warning": (("array",), False),   # [10, 5, 3]
+    "instant_bar": (("array",), False),    # ["on", "off"]
 }
 
 AUDIO_DEVICES = {
@@ -298,12 +324,16 @@ COMMANDS: dict[str, dict] = {
             "encoder": (("string", "null"), True),
             "output_dir": (("string",), True),
             "target": (("string",), False),         # "screen" | "window" (absent: screen)
+            # The reference daemon always sends these three (absent on older daemons):
+            "target_name": (("string", "null"), False),  # window mode: the picked window's title
+            "stop_reason": (("string", "null"), False),  # STOP_REASONS while stopped, else null
+            "keep_history": (("boolean",), False),       # a stop keeps the replay
             "resolution": (("string",), True),
             "quality": (("string",), True),
             "bitrate_kbps": (("integer",), True),   # effective video bitrate
             "fps": (("integer",), True),
             "storage": ((STORAGE_CHECK,), True),
-            "error": (("string",), False),          # with state error / no_storage / no_window
+            "error": (("string",), False),          # with state error / no_storage (/ no_window, older)
             "protocol": (("integer",), False),      # REQUIRED by the spec; see Pending implementation
         },
         "error": {},
@@ -361,7 +391,7 @@ COMMANDS: dict[str, dict] = {
         "reply": {
             "ok": (("boolean",), True),
             "state": (("string",), True),
-            "buffer_cleared": (("boolean",), True),
+            "buffer_cleared": (("boolean",), True),  # false when keep_history kept it
         },
         "error": {},
     },
@@ -399,6 +429,7 @@ COMMANDS: dict[str, dict] = {
             "config": (("string",), True),        # path of config.toml
             "storage": ((STORAGE_REQUIREMENTS,), True),
             "controller_available": (("boolean",), False),  # python-evdev present
+            "tabs": (("array",), False),          # [[tab name, [setting keys]], ...] for a settings UI
         },
         "error": {},
     },
@@ -504,6 +535,8 @@ def _check_enums(obj: dict) -> list[str]:
         problems.append(f"unknown state {obj['state']!r}")
     if "code" in obj and isinstance(obj["code"], str) and obj["code"] not in ERROR_CODES:
         problems.append(f"unknown error code {obj['code']!r}")
+    if isinstance(obj.get("stop_reason"), str) and obj["stop_reason"] not in STOP_REASONS:
+        problems.append(f"unknown stop_reason {obj['stop_reason']!r}")
     return problems
 
 
@@ -533,6 +566,11 @@ def validate_reply(cmd: str, reply, commands: dict | None = None) -> list[str]:
         for side in ("outputs", "inputs"):
             for i, dev in enumerate(reply["devices"].get(side) or []):
                 problems += _check_value(f"devices.{side}[{i}]", dev, (AUDIO_DEVICE,))
+    if spec is commands.get("settings") and reply["ok"] and isinstance(reply.get("tabs"), list):
+        for i, tab in enumerate(reply["tabs"]):
+            if not (isinstance(tab, list) and len(tab) == 2 and isinstance(tab[0], str)
+                    and isinstance(tab[1], list) and all(isinstance(k, str) for k in tab[1])):
+                problems.append(f"tabs[{i}]: expected [name, [keys...]]")
     return problems
 
 

@@ -79,7 +79,8 @@ class _DaemonCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.path = self.tmp / "config.toml"
         buf, out = self.tmp / "buffer", self.tmp / "clips"
-        self.path.write_text(f'[capture]\nresolution = "1080p"\n\n[buffer]\ndir = "{buf}"\n\n'
+        # Full screen: records from the start (window mode waits for play).
+        self.path.write_text(f'[capture]\nresolution = "1080p"\ntarget = "screen"\n\n[buffer]\ndir = "{buf}"\n\n'
                              f'[output]\ndir = "{out}"\n')
         fake = types.ModuleType("momento.pipeline")
         fake.Recorder = _FakeRecorder
@@ -308,27 +309,58 @@ class DaemonContractTest(_DaemonCase):
 
         self.addCleanup(config.portal_token_path("window").unlink, missing_ok=True)
         r = self.check({"cmd": "status"}, ok=True)
-        self.assertEqual(r["target"], "screen")
+        self.assertEqual((r["target"], r["target_name"], r["stop_reason"], r["keep_history"]),
+                         ("screen", None, None, False))
         self.check({"cmd": "pick_window"}, ok=False)                 # screen mode: refused
         r = self.check({"cmd": "configure", "changes": {"record": "window"}}, ok=True)
         self.assertEqual(r["changed"], {"record": "window"})
         self.assertEqual(self.check({"cmd": "status"})["target"], "window")
-        # the picked window closes: no_window, with a message, footage kept
+        # the picked window closes: stopped, as if Stop was pressed; never "no_window"
         self.fill(2)
         self.d.recorder.recording = False
         self.d.recorder.on_state("no_window", "The game window closed \u2014 pick a window to keep recording")
         r = self.check({"cmd": "status"}, ok=True)
-        self.assertEqual((r["state"], r["recording"]), ("no_window", False))
-        self.assertIn("window closed", r["error"])
-        self.assertGreater(r["buffered"], 0)
+        self.assertEqual((r["state"], r["recording"], r["stop_reason"]), ("stopped", False, "window_closed"))
+        self.assertNotIn("error", r)
+        self.assertEqual(r["buffered"], 0)                           # keep_history is off
         r = self.check({"cmd": "pick_window"}, ok=True)
         self.assertIn(r["state"], ("starting", "recording"))
-        self.d.recorder.on_state("no_window", "No game window picked")
+        self.assertIsNone(self.check({"cmd": "status"})["stop_reason"])
+        self.d.recorder.on_state("no_window", "No game window picked")   # picker dismissed, nothing recorded
+        self.assertEqual(self.check({"cmd": "status"})["state"], "stopped")
         self.assertIn(self.check({"cmd": "resume"}, ok=True)["state"], ("starting", "recording"))
         shutil.rmtree(self.d.buffer_dir)
         self.free = self.need() - 1
         r = self.check({"cmd": "pick_window"}, ok=False, code="no_storage")
         self.assertEqual(r["state"], "no_storage")
+
+    def test_keep_history(self):
+        r = self.check({"cmd": "configure", "changes": {"keep_history": "on", "hour_warning": 5,
+                                                        "instant_bar": "off"}}, ok=True)
+        self.assertEqual((r["restarted"], r["state"]), (False, "recording"))  # none of them restarts
+        self.fill(2)
+        r = self.check({"cmd": "stop"}, ok=True)
+        self.assertEqual((r["state"], r["buffer_cleared"]), ("stopped", False))
+        st = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((st["state"], st["stop_reason"], st["keep_history"]), ("stopped", "user", True))
+        self.assertGreater(st["buffered"], 0)
+        from momento import exporter
+
+        with mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out)):
+            self.check({"cmd": "save", "seconds": 15}, ok=True)          # saving works while stopped
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"]),
+                         ("on", 5, "off"))
+
+    def test_settings_tabs(self):
+        from momento import settings
+
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual(r["tabs"], [[name, list(keys)] for name, keys in settings.TABS])
+        self.assertEqual(r["choices"]["hour_warning"], [10, 5, 3])
+        for _name, keys in r["tabs"]:
+            for key in keys:
+                self.assertIn(key, protocol.SETTING_KEYS)
 
     def test_unknown_command(self):
         for msg in ({"cmd": "frobnicate"}, {}, {"cmd": 3}):
@@ -469,6 +501,21 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(validate_reply("status", {**status, "target": "window", "state": "no_window",
                                                    "error": "The game window closed"}), [])
         self.assertTrue(validate_reply("status", {**status, "target": 2}))
+        # keep history / window name (additive: optional, nullable)
+        self.assertEqual(validate_reply("status", {**status, "state": "stopped", "stop_reason": "window_closed",
+                                                   "target_name": None, "keep_history": True}), [])
+        self.assertEqual(validate_reply("status", {**status, "stop_reason": None, "target_name": "Hades"}), [])
+        self.assertTrue(validate_reply("status", {**status, "stop_reason": "bored"}))
+        self.assertTrue(validate_reply("status", {**status, "keep_history": "on"}))
+        settings_ok = {"ok": True, "values": {"record": "window", "resolution": "1080p", "quality": "high",
+                                              "fps": 60, "bitrate": 0, "audio_source": "default", "mic": "off",
+                                              "mic_device": "default"},
+                       "choices": {"record": [], "resolution": [], "quality": [], "fps": []},
+                       "devices": {"outputs": [], "inputs": []}, "fps": 60, "max_seconds": 3600, "config": "/c",
+                       "storage": {"required": {}, "current": "x", "free": 1, "reclaimable": 0, "reserve": 1,
+                                   "path": "/b"}}
+        self.assertEqual(validate_reply("settings", {**settings_ok, "tabs": [["General", ["record"]]]}), [])
+        self.assertTrue(validate_reply("settings", {**settings_ok, "tabs": [["General", "record"]]}))
         self.assertEqual(validate_reply("pick_window", {"ok": True, "state": "starting"}), [])
         self.assertEqual(validate_reply("pick_window", {"ok": False, "code": "no_storage", "error": "x",
                                                         "state": "no_storage"}), [])
@@ -489,8 +536,9 @@ class ValidatorTest(unittest.TestCase):
 
         self.assertEqual(set(protocol.SETTING_KEYS), set(settings.KEYS))
         self.assertIn("record", protocol.SETTING_CHOICES)
-        self.assertIn("no_window", protocol.STATES)
-        self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode is an additive change
+        self.assertIn("no_window", protocol.STATES)     # kept for older daemons
+        self.assertEqual(set(protocol.STOP_REASONS), {"user", "window_closed"})
+        self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode, keep history: additive changes
         self.assertEqual(protocol.PROTOCOL_VERSION, 1)
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)

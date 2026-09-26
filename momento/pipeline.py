@@ -9,8 +9,10 @@ setting change or restart) stays saveable.
 Window mode (``[capture] target = "window"``, portal source): the portal is
 asked for one window instead of a monitor. When that window closes, the stream
 ends; capture then stops in state ``no_window`` with no automatic retry (a
-retry could open the picker again and again). The buffered footage stays, and
-the segment being written is finished first. A window's size can change
+retry could open the picker again and again). The segment being written is
+finished first; what happens to the buffer is the daemon's call (it treats a
+closed window like the user pressing Stop). Any other failure in window mode
+stops in ``error``, also without a retry. A window's size can change
 mid-stream: it is scaled (with black bars) to the configured resolution, and
 with ``native`` the output size is locked to the first size of the session, so
 the encoder output never changes inside a session.
@@ -54,10 +56,11 @@ STOP_TIMEOUT = 3.0
 # few frames of pipeline latency behind the moment flush() was called.
 FLUSH_TOLERANCE = 0.25
 
-# Window mode messages (state "no_window"); the clip bar shows its own wording.
+# Window mode messages; the clip bar shows its own wording. WINDOW_CLOSED and
+# WINDOW_NOT_PICKED come with state "no_window", WINDOW_STOPPED with "error".
 WINDOW_CLOSED = "The game window closed \u2014 pick a window to keep recording"
 WINDOW_NOT_PICKED = "No game window picked \u2014 press play to pick one"
-WINDOW_STOPPED = "Window capture stopped \u2014 pick a window to keep recording"
+WINDOW_STOPPED = "Window capture stopped \u2014 press play to try again"
 
 
 @dataclass(frozen=True)
@@ -610,10 +613,16 @@ class Recorder:
             return
         if self.window_mode and (source_lost or self._got_fragment):
             # No automatic retry for a window: a new session could open the picker
-            # again and again. Finish the segment being written, keep the buffer.
+            # again and again. Finish the segment being written first.
             self._teardown(graceful=self._got_fragment, source_lost=source_lost)
-            self._window_gone(WINDOW_CLOSED if source_lost else WINDOW_STOPPED,
-                              forget_token=source_lost and self.source_name == "portal")
+            if source_lost:
+                self._window_gone(WINDOW_CLOSED, forget_token=self.source_name == "portal")
+            else:
+                # Not the window going away (e.g. the encoder failed): keep the
+                # window's token, so play restores it without asking.
+                self._close_portal()
+                self._fatal(WINDOW_STOPPED)
+                self._fire_flush_waiters()
             return
         self._teardown(graceful=False)
         if not self._got_fragment:

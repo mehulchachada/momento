@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import os
 import shutil
 import signal
 import subprocess
@@ -59,6 +61,95 @@ def spawn_overlay() -> None:
         log.error("cannot launch overlay: %s", e)
 
 
+class HourMarks:
+    """Footage recorded in the current session, and the "hour" marks it crosses.
+
+    A session starts with play from stopped (or the service starting) and runs
+    through pauses; only footage counts, fed in segment by segment, so there is
+    no clock to fake in tests. A mark is every ``length`` seconds of footage
+    (``buffer.max_seconds``): from the first one on, the ring starts replacing
+    the start of the session. ``add`` returns what to do:
+
+    * ``("warn", seconds_left)``: ``warn`` seconds before a mark, once per mark.
+      Before the first mark only, unless ``keep_history`` (then it announces
+      every hour's save). Skipped when the lead is as long as the buffer.
+    * ``("mark", offset)``: a mark was crossed ``offset`` seconds into the piece
+      just added (so its wall-clock time is that segment's start + offset).
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.footage = 0.0
+        self.marks = 0    # marks crossed so far
+        self.warned = 0   # the highest mark warned about
+
+    def add(self, seconds: float, length: float, warn: float, keep_history: bool) -> list[tuple]:
+        events = []
+        if length <= 0 or seconds <= 0:
+            return events
+        before = self.footage
+        self.footage += seconds
+        while self.footage >= (self.marks + 1) * length:
+            self.marks += 1
+            events.append(("mark", self.marks * length - before))
+        nxt = (self.marks + 1) * length
+        warn_at = nxt - warn
+        if (self.warned <= self.marks and warn_at > self.marks * length and self.footage >= warn_at
+                and (keep_history or self.marks == 0)):
+            self.warned = self.marks + 1
+            events.append(("warn", nxt - self.footage))
+        return events
+
+
+def span_label(seconds: float) -> str:
+    """3600 -> "60 minutes", 60 -> "1 minute", 90 -> "1m30s"."""
+    seconds = int(round(seconds))
+    if seconds % 60:
+        return durations.label(seconds)
+    minutes = seconds // 60
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def _private_bus():
+    """A session-bus connection of our own, with no main loop (for blocking calls in a thread)."""
+    try:
+        import dbus
+        import dbus.mainloop
+
+        return dbus.SessionBus(private=True, mainloop=dbus.mainloop.NULL_MAIN_LOOP)
+    except Exception:  # noqa: BLE001 - windowname then opens the bus itself
+        log.debug("no private session bus", exc_info=True)
+        return None
+
+
+def _window_title(token: str) -> str | None:
+    """The picked window's title from its restore token; None when unknown.
+
+    windowname asks the portal's permission store over D-Bus (a few ms; it has its
+    own timeout). This runs in a worker thread, so it gets a private connection
+    without a main loop instead of the daemon's shared one. Imported here so a
+    missing or broken module only costs the name.
+    """
+    bus = None
+    try:
+        from . import windowname
+
+        bus = _private_bus()
+        name = windowname.title_for_token(token, bus=bus)
+    except Exception:  # noqa: BLE001 - the name is a nicety, never an error
+        log.debug("window name lookup failed", exc_info=True)
+        return None
+    finally:
+        if bus is not None:
+            try:
+                bus.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return name if isinstance(name, str) and name.strip() else None
+
+
 def _popen_bar():
     """The resident clip bar: built once, hidden, shown by the hotkey (see overlay.py)."""
     return subprocess.Popen(
@@ -78,7 +169,8 @@ class Daemon:
         self.bus = bus
         self.buffer_dir = Path(cfg["buffer"]["dir"])
         # The buffer persists in buffer_dir (index.jsonl): it survives pause/resume,
-        # setting changes, restarts and reboots. Only an explicit quit clears it.
+        # setting changes, restarts and reboots. quit clears it, and so does a stop
+        # unless [buffer] keep_history.
         self.ring = RingBuffer(cfg["buffer"]["max_seconds"], directory=self.buffer_dir)
         self.state = "starting"
         self.error: str | None = None
@@ -86,8 +178,20 @@ class Daemon:
         self.server = None
         self.shortcut = None
         self.paused = False
-        self.stopped = False  # explicit Stop: paused + history cleared, service keeps running
+        # Stopped: paused, and the next play starts a new session. Set by Stop, by
+        # the recorded window closing, and in window mode until the first play.
+        # The history is cleared on a stop unless [buffer] keep_history.
+        self.stopped = False
+        self.stop_reason: str | None = None  # "user" | "window_closed" (status.stop_reason)
         self._stopping = False
+        # The current session's footage and hour marks (see HourMarks).
+        self.hours = HourMarks()
+        self.ring.on_closed = self._on_segment_closed
+        # Window mode: the picked window's title (status.target_name), looked up
+        # off the main loop once per portal session.
+        self.target_name: str | None = None
+        self._name_token: str | None = None
+        self._name_gen = 0
         # Disk-space guard: set while capture is blocked (state "no_storage").
         self.storage_error: str | None = None
         self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
@@ -121,7 +225,14 @@ class Daemon:
 
             register_app_id(self.bus, config.APP_ID)
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
-        self._start_recorder()  # our own buffer (if any is left) counts as reclaimable
+        self.hours.reset()
+        if self._waits_for_play():
+            # Window mode never records on its own at login (that would mean a
+            # picker): it waits, stopped, until the user presses play.
+            self.paused = self.stopped = True
+            log.info("window mode: waiting for play to pick a window")
+        else:
+            self._start_recorder()  # our own buffer (if any is left) counts as reclaimable
         from gi.repository import GLib
 
         self._storage_timer = GLib.timeout_add_seconds(STORAGE_CHECK_SECONDS, self._storage_tick)
@@ -329,13 +440,177 @@ class Daemon:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
         was = self.state
         self.state = state
-        self.error = detail if state in ("error", "no_window") else None
-        if state == "no_window" and was == "recording":
-            # Window mode: the game window went away mid-recording. Capture stays
-            # off (no retry could pick a window without asking); say so once.
-            notify(self.bus, "Momento: the game window closed",
-                   "Recording stopped; what was recorded can still be saved.\n"
-                   "Open the bar and press play to pick a window.", "dialog-information")
+        self.error = detail if state == "error" else None
+        if state == "recording" and self._window_target():
+            self._look_up_target_name()
+        if state != "no_window":
+            return
+        # Window mode, capture ended without being asked to. Clients never see
+        # "no_window": it becomes a stop (or a pause) here.
+        if was == "recording":
+            # The recorded window closed: exactly like pressing Stop. The recorder
+            # has already finished the segment being written.
+            cleared = self._stop_capture("window_closed")
+            if cleared:
+                body = "Recording stopped. Replay cleared (turn on Keep history in Settings to keep it)."
+            else:
+                body = "Recording stopped. Your replay is kept — open the bar to save it."
+            notify(self.bus, "Momento: game closed", body, "dialog-information")
+            return
+        if self.stopped:
+            return  # already stopped (e.g. the portal session closing after the window)
+        # The picker was dismissed, or there was no window to restore: nothing new
+        # was recorded. Back to where play was pressed: paused if this session
+        # already has footage (play continues it), else stopped.
+        self.paused = True
+        self.stopped = self.hours.footage == 0
+        log.info("no window to record; %s", "stopped" if self.stopped else "paused")
+
+    def _window_target(self) -> bool:
+        return config.capture_target(self.cfg["capture"]) == "window"
+
+    def _waits_for_play(self) -> bool:
+        """Window mode on a source that can record one window: never start at login."""
+        source = str(self.cfg["capture"].get("source") or "auto")
+        return self._window_target() and source in ("auto", "portal", "test")
+
+    def keep_history(self) -> bool:
+        return config.keep_history(self.cfg)
+
+    def _stop_capture(self, reason: str) -> bool:
+        """Stop recording but keep the service; return whether the history was cleared.
+
+        Shared by the Stop command and the recorded window closing. Without
+        [buffer] keep_history the replay is deleted, once the recorder has
+        finished the segment it was writing (Recorder.stop drains it).
+        """
+        self.paused = True
+        self.stopped = True
+        self.stop_reason = reason
+        if reason == "user" and self.recorder is not None:
+            self.recorder.stop()
+        cleared = not self.keep_history()
+        if cleared:
+            self.ring.clear()
+        log.info("recording stopped (%s); replay history %s", reason, "cleared" if cleared else "kept")
+        return cleared
+
+    def _new_session(self) -> None:
+        """Play from stopped: the hour marks count from zero again."""
+        self.hours.reset()
+        self.stop_reason = None
+
+    # --- window name --------------------------------------------------------------
+
+    # lookup(token) -> title or None; tests swap in a fake (the real one asks KWin).
+    name_lookup = None
+
+    def _forget_target_name(self) -> None:
+        """A new window is being picked, or full screen is recorded: no name."""
+        self.target_name = None
+        self._name_token = None
+        self._name_gen += 1
+
+    def _look_up_target_name(self) -> None:
+        """Once per portal session: the picked window's title, from its restore token."""
+        try:
+            token = config.portal_token_path("window").read_text().strip()
+        except OSError:
+            return
+        if not token or token == self._name_token:
+            return
+        lookup = self.name_lookup
+        if lookup is None:
+            if self.bus is None or os.environ.get("MOMENTO_TEST_SANDBOX"):
+                return  # no session bus (or a test): nobody to ask
+            lookup = _window_title
+        self._name_token = token
+        self._name_gen += 1
+        gen = self._name_gen
+
+        def work() -> None:
+            try:
+                name = lookup(token)
+            except Exception:  # noqa: BLE001
+                log.debug("window name lookup failed", exc_info=True)
+                name = None
+            # A restored session may not resolve: then the name from before stays.
+            if name and gen == self._name_gen:
+                self.target_name = str(name)
+                log.info("recording window: %s", self.target_name)
+
+        threading.Thread(target=work, name="window-name", daemon=True).start()
+
+    # --- the session's hour marks -----------------------------------------------------
+
+    def _on_segment_closed(self, seg) -> None:
+        """Every closed segment: count the session's footage; warn before, and save at, each mark."""
+        length = float(self.ring.max_seconds)
+        warn = config.warn_minutes(self.cfg) * 60
+        keep = self.keep_history()
+        for event in self.hours.add(seg.duration, length, warn, keep):
+            if event[0] == "warn":
+                self._warn_mark(event[1], keep)
+            elif keep:
+                self._save_hour(until=seg.start + event[1])
+
+    def _warn_mark(self, seconds_left: float, keep: bool) -> None:
+        length = self.ring.max_seconds
+        minutes = max(1, math.ceil(seconds_left / 60 - 0.01))
+        if keep:
+            what = ("this hour is saved to Videos and a new hour starts" if length == 3600
+                    else f"the last {span_label(length)} are saved to Videos and a new stretch starts")
+        else:
+            what = "the start of this session starts being replaced. Save anything you want from it now"
+        notify(self.bus, f"Momento: {span_label(length)} almost full", f"In {minutes} min {what}.",
+               "dialog-information")
+
+    def _save_hour(self, until: float) -> None:
+        """keep_history: export the footage since the previous mark, like a save (off the main loop)."""
+        from . import exporter
+
+        length = self.ring.max_seconds
+        sel = self.ring.select_last(length, until=until)
+        if sel is None:
+            return
+        what = "hour" if length == 3600 else span_label(length)
+        need = sum(_size(s.path) for s in sel.segments) + storage.SAVE_MARGIN
+        try:
+            free = storage.free_bytes(self.cfg["output"]["dir"])
+        except OSError as e:
+            log.warning("cannot check free space for the hour: %s", e)
+            free = need
+        if free < need:
+            self.ring.release(sel)
+            log.warning("not saving the %s: needs %s, %s free", what, storage.human(need), storage.human(free))
+            notify(self.bus, f"Momento: couldn't save the {what} — disk full",
+                   f"Needs {storage.human(need)}, {storage.human(free)} free. Recording continues.",
+                   "dialog-warning")
+            return
+        when = datetime.now()
+        log.info("saving the last %s (%.0f s of footage)", what, sel.duration)
+
+        def work() -> None:
+            try:
+                path = exporter.export(sel, exporter.output_path(self.cfg, sel.duration, when))
+                result = {"ok": True, "path": str(path), "seconds": round(sel.duration, 2)}
+            except Exception as e:  # noqa: BLE001
+                log.exception("saving the %s failed", what)
+                result = {"ok": False, "error": str(e) or e.__class__.__name__}
+            finally:
+                self.ring.release(sel)
+            from gi.repository import GLib
+
+            GLib.idle_add(self._finish_hour, result, what)
+
+        threading.Thread(target=work, name="save-hour", daemon=True).start()
+
+    def _finish_hour(self, result: dict, what: str) -> bool:
+        if result.get("ok"):
+            notify(self.bus, f"Saved the last {what} to Videos", result["path"], "media-record")
+        else:
+            notify(self.bus, f"Momento: couldn't save the {what}", result.get("error", ""), "dialog-error")
+        return False
 
     # --- disk space ---------------------------------------------------------------
 
@@ -458,6 +733,8 @@ class Daemon:
             return
         if self.recorder is not None:
             self.recorder.stop()
+        if config.capture_target(cfg["capture"]) != config.capture_target(self.cfg["capture"]):
+            self._forget_target_name()
         self.cfg = cfg
         self._sync_bar()
         self._sync_controller()
@@ -518,20 +795,33 @@ class Daemon:
         except (OSError, ValueError) as e:
             reply({"ok": False, "error": str(e)})
             return
-        if not changed or set(changed) <= set(settings.CONTROLLER_KEYS):
-            # Controller settings take effect without restarting the recording.
+        if not changed or set(changed) <= set(settings.LIVE_KEYS):
+            # Controller, history and bar settings take effect without restarting
+            # the recording.
             if changed:
-                try:
-                    self.cfg["controller"] = config.load(self._cfg_path())["controller"]
-                except (OSError, ValueError) as e:
-                    log.warning("controller settings not reloaded: %s", e)
-                self._sync_controller()
+                self._apply_live(changed)
             reply({"ok": True, "changed": changed, "restarted": False, "paused": self.paused,
                    "state": self._idle_state(), "storage": self._storage_status()})
             return
         # Switching what is recorded is the user's choice: in window mode the new
         # session may open the window picker (a new portal session either way).
         self.reload(lambda r: reply({**r, "changed": changed}), interactive="record" in changed)
+
+    def _apply_live(self, changed: dict) -> None:
+        """Take the saved values of settings in settings.LIVE_KEYS into the running config."""
+        try:
+            saved = config.load(self._cfg_path())
+        except (OSError, ValueError) as e:
+            log.warning("settings not reloaded: %s", e)
+            return
+        if set(changed) & set(settings.CONTROLLER_KEYS):
+            self.cfg["controller"] = saved["controller"]
+            self._sync_controller()
+        for key in ("keep_history", "warn_minutes"):
+            self.cfg["buffer"][key] = saved["buffer"].get(key, config.DEFAULTS["buffer"][key])
+        if "instant_bar" in changed:
+            self.cfg.setdefault("ui", {})["keep_bar_loaded"] = saved["ui"].get("keep_bar_loaded", True)
+            self._sync_bar()
 
     def pause(self, reply) -> None:
         """Stop capturing but keep what is buffered; saves keep working on it."""
@@ -542,25 +832,31 @@ class Daemon:
         reply({"ok": True, "state": self._idle_state()})
 
     def stop_recording(self, reply) -> None:
-        """The bar's Stop: end recording and clear the replay history, but keep the
-        service (and with it the global shortcut) running so the bar still opens."""
-        self.paused = True
-        self.stopped = True
-        if self.recorder is not None:
-            self.recorder.stop()
-        self.ring.clear()
-        log.info("recording stopped by the user; replay history cleared")
-        reply({"ok": True, "state": "stopped", "buffer_cleared": True})
+        """The bar's Stop: end recording, but keep the service (and with it the global
+        shortcut) running so the bar still opens. The replay history is cleared
+        unless [buffer] keep_history is on."""
+        cleared = self._stop_capture("user")
+        reply({"ok": True, "state": "stopped", "buffer_cleared": cleared})
 
     def _idle_state(self) -> str:
         return "stopped" if self.stopped else "paused" if self.paused else self.state
 
     def resume(self, reply) -> None:
-        """Start capturing again as a new session; the footage from before the pause stays."""
+        """Play: start capturing again; the footage from before stays.
+
+        From paused it continues the session (window mode: the stored window is
+        restored, or the portal asks). From stopped it starts a new session, and
+        in window mode that means picking the window again: the stored one is
+        forgotten, so the picker opens.
+        """
         # Also retry after an error (e.g. the screen-share prompt was dismissed),
-        # so the bar's play button is always a way back to recording. From
-        # no_window it restores the stored window, or asks for one if there is none.
+        # so the bar's play button is always a way back to recording.
         if self.paused or self.state in ("no_storage", "error", "no_window"):
+            if self.stopped:
+                self._new_session()
+                if self._window_target():
+                    config.forget_portal_token("window")
+                    self._forget_target_name()
             self.paused = False
             self.stopped = False
             if self.recorder is not None and not self._start_recorder(interactive=True):
@@ -572,14 +868,17 @@ class Daemon:
     def pick_window(self, reply) -> None:
         """Window mode: forget the stored window and ask for one (the window picker opens).
 
-        The only path meant to open the picker on purpose: the bar's play button in
-        "no_window" and its "Change window". Footage recorded so far is kept; a
-        pause or stop is left, since picking a window means "record this".
+        The bar's "Change window". Footage recorded so far is kept; a pause or stop
+        is left, since picking a window means "record this" (from stopped, as a new
+        session, like play).
         """
         if config.capture_target(self.cfg["capture"]) != "window":
-            reply({"ok": False, "error": "Record is set to Full screen; choose Game window first"})
+            reply({"ok": False, "error": "Record is set to Full screen; choose Window first"})
             return
         config.forget_portal_token("window")
+        self._forget_target_name()
+        if self.stopped:
+            self._new_session()
         self.paused = False
         self.stopped = False
         if self.recorder is not None:
@@ -607,6 +906,12 @@ class Daemon:
             "encoder": getattr(rec, "encoder_name", None),
             "output_dir": self.cfg["output"]["dir"],
             "target": config.capture_target(self.cfg["capture"]),
+            # Window mode: the picked window's title, when the desktop tells us.
+            "target_name": self.target_name if self._window_target() else None,
+            # Why it is stopped: "user" (Stop), "window_closed", or null (not stopped
+            # by either, e.g. window mode waiting for the first play).
+            "stop_reason": self.stop_reason if self.stopped else None,
+            "keep_history": self.keep_history(),
             "resolution": self.cfg["capture"]["resolution"],
             "quality": self.cfg["capture"]["quality"],
             "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"]),

@@ -16,14 +16,16 @@
 source = "auto"
 
 # What to record:
-#   "screen"   your whole screen (default)
-#   "window"   only the game window you pick. The Momento bar and desktop
-#              notifications are then never in your clips (handy where the bar
-#              can't hide itself from recordings). You pick the window once per
-#              game: when the game closes, open the bar and press play to pick
-#              it again. Needs the "portal" source (the default on Wayland).
-# Change it with:  momento set record window      (or Settings -> Record in the bar)
-target = "screen"
+#   "window"   only the window you pick (default). The Momento bar and desktop
+#              notifications are then never in your clips. Momento doesn't
+#              start recording on its own: open the bar and press play, then
+#              pick your game's window. When that window closes, recording
+#              stops by itself (like pressing Stop). Pause and play keep the
+#              same window; Stop and then play lets you pick a new one.
+#              Needs the "portal" source (the default on Wayland).
+#   "screen"   your whole screen. Starts recording by itself when you log in.
+# Change it with:  momento set record screen      (or Settings -> Record in the bar)
+target = "window"
 
 # Frames per second: 60 or 120. 120 only helps on a 120 Hz (or faster) screen
 # and uses about 1.5x the disk space. Change it with:  momento set fps 120
@@ -97,6 +99,23 @@ segment_seconds = 10
 # Default: $XDG_CACHE_HOME/momento/buffer, normally ~/.cache/momento/buffer
 # dir = "~/.cache/momento/buffer"
 
+# What happens to your replay when recording stops (you press Stop, or the
+# window you record closes):
+#   false  it's cleared (default)
+#   true   it's kept, so you can still save from it. Every full hour
+#          (max_seconds) of a recording session is also saved to your clips
+#          folder by itself, so long sessions are never lost.
+# Pausing never clears anything, and neither does restarting your computer.
+# Change it with:  momento set keep_history on    (or Settings -> General)
+keep_history = false
+
+# The buffer holds one hour (max_seconds); after that the oldest footage is
+# replaced. This many minutes before that point you get a notification: with
+# keep_history off, so you can save the start of your session in time; with it
+# on, to say the hour is about to be saved. 3 to 10 (the bar offers 10, 5, 3).
+# Change it with:  momento set hour_warning 5     (or Settings -> Misc)
+warn_minutes = 10
+
 [output]
 # Where saved clips go. Empty = your Videos folder + "/Momento"
 # (e.g. ~/Videos/Momento). "~" is expanded.
@@ -123,6 +142,7 @@ trigger = "LOGO+SHIFT+g"
 # 80-120 MB of RAM in use while Momento runs. Set to false to start a fresh bar
 # on every press instead: no memory used between presses, but the bar takes
 # about 0.3-0.5 s to appear.
+# Change it with:  momento set instant_bar off    (or Settings -> Misc -> Instant bar)
 keep_bar_loaded = true
 
 [controller]

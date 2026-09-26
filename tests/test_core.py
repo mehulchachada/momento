@@ -674,7 +674,9 @@ class DaemonControlTest(unittest.TestCase):
 
         self._tmp = tempfile.TemporaryDirectory()
         self.path = Path(self._tmp.name) / "config.toml"
-        self.path.write_text("[capture]\nresolution = \"1080p\"\n")
+        # Full screen, so these tests start recording like a login does; window
+        # mode (the default) has its own tests.
+        self.path.write_text("[capture]\nresolution = \"1080p\"\ntarget = \"screen\"\n")
         fake = types.ModuleType("momento.pipeline")
         fake.Recorder = FakeRecorder
         patcher = mock.patch.dict(sys.modules, {"momento.pipeline": fake})
@@ -1465,7 +1467,7 @@ class DaemonBarTest(unittest.TestCase):
 
 
 class RecordSettingTest(unittest.TestCase):
-    """The "record" setting: full screen (default) or one game window."""
+    """The "record" setting: one window (default) or the full screen."""
 
     def setUp(self):
         from momento import config, settings
@@ -1489,8 +1491,9 @@ class RecordSettingTest(unittest.TestCase):
 
     def test_default_apply_and_describe(self):
         cfg = self.config.load(self.path)
-        self.assertEqual(cfg["capture"]["target"], "screen")
-        self.assertEqual(self.settings.current(cfg)["record"], "screen")
+        self.assertEqual(cfg["capture"]["target"], "window")
+        self.assertEqual(self.settings.current(cfg)["record"], "window")
+        self.assertEqual(self.settings.apply({"record": "Full screen"}, self.path), {"record": "screen"})
         self.assertEqual(self.settings.apply({"record": "game"}, self.path), {"record": "window"})
         self.assertIn("# mine", self.path.read_text())
         cfg = self.config.load(self.path)
@@ -1498,7 +1501,7 @@ class RecordSettingTest(unittest.TestCase):
         d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
         self.assertEqual(d["values"]["record"], "window")
         self.assertEqual(d["choices"]["record"], ["screen", "window"])
-        self.assertEqual(self.settings.RECORD_LABELS, {"screen": "Full screen", "window": "Game window"})
+        self.assertEqual(self.settings.RECORD_LABELS, {"screen": "Full screen", "window": "Window"})
         # a hand-edited unknown value reads as the default
         self.assertEqual(self.config.capture_target({"target": "Monitor 2"}), "screen")
 
@@ -1513,13 +1516,15 @@ class RecordSettingTest(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
                 contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "record", "screen"]), 0)
+            self.assertEqual(self.config.load(self.path)["capture"]["target"], "screen")
             self.assertEqual(cli.main(["--config", str(self.path), "set", "record", "window"]), 0)
         self.assertEqual(self.config.load(self.path)["capture"]["target"], "window")
         out = io.StringIO()
         with mock.patch.object(self.settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
                 contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
-        self.assertIn("record: game window (only the window you pick", out.getvalue())
+        self.assertIn("record: window (only the window you pick, when you press play", out.getvalue())
         # daemon running: the restart message tells the user a dialog is coming
         out = io.StringIO()
         reply = {"ok": True, "changed": {"record": "window"}, "restarted": True, "paused": False}
@@ -1563,8 +1568,8 @@ class DaemonWindowTest(unittest.TestCase):
         self.assertEqual(self.d.status()["target"], "window")
         self.assertIs(rec, FakeRecorder.instances[-1])
 
-    def test_window_closed_keeps_history_and_does_not_retry(self):
-        rec = self.window_mode()
+    def fill_window(self, rec) -> float:
+        """Three closed 10 s segments of this session; returns status.buffered."""
         buf = Path(self.d.cfg["buffer"]["dir"])
         buf.mkdir(parents=True, exist_ok=True)
         now = time.time()
@@ -1573,26 +1578,66 @@ class DaemonWindowTest(unittest.TestCase):
             seg.write_bytes(b"x" * 188)
             self.d.ring.opened(seg, now - 30 + 10 * i)
             self.d.ring.closed(seg, now - 20 + 10 * i)
-        before = self.d.status()["buffered"]
+        return self.d.status()["buffered"]
+
+    def test_window_closed_stops_like_stop(self):
+        rec = self.window_mode()
+        self.assertGreater(self.fill_window(rec), 0)
         self.notes.clear()
         rec.recording = False
         rec.on_state("no_window", self.CLOSED)   # what the Recorder reports when the window closes
         st = self.d.status()
-        self.assertEqual((st["state"], st["recording"], st["error"]), ("no_window", False, self.CLOSED))
-        self.assertEqual(st["buffered"], before)  # the replay history is kept
-        self.assertEqual(self.notes, ["Momento: the game window closed"])
+        self.assertEqual((st["state"], st["recording"], st["stop_reason"]), ("stopped", False, "window_closed"))
+        self.assertNotIn("error", st)
+        self.assertEqual(st["buffered"], 0)       # keep_history is off by default: cleared
+        self.assertEqual(list(Path(self.d.cfg["buffer"]["dir"]).glob("*.ts")), [])
+        self.assertEqual(self.notes, ["Momento: game closed"])
         rec.on_state("no_window", self.CLOSED)   # e.g. the portal session closing as well
         self.assertEqual(len(self.notes), 1)      # one notification
+        self.assertEqual(self.d.status()["state"], "stopped")
         started = rec.started
         self.d._storage_tick()                    # nothing restarts it by itself
-        self.assertEqual((rec.started, self.d.status()["state"]), (started, "no_window"))
+        self.assertEqual((rec.started, self.d.status()["state"]), (started, "stopped"))
 
-    def test_no_notification_without_a_recording(self):
+    def test_window_closed_keeps_history_when_asked(self):
+        from unittest import mock
+
+        from momento import daemon
+
+        self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+        rec = self.window_mode()
+        before = self.fill_window(rec)
+        bodies = []
+        with mock.patch.object(daemon, "notify", side_effect=lambda bus, summary, body="", icon="": bodies.append(body)):
+            rec.recording = False
+            rec.on_state("no_window", self.CLOSED)
+        st = self.d.status()
+        self.assertEqual((st["state"], st["stop_reason"], st["keep_history"]), ("stopped", "window_closed", True))
+        self.assertEqual(st["buffered"], before)  # kept, and saveable
+        self.assertEqual(len(bodies), 1)
+        self.assertIn("Your replay is kept", bodies[0])
+
+    def test_nothing_picked_goes_back_to_where_play_was_pressed(self):
         rec = self.window_mode()
         self.notes.clear()
+        # A new session (play from stopped) whose picker is dismissed: stopped again.
+        self.call({"cmd": "stop"})
+        self.call({"cmd": "resume"})
+        rec = self.d.recorder
         rec.on_state("starting", None)
-        rec.on_state("no_window", "No game window picked — press play to pick one")  # e.g. at login
-        self.assertEqual(self.d.status()["state"], "no_window")
+        rec.on_state("no_window", "No game window picked — press play to pick one")
+        st = self.d.status()
+        self.assertEqual((st["state"], st["stop_reason"]), ("stopped", None))
+        self.assertNotIn("error", st)
+        self.assertEqual(self.notes, [])          # nothing was recorded: no notification
+        # A session with footage (play from pause): paused, so play continues it.
+        self.call({"cmd": "resume"})
+        self.fill_window(rec)
+        self.call({"cmd": "pause"})
+        self.call({"cmd": "resume"})
+        rec.on_state("starting", None)
+        rec.on_state("no_window", "No game window picked — press play to pick one")
+        self.assertEqual(self.d.status()["state"], "paused")
         self.assertEqual(self.notes, [])
 
     def test_pick_window(self):
@@ -1619,16 +1664,34 @@ class DaemonWindowTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["code"], r["state"]), (False, "no_storage", "no_storage"))
         self.assertEqual(rec.interactive[-1:], [True])               # nothing new started
 
-    def test_resume_from_no_window(self):
+    def test_play_from_stopped_picks_a_new_window(self):
         rec = self.window_mode()
-        rec.recording = False
-        rec.on_state("no_window", self.CLOSED)
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("the-game")
+        self.call({"cmd": "pause"})
+        self.call({"cmd": "resume"})              # from paused: the same window
+        self.assertTrue(self.token.exists())
+        self.assertTrue(rec.interactive[-1])     # the portal may still ask
+        self.call({"cmd": "stop"})
+        self.d.hours.footage = 1234.0
         started = rec.started
-        r = self.call({"cmd": "resume"})
-        self.assertTrue(r["ok"])
-        self.assertEqual(rec.started, started + 1)
-        self.assertTrue(rec.interactive[-1])     # restores the stored window, or asks for one
-        self.assertEqual(self.d.status()["state"], "recording")
+        r = self.call({"cmd": "resume"})          # from stopped: a new session, pick again
+        self.assertEqual(r, {"ok": True, "state": "recording"})
+        self.assertFalse(self.token.exists())
+        self.assertEqual((rec.started, rec.interactive[-1]), (started + 1, True))
+        self.assertEqual(self.d.hours.footage, 0)  # the hour marks count from zero
+        self.assertIsNone(self.d.status()["stop_reason"])
+
+    def test_screen_mode_play_from_stopped_keeps_its_token(self):
+        from momento import config
+
+        screen = config.portal_token_path("screen")
+        screen.parent.mkdir(parents=True, exist_ok=True)
+        screen.write_text("monitor")
+        self.addCleanup(screen.unlink, missing_ok=True)
+        self.call({"cmd": "stop"})
+        self.assertEqual(self.call({"cmd": "resume"})["state"], "recording")
+        self.assertTrue(screen.exists())          # restored as before, no forced picker
 
     def test_configure_record_switch(self):
         from momento import config
@@ -1733,7 +1796,7 @@ class RecorderWindowTest(unittest.TestCase):
         rec.start()
         rec._got_fragment = True
         rec._on_pipeline_failure("encoder hiccup")                   # not the source
-        self.assertEqual(self.states[-1], ("no_window", self.pipeline.WINDOW_STOPPED))
+        self.assertEqual(self.states[-1], ("error", self.pipeline.WINDOW_STOPPED))  # not "the window closed"
         self.assertTrue(self.token.exists())                         # resume restores it quietly
         self.assertEqual(rec._retry_id, 0)
 
@@ -2012,7 +2075,7 @@ class DaemonControllerTest(unittest.TestCase):
         self.d._sync_controller()
         self.assertEqual(self.made[-1]["navigate"], False)
         self.assertEqual(self.devs[-1].mask, (self.gamepad.EV_KEY,))   # key events only
-        self.chord(hold=0.2)
+        self.chord(hold=0.2)                                         # shorter than the 0.3 s default
         self.assertEqual(self.opened, [])
         self.chord()
         self.assertEqual(len(self.opened), 1)
@@ -2066,6 +2129,560 @@ class DaemonControllerTest(unittest.TestCase):
         self.d.pad_factory = None                  # the real Gamepads: refuses under the sandbox
         self.d._sync_controller()
         self.assertIsNone(self.d.pads)
+
+
+
+# ------------------------------------------------ keep history, hour marks, window name
+
+
+class HistorySettingsTest(unittest.TestCase):
+    """keep_history / hour_warning / instant_bar in settings.py + config.py, and the tabs."""
+
+    def setUp(self):
+        from momento import config, settings
+
+        self.config, self.settings = config, settings
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "config.toml"
+        self.path.write_text("# mine\n[capture]\nresolution = \"1080p\"\n")
+
+    def test_defaults_and_describe(self):
+        cfg = self.config.load(self.path)
+        self.assertEqual((cfg["buffer"]["keep_history"], cfg["buffer"]["warn_minutes"]), (False, 10))
+        cur = self.settings.current(cfg)
+        self.assertEqual((cur["keep_history"], cur["hour_warning"], cur["instant_bar"]), ("off", 10, "on"))
+        d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["choices"]["keep_history"], ["off", "on"])
+        self.assertEqual(d["choices"]["hour_warning"], [10, 5, 3])
+        self.assertEqual(d["choices"]["instant_bar"], ["on", "off"])
+        self.assertEqual(d["tabs"], [["General", ["record", "keep_history"]],
+                                     ["Video", ["resolution", "fps", "quality"]],
+                                     ["Audio", ["audio_source", "mic", "mic_device"]],
+                                     ["Controller", ["controller", "controller_exclusive"]],
+                                     ["Misc", ["hour_warning", "instant_bar"]]])
+        for _name, keys in self.settings.TABS:
+            for key in keys:
+                self.assertIn(key, d["values"])
+                self.assertIn(key, self.settings.KEYS)
+        json.dumps(d)  # travels over the socket as is
+
+    def test_validate(self):
+        v = self.settings.validate
+        self.assertEqual(v({"keep_history": True, "instant_bar": "no", "hour_warning": "5m"}),
+                         {"keep_history": "on", "instant_bar": "off", "hour_warning": 5})
+        self.assertEqual(v({"hour_warning": 3}), {"hour_warning": 3})
+        self.assertEqual(v({"hour_warning": "7 min"}), {"hour_warning": 7})   # any whole number 3-10
+        for bad in ({"hour_warning": 2}, {"hour_warning": 11}, {"hour_warning": "soon"},
+                    {"hour_warning": True}, {"hour_warning": 4.5}, {"keep_history": "maybe"},
+                    {"instant_bar": 2}):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                v(bad)
+            self.assertTrue(str(cm.exception).startswith(next(iter(bad))), cm.exception)
+
+    def test_apply_writes_config_keys(self):
+        changed = self.settings.apply({"keep_history": "on", "hour_warning": 3, "instant_bar": "off"}, self.path)
+        self.assertEqual(changed, {"keep_history": "on", "hour_warning": 3, "instant_bar": "off"})
+        self.assertIn("# mine", self.path.read_text())
+        cfg = self.config.load(self.path)
+        self.assertIs(cfg["buffer"]["keep_history"], True)
+        self.assertEqual(cfg["buffer"]["warn_minutes"], 3)
+        self.assertIs(cfg["ui"]["keep_bar_loaded"], False)
+        self.assertEqual(self.settings.apply({"hour_warning": "3"}, self.path), {})
+
+    def test_hand_edited_warning_falls_back(self):
+        self.path.write_text("[buffer]\nwarn_minutes = 45\n")
+        with self.assertLogs("momento.config", "WARNING"):
+            self.assertEqual(self.config.warn_minutes(self.config.load(self.path)), 10)
+        self.assertEqual(self.config.warn_minutes({"buffer": {"warn_minutes": 4}}), 4)
+
+    def test_live_keys(self):
+        self.assertEqual(set(self.settings.LIVE_KEYS),
+                         {"controller", "controller_exclusive", "keep_history", "hour_warning", "instant_bar"})
+
+    def test_example_config_documents_them(self):
+        import tomllib
+
+        example = tomllib.loads((Path(__file__).resolve().parent.parent / "data/config.example.toml").read_text())
+        d = self.config.DEFAULTS
+        self.assertEqual(example["capture"]["target"], d["capture"]["target"])
+        self.assertEqual(d["capture"]["target"], "window")
+        for key in ("keep_history", "warn_minutes", "max_seconds", "segment_seconds"):
+            self.assertEqual(example["buffer"][key], d["buffer"][key], key)
+        self.assertEqual(example["ui"], d["ui"])
+
+    def test_cli_shows_them(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                mock.patch.object(self.settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "keep_history", "on"]), 0)
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "hour_warning", "5"]), 0)
+            self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
+        text = out.getvalue()
+        self.assertIn("history: kept when recording stops", text)
+        self.assertIn("hour mark: warn 5 min before the 60m mark", text)
+        self.assertIn("clip bar: kept loaded", text)
+        # daemon running: a live setting says so instead of "restarted"/"paused"
+        out = io.StringIO()
+        reply = {"ok": True, "changed": {"instant_bar": "off"}, "restarted": False, "paused": True}
+        with mock.patch.object(ipc, "request", return_value=reply), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "instant_bar", "off"]), 0)
+        self.assertIn("applies right away", out.getvalue())
+        self.assertNotIn("paused", out.getvalue())
+
+
+class CLIStatusTest(unittest.TestCase):
+    def run_cli(self, argv, replies):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=list(replies)), contextlib.redirect_stdout(out):
+            code = cli.main(argv)
+        return code, out.getvalue()
+
+    def test_status_says_why_and_which_window(self):
+        st = {"ok": True, "state": "stopped", "recording": False, "buffered": 754.0, "max_seconds": 3600,
+              "target": "window", "target_name": "Elden Ring", "stop_reason": "window_closed",
+              "keep_history": True, "resolution": "1080p", "fps": 60, "quality": "high", "bitrate_kbps": 15000}
+        code, text = self.run_cli(["status"], [st])
+        self.assertEqual(code, 0)
+        self.assertIn("state: stopped (the recorded window closed)", text)
+        self.assertIn("record: window: Elden Ring", text)
+        self.assertIn("history: kept when recording stops", text)
+
+    def test_stop_and_resume_messages(self):
+        _code, text = self.run_cli(["stop"], [{"ok": True, "state": "stopped", "buffer_cleared": False}])
+        self.assertIn("The replay is kept", text)
+        _code, text = self.run_cli(["stop"], [{"ok": True, "state": "stopped", "buffer_cleared": True}])
+        self.assertIn("history cleared", text)
+        _code, text = self.run_cli(["resume"], [{"ok": True, "state": "stopped", "target": "window"},
+                                                {"ok": True, "state": "starting"}])
+        self.assertIn("Pick the window", text)
+        _code, text = self.run_cli(["resume"], [{"ok": True, "state": "paused", "target": "window"},
+                                                {"ok": True, "state": "starting"}])
+        self.assertIn("Recording resumed", text)
+
+
+class RingListenerTest(unittest.TestCase):
+    def test_on_closed_gets_each_closed_segment(self):
+        with tempfile.TemporaryDirectory() as d:
+            ring = RingBuffer(3600, directory=d)
+            ring.recover()
+            seen = []
+            ring.on_closed = seen.append
+            _feed(ring, [Path(d) / f"seg{i:08d}.ts" for i in range(2)], "s1", 1000.0)
+            self.assertEqual([round(s.duration) for s in seen], [10, 10])
+            ring.closed(Path(d) / "seg00000009.ts", 2000.0)     # not open: nothing to report
+            self.assertEqual(len(seen), 2)
+
+            def boom(_seg):
+                raise RuntimeError("listener bug")
+            ring.on_closed = boom
+            with self.assertLogs("momento.ringbuffer", "ERROR"):
+                _feed(ring, [Path(d) / "seg00000005.ts"], "s1", 1100.0)   # recording is not affected
+            self.assertAlmostEqual(ring.buffered_seconds(), 30.0)
+
+
+class HourMarksTest(unittest.TestCase):
+    """daemon.HourMarks: pure footage bookkeeping (no clock)."""
+
+    def setUp(self):
+        from momento import daemon
+
+        self.h = daemon.HourMarks()
+
+    def feed(self, seconds, n, keep, warn=600, length=3600):
+        events = []
+        for _ in range(n):
+            events += self.h.add(seconds, length, warn, keep)
+        return events
+
+    def test_warn_once_then_mark_without_history(self):
+        self.assertEqual(self.feed(10, 299, keep=False), [])            # 49:50
+        self.assertEqual(self.feed(10, 1, keep=False), [("warn", 600.0)])  # 50:00, 10 min left
+        self.assertEqual(self.feed(10, 59, keep=False), [])
+        self.assertEqual(self.feed(10, 1, keep=False), [("mark", 10.0)])   # 60:00, at the end of this piece
+        self.assertEqual(self.feed(10, 360, keep=False), [("mark", 10.0)])  # no warning before later marks
+
+    def test_every_hour_with_history(self):
+        events = self.feed(60, 120, keep=True, warn=300)                 # two hours in 1-minute pieces
+        self.assertEqual(events, [("warn", 300.0), ("mark", 60.0), ("warn", 300.0), ("mark", 60.0)])
+        self.assertEqual(self.h.marks, 2)
+
+    def test_mark_inside_a_piece(self):
+        self.h.add(3590, 3600, 600, True)
+        self.assertEqual(self.h.add(60, 3600, 600, True), [("mark", 10.0)])  # 10 s into this piece
+
+    def test_warns_once_per_mark(self):
+        self.feed(10, 330, keep=False, warn=180)                           # 55 min, warn at 57
+        self.assertEqual(self.h.warned, 0)
+        self.h.reset()
+        self.h.add(3100, 3600, 600, False)                                # one big step past the warn point
+        self.assertEqual(self.h.warned, 1)
+        self.assertEqual(self.h.add(10, 3600, 600, True), [])              # once per mark
+
+    def test_short_buffer_skips_the_warning(self):
+        self.assertEqual(self.feed(10, 30, keep=True, warn=600, length=300), [("mark", 10.0)])
+
+    def test_span_label(self):
+        from momento import daemon
+
+        self.assertEqual(daemon.span_label(3600), "60 minutes")
+        self.assertEqual(daemon.span_label(60), "1 minute")
+        self.assertEqual(daemon.span_label(90), "1m30s")
+
+
+@unittest.skipUnless(_gi_available(), "PyGObject not available")
+class DaemonHourTest(unittest.TestCase):
+    """The daemon's hour marks: warn, save each hour with keep_history, disk full (fake Recorder)."""
+
+    call = DaemonControlTest.call
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        from unittest import mock
+
+        from gi.repository import GLib
+
+        from momento import daemon, exporter
+
+        DaemonControlTest.setUp(self)
+        self.sent = []      # (summary, body)
+        self.exports = []   # (duration, pins while exporting, out path)
+        self.buf = Path(self.d.cfg["buffer"]["dir"])
+        self.buf.mkdir(parents=True, exist_ok=True)
+        self.d.ring.recover()
+        self.clips = Path(self._tmp.name) / "clips"
+        self.d.cfg["output"]["dir"] = str(self.clips)
+        self.n = 0
+        self.t = 1_000_000.0
+
+        def fake_export(sel, out):
+            self.exports.append((sel.duration, [s.pins for s in sel.segments], Path(out)))
+            Path(out).write_bytes(b"mp4")
+            return Path(out)
+        for target, attr, new in (
+                (daemon, "notify", lambda bus, summary, body="", icon="": self.sent.append((summary, body))),
+                (exporter, "export", fake_export),
+                (GLib, "idle_add", lambda fn, *a: fn(*a))):     # the worker's result, delivered at once
+            patcher = mock.patch.object(target, attr, new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def record(self, minutes, length=60.0):
+        """``minutes`` of footage in ``length``-second segments, as the recorder closes them."""
+        for _ in range(int(minutes * 60 / length)):
+            seg = self.buf / f"seg{self.n:08d}.ts"
+            seg.write_bytes(b"x" * 188)
+            self.d.ring.opened(seg, self.t, session="s", width=1920, height=1080, fps=60, codec="h264",
+                               audio=True)
+            self.d.ring.closed(seg, self.t + length)
+            self.n += 1
+            self.t += length
+
+    def wait_for(self, cond, timeout=5):
+        deadline = time.monotonic() + timeout
+        while not cond() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(cond())
+
+    def test_warning_without_history(self):
+        self.record(49)
+        self.assertEqual(self.sent, [])
+        self.record(1)
+        self.assertEqual(self.sent, [("Momento: 60 minutes almost full",
+                                      "In 10 min the start of this session starts being replaced. "
+                                      "Save anything you want from it now.")])
+        self.record(80)                           # past the mark and on: no save, no more warnings
+        self.assertEqual((len(self.sent), self.exports), (1, []))
+        self.assertAlmostEqual(self.d.status()["buffered"], 3600.0)   # the ring keeps rolling
+
+    def test_every_hour_is_saved_with_history(self):
+        self.call({"cmd": "configure", "changes": {"keep_history": "on", "hour_warning": 5}})
+        rec = self.d.recorder
+        self.record(55)
+        self.assertEqual(self.sent, [("Momento: 60 minutes almost full",
+                                      "In 5 min this hour is saved to Videos and a new hour starts.")])
+        self.record(5)                            # the mark
+        self.wait_for(lambda: len(self.sent) == 2)
+        self.assertEqual(len(self.exports), 1)
+        duration, pins, out = self.exports[0]
+        self.assertAlmostEqual(duration, 3600.0)
+        self.assertTrue(all(p >= 1 for p in pins))                    # pinned while exporting
+        self.assertTrue(out.name.endswith("_60m.mp4"), out.name)      # same name pattern as a save
+        self.assertEqual(out.parent, self.clips)
+        self.assertEqual(self.sent[1][0], "Saved the last hour to Videos")
+        self.assertTrue(all(s.pins == 0 for s in self.d.ring._segments))  # released
+        self.record(60)                           # the second hour: warned and saved again
+        self.wait_for(lambda: len(self.exports) == 2)
+        self.assertEqual([s for s, _ in self.sent].count("Momento: 60 minutes almost full"), 2)
+        self.assertEqual((rec.stopped, self.d.recorder is rec), (0, True))  # recording never restarted
+
+    def test_hour_not_saved_when_the_disk_is_full(self):
+        from momento import storage
+
+        self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+        self.record(59)
+        self.free = storage.SAVE_MARGIN          # the clips folder can't take an hour
+        self.record(1)
+        self.assertEqual(self.exports, [])
+        self.assertIn("disk full", self.sent[-1][0])
+        self.assertIn("Recording continues", self.sent[-1][1])
+        self.assertTrue(all(s.pins == 0 for s in self.d.ring._segments))
+        self.assertEqual(self.d.recorder.stopped, 0)
+        self.assertEqual(self.d.status()["state"], "recording")
+
+    def test_pauses_continue_the_session_and_stop_starts_a_new_one(self):
+        self.record(30)
+        self.call({"cmd": "pause"})
+        self.call({"cmd": "resume"})
+        self.record(20)
+        self.assertEqual(len(self.sent), 1)      # 30 + 20 min: the warning (pauses don't reset)
+        self.call({"cmd": "stop"})
+        self.call({"cmd": "resume"})              # a new session
+        self.record(49)
+        self.assertEqual(len(self.sent), 1)
+        self.record(1)
+        self.assertEqual(len(self.sent), 2)
+
+
+class DaemonHistoryTest(unittest.TestCase):
+    """Stop with and without keep_history; saving while stopped (fake Recorder)."""
+
+    call = DaemonControlTest.call
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        DaemonControlTest.setUp(self)
+        self.buf = Path(self.d.cfg["buffer"]["dir"])
+        self.d.ring.recover()
+        _feed(self.d.ring, [self.buf / f"seg{i:08d}.ts" for i in range(3)], "s1", time.time() - 40)
+
+    def test_stop_clears_by_default(self):
+        r = self.call({"cmd": "stop"})
+        self.assertEqual(r, {"ok": True, "state": "stopped", "buffer_cleared": True})
+        st = self.d.status()
+        self.assertEqual((st["buffered"], st["stop_reason"], st["keep_history"]), (0, "user", False))
+        self.assertEqual(self.call({"cmd": "save", "seconds": 30}), {"ok": False, "error": "nothing recorded yet"})
+
+    def test_stop_keeps_history_and_saves_from_stopped(self):
+        from unittest import mock
+
+        from momento import exporter
+
+        r = self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
+        self.assertEqual((r["restarted"], r["changed"]), (False, {"keep_history": "on"}))
+        self.assertIs(self.d.recorder, FakeRecorder.instances[-1])
+        self.assertEqual(self.d.recorder.stopped, 0)                 # not restarted
+        r = self.call({"cmd": "stop"})
+        self.assertEqual(r, {"ok": True, "state": "stopped", "buffer_cleared": False})
+        self.assertEqual(len(list(self.buf.glob("*.ts"))), 3)
+        st = self.d.status()
+        self.assertEqual((st["state"], st["stop_reason"], st["keep_history"]), ("stopped", "user", True))
+        self.assertAlmostEqual(st["buffered"], 30.0)
+        self.d.cfg["output"]["dir"] = str(Path(self._tmp.name) / "clips")
+        with mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out)):
+            r = self.call({"cmd": "save", "seconds": 20})
+        self.assertTrue(r["ok"], r)
+        self.assertAlmostEqual(r["seconds"], 20.0)
+        self.assertEqual(self.d.status()["state"], "stopped")        # saving doesn't start anything
+        # turning it off later doesn't delete what was kept; the next stop does
+        self.call({"cmd": "configure", "changes": {"keep_history": "off"}})
+        self.assertAlmostEqual(self.d.status()["buffered"], 30.0)
+        self.call({"cmd": "resume"})
+        self.assertIsNone(self.d.status()["stop_reason"])
+        self.assertTrue(self.call({"cmd": "stop"})["buffer_cleared"])
+        self.assertEqual(self.d.status()["buffered"], 0)
+
+    def test_pause_never_clears(self):
+        self.call({"cmd": "pause"})
+        self.assertAlmostEqual(self.d.status()["buffered"], 30.0)
+        self.assertIsNone(self.d.status()["stop_reason"])
+
+    def test_hour_warning_is_live(self):
+        r = self.call({"cmd": "configure", "changes": {"hour_warning": 3}})
+        self.assertEqual((r["restarted"], r["changed"]), (False, {"hour_warning": 3}))
+        self.assertEqual(self.d.cfg["buffer"]["warn_minutes"], 3)
+        self.assertEqual(self.d.recorder.stopped, 0)
+
+
+@unittest.skipUnless(_gi_available(), "PyGObject not available")
+class DaemonStartTest(unittest.TestCase):
+    """Daemon.start(): full screen records at once; window mode waits for play."""
+
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        from unittest import mock
+
+        from gi.repository import GLib
+
+        from momento import daemon, ipc
+
+        DaemonControlTest.setUp(self)
+        self.procs = []
+
+        class Server:
+            def __init__(self, *_a):
+                pass
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+        for target, attr, new in ((ipc, "Server", Server),
+                                  (daemon, "_popen_bar", lambda: self.procs.append(FakeBarProc()) or self.procs[-1]),
+                                  (GLib, "timeout_add_seconds", lambda *a: 0),
+                                  (GLib, "source_remove", lambda tag: None),
+                                  (daemon.Daemon, "_sync_controller", lambda self: None)):
+            p = mock.patch.object(target, attr, new)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def daemon(self, target):
+        from momento import config, daemon
+
+        config.set_value("capture", "target", target, self.path)
+        cfg = config.load(self.path)
+        cfg["hotkey"]["enabled"] = False
+        d = daemon.Daemon(cfg, loop=None)
+        d.start()
+        self.addCleanup(d.stop)
+        return d
+
+    def test_window_mode_waits_for_play(self):
+        d = self.daemon("window")
+        rec = d.recorder
+        self.assertEqual(rec.started, 0)                 # no picker at login
+        st = d.status()
+        self.assertEqual((st["state"], st["recording"], st["stop_reason"], st["target_name"]),
+                         ("stopped", False, None, None))
+        box = []
+        d.handle({"cmd": "resume"}, box.append)
+        self.assertEqual((rec.started, rec.interactive), (1, [True]))  # play: the picker may open
+        self.assertEqual(d.status()["state"], "recording")
+
+    def test_full_screen_starts_at_once(self):
+        d = self.daemon("screen")
+        self.assertEqual((d.recorder.started, d.recorder.interactive), (1, [False]))
+        self.assertEqual(d.status()["state"], "recording")
+
+
+class TargetNameTest(unittest.TestCase):
+    """status.target_name: the picked window's title, looked up off the main loop."""
+
+    call = DaemonControlTest.call
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        from momento import config
+
+        DaemonControlTest.setUp(self)
+        self.token = config.portal_token_path("window")
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self.token.unlink, missing_ok=True)
+        self.asked = []
+        self.names = {"tok-1": "Elden Ring", "tok-2": None, "tok-3": "Hades II"}
+        self.d.name_lookup = lambda token: (self.asked.append(token), self.names.get(token))[1]
+        self.call({"cmd": "configure", "changes": {"record": "window"}})
+
+    def session(self, token):
+        """The portal saved ``token`` and the recording started."""
+        self.token.write_text(token)
+        self.d.recorder.on_state("starting", None)
+        self.d.recorder.on_state("recording", None)
+
+    def wait_name(self, name):
+        deadline = time.monotonic() + 3
+        while self.d.status()["target_name"] != name and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.d.status()["target_name"], name)
+
+    def test_lookup_once_per_session(self):
+        self.assertIsNone(self.d.status()["target_name"])
+        self.session("tok-1")
+        self.wait_name("Elden Ring")
+        self.d.recorder.on_state("recording", None)       # same session: not asked again
+        self.assertEqual(self.asked, ["tok-1"])
+        self.session("tok-2")                               # restored, but the name is unknown
+        time.sleep(0.05)
+        self.assertEqual(self.asked, ["tok-1", "tok-2"])
+        self.wait_name("Elden Ring")                        # the name from before stays
+
+    def test_cleared_on_new_window_and_full_screen(self):
+        self.session("tok-1")
+        self.wait_name("Elden Ring")
+        self.call({"cmd": "pick_window"})                   # a new window: forget the old name
+        self.assertIsNone(self.d.status()["target_name"])
+        self.session("tok-3")
+        self.wait_name("Hades II")
+        self.call({"cmd": "configure", "changes": {"record": "screen"}})
+        self.assertIsNone(self.d.status()["target_name"])
+        self.assertIsNone(self.d.target_name)
+
+    def test_real_lookup_never_runs_in_tests(self):
+        import types
+        from unittest import mock
+
+        fake = types.ModuleType("momento.windowname")
+        fake.title_for_token = mock.Mock(side_effect=AssertionError("must not reach KWin"))
+        self.d.name_lookup = None
+        with mock.patch.dict(sys.modules, {"momento.windowname": fake}):
+            self.session("tok-1")
+            time.sleep(0.05)
+        fake.title_for_token.assert_not_called()
+        self.assertIsNone(self.d.status()["target_name"])
+
+    def test_window_title_wrapper(self):
+        import types
+        from unittest import mock
+
+        from momento import daemon
+
+        class Bus:
+            closed = 0
+
+            def close(self):
+                Bus.closed += 1
+        # never a real session bus in tests
+        patcher = mock.patch.object(daemon, "_private_bus", Bus)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        fake = types.ModuleType("momento.windowname")
+        for result, expect in (("Hades II", "Hades II"), (None, None), ("  ", None), (3, None)):
+            fake.title_for_token = lambda token, bus=None, r=result: r if isinstance(bus, Bus) else "wrong bus"
+            # the package attribute too: once imported, `from . import windowname` reads it
+            with mock.patch.dict(sys.modules, {"momento.windowname": fake}), \
+                    mock.patch.object(sys.modules["momento"], "windowname", fake, create=True):
+                self.assertEqual(daemon._window_title("tok"), expect)
+        self.assertEqual(Bus.closed, 4)                     # its own connection, closed after each lookup
+
+        def boom(token, bus=None):
+            raise RuntimeError("no KWin")
+        fake.title_for_token = boom
+        pkg = sys.modules["momento"]
+        with mock.patch.dict(sys.modules, {"momento.windowname": fake}), \
+                mock.patch.object(pkg, "windowname", fake, create=True):
+            self.assertIsNone(daemon._window_title("tok"))
+        with mock.patch.dict(sys.modules, {"momento.windowname": None}):   # module missing
+            had = pkg.__dict__.pop("windowname", None)
+            try:
+                self.assertIsNone(daemon._window_title("tok"))
+            finally:
+                if had is not None:
+                    pkg.windowname = had
 
 
 if __name__ == "__main__":

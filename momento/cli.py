@@ -10,6 +10,12 @@ from pathlib import Path
 from . import __version__, config, durations, quality, settings, storage
 
 
+# status.stop_reason -> why, for `momento status`.
+STOP_WHY = {"user": "stopped by you", "window_closed": "the recorded window closed"}
+HISTORY_LINE = {True: "kept when recording stops; every full hour is saved to the clips folder",
+                False: "cleared when recording stops"}
+
+
 def _duration(text: str) -> int:
     try:
         return durations.parse(text)
@@ -44,8 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "the controller keeps working in games)")
     sub.add_parser("pause", help="pause recording (what is buffered can still be saved)")
     sub.add_parser("resume", help="resume recording (earlier footage stays in the replay buffer)")
-    sub.add_parser("stop", help="stop recording and clear the replay history (Momento keeps running; "
-                                "the shortcut still opens the bar)")
+    sub.add_parser("stop", help="stop recording; the replay history is cleared unless keep_history is on "
+                                "(Momento keeps running; the shortcut still opens the bar)")
     q = sub.add_parser("quit", help="shut down the Momento service completely and clear the replay buffer")
     q.add_argument("--keep-buffer", action="store_true",
                    help="keep the recorded footage on disk; it is saveable again after the next start")
@@ -155,16 +161,26 @@ def main(argv: list[str] | None = None) -> int:
         if not r.get("ok"):
             print(f"momento: {r.get('error', 'status failed')}", file=sys.stderr)
             return 1
+        state = r.get("state", "?")
+        if r.get("error"):
+            state += f" ({r['error']})"
+        elif state == "stopped" and r.get("stop_reason") in STOP_WHY:
+            state += f" ({STOP_WHY[r['stop_reason']]})"
+        record = settings.RECORD_LABELS.get(r.get("target") or "screen", r.get("target") or "-").lower()
+        if r.get("target_name"):
+            record += f": {r['target_name']}"
         rows = [
-            ("state", r.get("state", "?") + (f" ({r['error']})" if r.get("error") else "")),
+            ("state", state),
             ("buffered", f"{durations.clock(r.get('buffered', 0))} / {durations.clock(r.get('max_seconds', 0))}"),
-            ("record", settings.RECORD_LABELS.get(r.get("target") or "screen", r.get("target") or "-").lower()),
+            ("record", record),
             ("video", f"{r.get('resolution', '?')} {r.get('fps', 60)} fps, {r.get('quality', '?')} "
                       f"({r.get('bitrate_kbps', 0) / 1000:g} Mbps)"),
             ("source", r.get("source") or "-"),
             ("encoder", r.get("encoder") or "-"),
             ("output", r.get("output_dir") or "-"),
         ]
+        if isinstance(r.get("keep_history"), bool):
+            rows.insert(3, ("history", HISTORY_LINE[r["keep_history"]]))
         if isinstance(r.get("storage"), dict):
             rows.append(("storage", storage_line(r["storage"])))
         for key, value in rows:
@@ -190,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                             else labels.get(cur["mic_device"], cur["mic_device"]))
         record = settings.RECORD_LABELS[cur["record"]].lower()
         if cur["record"] == "window":
-            record += " (only the window you pick; the bar and notifications stay out)"
+            record += " (only the window you pick, when you press play; the bar and notifications stay out)"
         rows = [
             ("record", record),
             ("resolution", cur["resolution"]),
@@ -202,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
             ("sound", sound),
             ("mic", mic),
             ("controller", controller_line(cfg)),
+            ("history", HISTORY_LINE[cur["keep_history"] == "on"]),
+            ("hour mark", f"warn {cur['hour_warning']} min before the "
+                          f"{durations.label(cfg['buffer']['max_seconds'])} mark"),
+            ("clip bar", "kept loaded (opens instantly)" if cur["instant_bar"] == "on"
+                         else "started on every press"),
             ("clips", cfg["output"]["dir"]),
             ("config", cfg["_path"]),
         ]
@@ -241,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             if set(clean) <= set(settings.CONTROLLER_KEYS):
                 line = controller_line(config.load(args.config))
                 print(f"Saved. {line[:1].upper()}{line[1:]}." if changed else "Saved (nothing changed).")
+            elif set(clean) <= set(settings.LIVE_KEYS):
+                print("Saved (applies right away)." if changed else "Saved (nothing changed).")
             elif r.get("warning"):
                 print(f"momento: warning: {r['warning']}. Recording stays off until there is room.",
                       file=sys.stderr)
@@ -270,6 +293,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command in ("pause", "resume"):
+        before = _request({"cmd": "status"}, timeout=10) if args.command == "resume" else None
+        if args.command == "resume" and before is None:
+            return 1
         r = _request({"cmd": args.command}, timeout=30)
         if r is None:
             return 1
@@ -278,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if args.command == "pause":
             print("Paused. What was buffered can still be saved; `momento resume` continues the same replay buffer.")
+        elif before.get("state") == "stopped" and before.get("target") == "window":
+            print("Pick the window to record in the dialog that opens.")
         else:
             print("Recording resumed (earlier footage is kept).")
         return 0
@@ -285,8 +313,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "stop":
         r = _request({"cmd": "stop"}, timeout=10)
         if r and r.get("ok"):
-            print("Recording stopped and the replay history cleared. Start again with `momento resume` "
-                  "or the play button in the clip bar.")
+            if r.get("buffer_cleared", True):
+                print("Recording stopped and the replay history cleared. Start again with `momento resume` "
+                      "or the play button in the clip bar.")
+            else:
+                print("Recording stopped. The replay is kept (keep_history is on): `momento save` still works. "
+                      "Start again with `momento resume` or the play button in the clip bar.")
             return 0
         return 1
 

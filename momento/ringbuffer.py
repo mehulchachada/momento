@@ -134,6 +134,10 @@ class RingBuffer:
         self._lock = threading.Lock()
         self.directory: Path | None = None
         self._loaded = False
+        # Called with each segment right after it closes (the daemon counts the
+        # footage of the current session with it). Runs where closed() is called:
+        # the main loop, from the recorder.
+        self.on_closed = None
         if directory is not None:
             self.attach(directory)
 
@@ -262,11 +266,13 @@ class RingBuffer:
 
     def closed(self, path: str | Path, end: float) -> None:
         path = Path(path)
+        done = None
         with self._lock:
             for seg in reversed(self._segments):
                 if seg.path == path and not seg.closed:
                     seg.end = end
                     self._append_index(seg)
+                    done = seg
                     break
             cold = []
             for seg in self._segments:
@@ -275,6 +281,11 @@ class RingBuffer:
                     cold.append(seg.path)
         drop_cache(cold)
         self.prune()
+        if done is not None and self.on_closed is not None:
+            try:
+                self.on_closed(done)
+            except Exception:  # noqa: BLE001 - a listener must not break recording
+                log.exception("segment listener failed")
 
     def clear(self) -> None:
         """Delete all footage and the index (explicit Stop). Pinned segments survive until released."""
