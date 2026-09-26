@@ -1,6 +1,6 @@
 # Maintainer: Mehul Chachada <mehulchachada at users dot noreply dot github dot com>
 #
-# AUR package for Momento. Publish: see docs/PUBLISHING.md ("AUR").
+# AUR package for Momento.
 # After bumping pkgver: updpkgsums && makepkg --printsrcinfo > .SRCINFO
 pkgname=momento
 pkgver=0.1.0
