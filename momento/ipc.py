@@ -72,6 +72,7 @@ class Server:
         self.path = str(path)
         self.handler = handler
         self._sock: socket.socket | None = None
+        self._inode: int | None = None  # the socket file *we* created
         self._thread: threading.Thread | None = None
         self._closed = threading.Event()
 
@@ -85,6 +86,7 @@ class Server:
         finally:
             os.umask(old)
         os.chmod(self.path, 0o600)
+        self._inode = os.stat(self.path).st_ino
         sock.listen(16)
         self._sock = sock
         self._thread = threading.Thread(target=self._accept_loop, name="ipc-accept", daemon=True)
@@ -114,8 +116,12 @@ class Server:
             except OSError:
                 pass
             self._sock.close()
+        # Only remove the socket file if it is still the one we bound. A second
+        # daemon that failed to start ("already listening") must not delete the
+        # running daemon's socket on its way out.
         try:
-            os.unlink(self.path)
+            if self._inode is not None and os.stat(self.path).st_ino == self._inode:
+                os.unlink(self.path)
         except FileNotFoundError:
             pass
 

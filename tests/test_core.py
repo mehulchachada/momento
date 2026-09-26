@@ -395,8 +395,13 @@ class IPCTest(unittest.TestCase):
         self.assertFalse(stale.exists())
 
     def test_refuses_to_steal_live_socket(self):
+        second = self.ipc.Server(self.sock, lambda m, r: None)
         with self.assertRaises(RuntimeError):
-            self.ipc.Server(self.sock, lambda m, r: None).start()
+            second.start()
+        # The failed second server shutting down must leave the live socket alone.
+        second.close()
+        self.assertTrue(os.path.exists(self.sock))
+        self.assertEqual(self.ipc.request({"cmd": "echo", "value": 1}, timeout=5, path=self.sock)["echo"], 1)
 
 
 class CLITest(unittest.TestCase):
