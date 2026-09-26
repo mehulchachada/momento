@@ -38,7 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("value")
     sub.add_parser("pause", help="pause recording (what is buffered can still be saved)")
     sub.add_parser("resume", help="resume recording (earlier footage stays in the replay buffer)")
-    q = sub.add_parser("quit", aliases=["stop"], help="stop the daemon and clear the replay buffer")
+    sub.add_parser("stop", help="stop recording and clear the replay history (Momento keeps running; "
+                                "the shortcut still opens the bar)")
+    q = sub.add_parser("quit", help="shut down the Momento service completely and clear the replay buffer")
     q.add_argument("--keep-buffer", action="store_true",
                    help="keep the recorded footage on disk; it is saveable again after the next start")
     return p
@@ -230,7 +232,15 @@ def main(argv: list[str] | None = None) -> int:
             print("Recording resumed (earlier footage is kept).")
         return 0
 
-    if args.command in ("quit", "stop"):
+    if args.command == "stop":
+        r = _request({"cmd": "stop"}, timeout=10)
+        if r and r.get("ok"):
+            print("Recording stopped and the replay history cleared. Start again with `momento resume` "
+                  "or the play button in the clip bar.")
+            return 0
+        return 1
+
+    if args.command == "quit":
         msg = {"cmd": "quit"}
         if getattr(args, "keep_buffer", False):
             msg["keep_buffer"] = True

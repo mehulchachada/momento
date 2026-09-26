@@ -1194,6 +1194,17 @@ class DaemonBufferTest(unittest.TestCase):
     tearDown = DaemonControlTest.tearDown
     call = DaemonControlTest.call
 
+    def test_stop_keeps_service_running(self):
+        buf = self.fill()
+        r = self.call({"cmd": "stop"})
+        self.assertEqual(r, {"ok": True, "state": "stopped", "buffer_cleared": True})
+        self.assertEqual(list(buf.glob("*.ts")), [])
+        st = self.call({"cmd": "status"})
+        self.assertEqual((st["ok"], st["state"], st["recording"], st["buffered"]), (True, "stopped", False, 0))
+        self.assertFalse(self.d._stopping)  # the daemon (and its hotkey) stay up
+        self.assertEqual(self.call({"cmd": "resume"})["ok"], True)
+        self.assertNotEqual(self.call({"cmd": "status"})["state"], "stopped")
+
     def fill(self) -> Path:
         buf = Path(self.d.cfg["buffer"]["dir"])
         self.d.ring.recover()

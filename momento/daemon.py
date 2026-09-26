@@ -71,6 +71,7 @@ class Daemon:
         self.server = None
         self.shortcut = None
         self.paused = False
+        self.stopped = False  # explicit Stop: paused + history cleared, service keeps running
         self._stopping = False
         # Disk-space guard: set while capture is blocked (state "no_storage").
         self.storage_error: str | None = None
@@ -229,6 +230,8 @@ class Daemon:
             self.pause(reply)
         elif cmd == "resume":
             self.resume(reply)
+        elif cmd == "stop":
+            self.stop_recording(reply)
         elif cmd == "quit":
             # The explicit Stop clears the replay buffer unless keep_buffer is set.
             clear = not msg.get("keep_buffer")
@@ -264,7 +267,7 @@ class Daemon:
         if not self.paused:
             started = self._start_recorder()
         result = {"ok": True, "restarted": started, "paused": self.paused,
-                  "state": "paused" if self.paused else self.state, "storage": self._storage_status()}
+                  "state": self._idle_state(), "storage": self._storage_status()}
         if self.state == "no_storage" and not self.paused:
             result["warning"] = self.storage_error
         reply(result)
@@ -318,7 +321,7 @@ class Daemon:
             return
         if not changed:
             reply({"ok": True, "changed": {}, "restarted": False, "paused": self.paused,
-                   "state": "paused" if self.paused else self.state, "storage": self._storage_status()})
+                   "state": self._idle_state(), "storage": self._storage_status()})
             return
         self.reload(lambda r: reply({**r, "changed": changed}))
 
@@ -330,10 +333,25 @@ class Daemon:
                 self.recorder.stop()
         reply({"ok": True, "state": "paused"})
 
+    def stop_recording(self, reply) -> None:
+        """The bar's Stop: end recording and clear the replay history, but keep the
+        service (and with it the global shortcut) running so the bar still opens."""
+        self.paused = True
+        self.stopped = True
+        if self.recorder is not None:
+            self.recorder.stop()
+        self.ring.clear()
+        log.info("recording stopped by the user; replay history cleared")
+        reply({"ok": True, "state": "stopped", "buffer_cleared": True})
+
+    def _idle_state(self) -> str:
+        return "stopped" if self.stopped else "paused" if self.paused else self.state
+
     def resume(self, reply) -> None:
         """Start capturing again as a new session; the footage from before the pause stays."""
         if self.paused or self.state == "no_storage":
             self.paused = False
+            self.stopped = False
             if self.recorder is not None and not self._start_recorder():
                 reply({"ok": False, "code": "no_storage", "error": self.storage_error,
                        "state": self.state, "storage": self._storage_status()})
@@ -344,7 +362,7 @@ class Daemon:
         rec = self.recorder
         result = {
             "ok": True,
-            "state": "paused" if self.paused else self.state,
+            "state": self._idle_state(),
             "recording": False if self.paused else bool(getattr(rec, "recording", False)),
             "buffered": round(self.ring.buffered_seconds(), 2),
             "max_seconds": self.ring.max_seconds,
