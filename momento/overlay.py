@@ -70,6 +70,44 @@ DIM = "#555555"
 RED = "#FF4D2E"
 SEL_BG = "#262626"       # the chosen value in a settings row
 
+PAUSED_HINT = "Paused · saving uses the footage so far"
+
+
+def _gb(n) -> str:
+    return f"{float(n or 0) / 1e9:.1f}"
+
+
+def _storage_short(st) -> dict | None:
+    """The status's storage block when free space is short, else None."""
+    if not st or not st.get("ok"):
+        return None
+    sto = st.get("storage") if isinstance(st.get("storage"), dict) else None
+    if st.get("state") == "no_storage" or (sto is not None and sto.get("ok") is False):
+        return sto or {}
+    return None
+
+
+STORAGE_TAIL = "Free up space or pick a lower quality in settings"
+
+
+def _storage_warning(sto, message=None) -> str:
+    """One line for the strip above the bar; the daemon's own wording wins when it sent one."""
+    if message:
+        return f"{str(message).rstrip('. ')}. {STORAGE_TAIL}"
+    free = float(sto.get("free") or 0) + float(sto.get("reclaimable") or 0)
+    need = sto.get("required")
+    if need:
+        return f"Not enough free space: needs {_gb(need)} GB, {_gb(free)} GB free. {STORAGE_TAIL}"
+    return f"Not enough free space. {STORAGE_TAIL}"
+
+
+def _status_warning(st) -> str | None:
+    sto = _storage_short(st)
+    if sto is None:
+        return None
+    msg = st.get("error") if st.get("state") == "no_storage" else None
+    return _storage_warning(sto, msg)
+
 
 # --------------------------------------------------------------------------
 # toggle / pidfile / last choice
@@ -273,7 +311,75 @@ def _gear_path(cx: float, cy: float, r_out=8.0, r_in=6.0, r_hole=2.6, teeth=8):
     return path
 
 
+def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float = 1.6):
+    """Stroke a ~16 px line icon centred on (x, y). No fills except tiny knobs."""
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QPainterPath, QPen, QPolygonF
+
+    pen = QPen(QColor(color), width)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.save()
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    P = QPointF
+    if kind == "display":
+        p.drawRoundedRect(QRectF(x - 7, y - 6.5, 14, 10), 1.5, 1.5)
+        p.drawLine(P(x, y + 3.5), P(x, y + 6.5))
+        p.drawLine(P(x - 3.5, y + 6.5), P(x + 3.5, y + 6.5))
+    elif kind == "gauge":
+        cy = y + 2
+        p.drawArc(QRectF(x - 7, cy - 7, 14, 14), -25 * 16, 230 * 16)
+        a = math.radians(-45)
+        p.drawLine(P(x, cy), P(x + 4.5 * math.cos(a), cy + 4.5 * math.sin(a)))
+        p.setBrush(QColor(color))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(P(x, cy), 1.6, 1.6)
+    elif kind == "sliders":
+        for dx, ky in ((-5, 2.5), (0, -3), (5, 1)):
+            p.drawLine(P(x + dx, y - 7), P(x + dx, y + 7))
+            p.save()
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(x + dx - 2.5, y + ky - 1.4, 5, 2.8), 1, 1)
+            p.restore()
+    elif kind == "speaker":
+        p.drawPolygon(QPolygonF([P(x - 7, y - 2.5), P(x - 4.5, y - 2.5), P(x - 1, y - 6),
+                                 P(x - 1, y + 6), P(x - 4.5, y + 2.5), P(x - 7, y + 2.5)]))
+        for r in (3.5, 6.5):
+            p.drawArc(QRectF(x - 0.5 - r, y - r, 2 * r, 2 * r), -45 * 16, 90 * 16)
+    elif kind == "mic":
+        p.drawRoundedRect(QRectF(x - 2.5, y - 7.5, 5, 9.5), 2.5, 2.5)
+        p.drawArc(QRectF(x - 5.5, y - 5, 11, 9.5), 180 * 16, 180 * 16)
+        p.drawLine(P(x, y + 4.5), P(x, y + 7))
+        p.drawLine(P(x - 3, y + 7), P(x + 3, y + 7))
+    elif kind == "micdev":
+        mx = x - 3
+        p.drawRoundedRect(QRectF(mx - 2.5, y - 7.5, 5, 9.5), 2.5, 2.5)
+        p.drawArc(QRectF(mx - 5, y - 5, 10, 9.5), 180 * 16, 180 * 16)
+        cable = QPainterPath(P(mx, y + 4.5))
+        cable.lineTo(mx, y + 5.5)
+        cable.quadTo(mx, y + 7.5, mx + 2.5, y + 7.5)
+        cable.lineTo(x + 3.5, y + 7.5)
+        cable.quadTo(x + 5.5, y + 7.5, x + 5.5, y + 5.5)
+        cable.lineTo(x + 5.5, y + 1)
+        p.drawPath(cable)
+        p.drawRoundedRect(QRectF(x + 3.5, y - 3, 4, 4), 1, 1)
+        p.drawLine(P(x + 4.7, y - 3), P(x + 4.7, y - 5.5))
+        p.drawLine(P(x + 6.3, y - 3), P(x + 6.3, y - 5.5))
+    elif kind == "check":
+        p.drawPolyline(QPolygonF([P(x - 5.5, y + 0.5), P(x - 1.8, y + 4.2), P(x + 5.5, y - 4)]))
+    elif kind == "back":
+        p.drawLine(P(x - 6, y), P(x + 6, y))
+        p.drawPolyline(QPolygonF([P(x - 1.5, y - 4.5), P(x - 6, y), P(x - 1.5, y + 4.5)]))
+    p.restore()
+
+
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
+ROW_ICONS = {"resolution": "display", "fps": "gauge", "quality": "sliders", "audio_source": "speaker",
+             "mic": "mic", "mic_device": "micdev"}
+GLYPH_W = 16             # settings: icon column
+GLYPH_GAP = 10
 
 
 def _build(argv=None):  # noqa: C901 - one cohesive UI builder
@@ -362,19 +468,49 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 repolish(self)
 
     class TextButton(QPushButton):
-        def __init__(self, text, height=BAR_HEIGHT):
+        def __init__(self, text, height=BAR_HEIGHT, glyph=None):
             super().__init__(text)
+            self.glyph = glyph
             self.setFocusPolicy(Qt.StrongFocus)
             self.setFixedHeight(height)
             self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.setCursor(Qt.PointingHandCursor)
             self.setFont(ui_font())
+            self.setProperty("glyph", bool(glyph))
+
+        def paintEvent(self, ev):
+            super().paintEvent(ev)
+            if not self.glyph:
+                return
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            on = self.isEnabled() and (self.hasFocus() or self.underMouse())
+            _draw_line_glyph(p, self.glyph, 10 + 8, self.height() / 2, "#111111" if on else MUTED)
+            p.end()
+
+    class RowIcon(QWidget):
+        """The line icon in front of a settings label; brightens while its row has focus."""
+
+        def __init__(self, kind):
+            super().__init__()
+            self.kind = kind
+            self.setFixedSize(GLYPH_W, ROW_H)
+            self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        def paintEvent(self, ev):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            row = self.parentWidget()
+            w = QApplication.focusWidget()
+            on = row is not None and w is not None and row.isAncestorOf(w)
+            _draw_line_glyph(p, self.kind, GLYPH_W / 2, ROW_H / 2, TEXT if on else MUTED)
+            p.end()
 
     class IconButton(QPushButton):
         """gear / pause / play / stop, painted with QPainter so it never depends on a font."""
 
         TIPS = {"gear": "Settings (S)", "pause": "Pause recording (P)", "play": "Resume recording (P)",
-                "stop": "Stop Momento"}
+                "start": "Start Momento (P)", "stop": "Stop Momento"}
 
         def __init__(self, kind):
             super().__init__("")
@@ -397,9 +533,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             super().paintEvent(ev)  # stylesheet background: inverted on focus/hover
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            on = self.hasFocus() or self.underMouse()
+            enabled = self.isEnabled()
+            on = enabled and (self.hasFocus() or self.underMouse())
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#111111" if on else MUTED))
+            p.setBrush(QColor("#111111" if on else MUTED if enabled else "#3A3A3A"))
             c = QRectF(self.rect()).center()
             x, y = c.x(), c.y()
             if self.kind == "gear":
@@ -407,7 +544,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             elif self.kind == "pause":
                 p.drawRoundedRect(QRectF(x - 5, y - 6.5, 3.5, 13), 1, 1)
                 p.drawRoundedRect(QRectF(x + 1.5, y - 6.5, 3.5, 13), 1, 1)
-            elif self.kind == "play":
+            elif self.kind in ("play", "start"):
                 from PySide6.QtCore import QPointF
                 from PySide6.QtGui import QPolygonF
                 p.drawPolygon(QPolygonF([QPointF(x - 4, y - 6.5), QPointF(x - 4, y + 6.5), QPointF(x + 6.5, y)]))
@@ -425,6 +562,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setCursor(Qt.PointingHandCursor)
             self.setFont(ui_font())
             self.setProperty("sel", False)
+            self.setProperty("nofit", False)
             if tip:
                 self.setToolTip(tip)
 
@@ -432,6 +570,24 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.property("sel") != on:
                 self.setProperty("sel", on)
                 repolish(self)
+
+        def set_nofit(self, on):
+            if self.property("nofit") != on:
+                self.setProperty("nofit", on)
+                repolish(self)
+
+        def paintEvent(self, ev):
+            super().paintEvent(ev)
+            if not self.property("nofit"):
+                return
+            # a short accent underline: this choice needs more space than is free
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(RED))
+            w = 12
+            p.drawRoundedRect(QRectF((self.width() - w) / 2, self.height() - 3 - 3.5, w, 2), 1, 1)
+            p.end()
 
     class SettingRow(QWidget):
         """A label and a segmented choice. Long lists collapse to ‹ current ›."""
@@ -447,6 +603,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             lay = QHBoxLayout(self)
             lay.setContentsMargins(16, 0, 12, 0)
             lay.setSpacing(SEG_SPACING)
+            self.icon = RowIcon(ROW_ICONS.get(key, "sliders"))
+            lay.addWidget(self.icon)
+            lay.addSpacing(GLYPH_GAP - SEG_SPACING)
             t = QLabel(title)
             t.setObjectName("muted")
             t.setFixedWidth(LABEL_W)
@@ -547,6 +706,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.bridge.configured.connect(self.on_configured)
             self.bridge.control.connect(self.on_control)
             self.bridge.started.connect(self.on_started)
+            QApplication.instance().focusChanged.connect(self.on_focus_changed)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAutoFillBackground(False)
             self.setWindowTitle("Replay")
@@ -563,11 +723,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 QPushButton[long="true"] {{ color: {DIM}; }}
                 QPushButton#seg {{ color: {MUTED}; margin: 3px 0; padding: 0 {SEG_PAD}px; }}
                 QPushButton#seg[sel="true"] {{ color: {TEXT}; background: {SEL_BG}; }}
+                QPushButton#seg[nofit="true"] {{ color: {DIM}; }}
+                QPushButton#seg[sel="true"][nofit="true"] {{ color: {MUTED}; }}
+                QPushButton[glyph="true"] {{ padding: 0 12px 0 32px; }}
                 QPushButton:hover, QPushButton:focus,
                 QPushButton#quiet:hover, QPushButton#quiet:focus,
                 QPushButton#seg:hover, QPushButton#seg:focus,
-                QPushButton#seg[sel="true"]:hover, QPushButton#seg[sel="true"]:focus
+                QPushButton#seg[sel="true"]:hover, QPushButton#seg[sel="true"]:focus,
+                QPushButton#seg[nofit="true"]:hover, QPushButton#seg[nofit="true"]:focus
                     {{ background: {TEXT}; color: #111111; }}
+                QPushButton:disabled, QPushButton#quiet:disabled {{ color: {DIM}; background: transparent; }}
             """)
 
             outer = QVBoxLayout(self)
@@ -576,9 +741,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
             # Above the bar (bottom-anchored, so the bar grows upward):
             # a one-line hint while paused, or the settings rows.
-            self.hintbar = QLabel("Paused. Saving uses the footage so far"
-                                  " · Resuming starts a fresh replay")
+            self.hintbar = QLabel(PAUSED_HINT)
             self.hintbar.setObjectName("muted")
+            self.hintbar.setTextFormat(Qt.RichText)
+            self.hintbar.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             self.hintbar.setContentsMargins(18, 0, 16, 0)
             self.hintbar.setFixedHeight(HINT_H)
             self.hintbar.hide()
@@ -604,19 +770,30 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             row = QHBoxLayout(picker)
             row.setContentsMargins(16, 0, 0, 0)
             row.setSpacing(0)
+            # dot + label + time share one fixed-width block so no state
+            # ("Replay 12:34", "Starting 0:00", "Low storage", ...) moves the clip lengths.
+            head = QWidget()
+            hrow = QHBoxLayout(head)
+            hrow.setContentsMargins(0, 0, 0, 0)
+            hrow.setSpacing(0)
             self.dot = QLabel()
             self.dot.setFixedSize(8, 8)
-            row.addWidget(self.dot)
-            row.addSpacing(10)
+            hrow.addWidget(self.dot)
+            hrow.addSpacing(10)
             self.name = QLabel("Replay")
             self.name.setObjectName("muted")
-            self.name.setMinimumWidth(self.name.fontMetrics().horizontalAdvance("Paused") + 2)
-            row.addWidget(self.name)
-            row.addSpacing(10)
+            hrow.addWidget(self.name)
+            hrow.addSpacing(10)
             self.time = QLabel("0:00")
             self.time.setFont(ui_font(tabular=True))
-            self.time.setMinimumWidth(self.time.fontMetrics().horizontalAdvance("00:00") + 2)
-            row.addWidget(self.time)
+            hrow.addWidget(self.time)
+            hrow.addStretch(1)
+            nfm, tfm = self.name.fontMetrics(), QFontMetrics(ui_font(tabular=True))
+            head.setFixedWidth(8 + 10 + 10 + 2 + max(
+                nfm.horizontalAdvance(n) + tfm.horizontalAdvance(t)
+                for n, t in (("Replay", "00:00"), ("Paused", "00:00"), ("Starting", "00:00"),
+                             ("Off", "—"), ("Error", "00:00"), ("Low storage", "00:00"))))
+            row.addWidget(head)
             row.addSpacing(12)
             row.addWidget(divider())
             row.addSpacing(6)
@@ -633,7 +810,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             row.addSpacing(10)
             self.stack.addWidget(picker)
 
-            # page 1: a single line (saving / saved / error / off) + controls
+            # page 1: a single transient line (saving / saved / errors) + controls
             line = QWidget()
             lrow = QHBoxLayout(line)
             lrow.setContentsMargins(18, 0, 0, 0)
@@ -642,11 +819,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.line.setTextFormat(Qt.RichText)
             self.line.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             lrow.addWidget(self.line, 1)
-            self.start_btn = TextButton("Start")
-            self.start_btn.setToolTip("Start recording")
-            self.start_btn.clicked.connect(self.start_recorder)
-            self.start_btn.hide()
-            lrow.addWidget(self.start_btn)
             lrow.addSpacing(4)
             self.controls.append(self._controls(lrow))
             lrow.addSpacing(10)
@@ -661,9 +833,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.foot.setTextFormat(Qt.RichText)
             self.foot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             frow.addWidget(self.foot, 1)
-            self.apply_btn = TextButton("Apply")
+            self.apply_btn = TextButton("Apply", glyph="check")
             self.apply_btn.clicked.connect(self.apply_settings)
-            self.back_btn = TextButton("Back")
+            self.back_btn = TextButton("Back", glyph="back")
             self.back_btn.setObjectName("quiet")
             self.back_btn.clicked.connect(self.close_settings)
             frow.addWidget(self.apply_btn)
@@ -697,7 +869,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             # only the height changes (upward) for the hint line and settings.
             self.bar_w = picker.sizeHint().width() + 2
             self.setFixedSize(self.bar_w, BAR_HEIGHT + 2)
-            self.set_controls(running=False, paused=False, start=False)
+            self.view = None
+            self.warn = None          # storage warning shown above the bar
+            self.set_view("off", False)
 
             self.idle = QTimer(self)
             self.idle.setSingleShot(True)
@@ -731,9 +905,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         # ---------------- layout
         def relayout(self):
             top = 0
-            show_hint = self.mode == "clip" and self.paused and self.running and not self.done
-            self.hintbar.setHidden(not show_hint)
-            if show_hint:
+            hint = None
+            if self.mode == "clip" and not self.done and not self.saving:
+                if self.warn:
+                    fm = self.hintbar.fontMetrics()
+                    text = fm.elidedText(self.warn, Qt.ElideRight, self.bar_w - 2 - 34)
+                    hint = f"<span style='color:{RED}'>{_esc(text)}</span>"
+                elif self.paused and self.running:
+                    hint = PAUSED_HINT
+            if hint is not None and self.hintbar.text() != hint:
+                self.hintbar.setText(hint)
+            self.hintbar.setHidden(hint is None)
+            if hint is not None:
                 top += HINT_H
             if self.mode == "settings":
                 n = sum(1 for r in self.rows if not r.isHidden())
@@ -764,14 +947,48 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if w is None or w is self or w.isHidden():
                     focus.setFocus(Qt.OtherFocusReason)
 
-        def set_controls(self, running, paused, start):
+        NAMES = {"rec": "Replay", "paused": "Paused", "starting": "Starting", "off": "Off",
+                 "error": "Error", "lowstorage": "Low storage"}
+
+        def set_view(self, view, opts_on):
+            """One bar for every state: only the dot, label, time and enablement change."""
+            self.view = view
+            running = self.running
+            dot = RED if view in ("rec", "lowstorage") else MUTED if view == "paused" else DIM
+            self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
+            self.dot.show()
+            self.name.setText(self.NAMES[view])
+            self.name.setToolTip("")
             for c in self.controls:
-                c["pause"].setHidden(not running)
-                c["stop"].setHidden(not running)
-                c["pause"].set_kind("play" if paused else "pause")
-            self.start_btn.setHidden(not start)
-            self.dot.setStyleSheet(f"background: {MUTED if paused else RED}; border-radius: 4px;")
-            self.name.setText("Paused" if paused else "Replay")
+                pb = c["pause"]
+                if view == "off" or (view == "starting" and not running):
+                    pb.set_kind("start")
+                    pb.setEnabled(view == "off")
+                elif view in ("paused", "lowstorage"):
+                    pb.set_kind("play" if view == "paused" else "start")
+                    pb.setEnabled(True)
+                else:
+                    pb.set_kind("pause")
+                    pb.setEnabled(True)
+                c["stop"].setEnabled(running)
+                for b in c.values():
+                    b.show()
+            for o in self.options:
+                o.setEnabled(opts_on)
+            self.online = opts_on
+
+        def on_focus_changed(self, _old, _new):
+            if self.mode != "settings":
+                return
+            try:
+                for r in self.rows:
+                    r.icon.update()  # the focused row's icon brightens
+            except RuntimeError:  # rows being rebuilt / window already destroyed
+                pass
+
+        def set_time(self, text, color=TEXT):
+            self.time.setText(text)
+            self.time.setStyleSheet(f"color: {color};")
 
         # ---------------- status
         def refresh_async(self):
@@ -795,66 +1012,82 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if st.get("ok"):
                     return  # still shutting down
                 self.stopping = False
+            was_on = self.online is True and self.stack.currentIndex() == 0
             if not st.get("ok"):
-                self.online = False
                 self.running = False
                 self.paused = False
                 self.buffered = 0.0
-                off = st.get("not_running", True)
-                self.set_controls(running=False, paused=False, start=off)
-                if off:
-                    self.show_line(f"<span style='color:{MUTED}'>Replay is off</span>", focus=self.start_btn)
-                else:
+                self.warn = None
+                if not st.get("not_running", True):
+                    self.online = False
                     self.show_line(f"<span style='color:{RED}'>"
                                    f"{_esc(st.get('error') or 'Cannot reach the recorder')}</span>")
-                self.relayout()
-                return
-            self.running = True
-            self.paused = st.get("state") == "paused"
-            self.set_controls(running=True, paused=self.paused, start=False)
-            self.buffered = float(st.get("buffered") or 0.0)
-            self.time.setText(_mmss(self.buffered))
-            self.dot.setVisible(bool(st.get("recording")) or self.paused)
-            self.relayout()
-            if self.buffered <= 0:
-                self.online = False
-                if self.paused:
-                    msg = "Paused — nothing was buffered"
+                    self.relayout()
+                    return
+                self.set_view("off", False)
+                self.set_time("—", DIM)
+                view = "off"
+            else:
+                self.running = True
+                self.paused = st.get("state") == "paused"
+                self.buffered = float(st.get("buffered") or 0.0)
+                if "storage" in st or st.get("state") == "no_storage":
+                    self.warn = _status_warning(st)
+                # else: an older daemon without storage info; keep any warning a reply gave
+                if st.get("state") == "no_storage":
+                    view = "lowstorage"
+                elif self.paused:
+                    view = "paused"
                 elif st.get("recording"):
-                    msg = "Recording — nothing buffered yet"
+                    view = "rec"
+                elif st.get("state") == "error":
+                    view = "error"
                 else:
-                    msg = f"Replay is {_esc(st.get('state') or 'idle')} — nothing buffered"
-                self.show_line(f"<span style='color:{MUTED}'>{msg}</span>")
-                return
-            first = self.online is not True or self.stack.currentIndex() != 0
-            self.online = True
-            self.stack.setCurrentIndex(0)
-            for o in self.options:
-                o.set_long(o.seconds > self.buffered + 0.5)
-            if first:
+                    view = "starting"
+                self.set_view(view, self.buffered > 0)
+                if view == "lowstorage":
+                    # the numbers are in the warning strip right above; keep the head compact
+                    self.set_time(_mmss(self.buffered) if self.buffered > 0 else "", MUTED)
+                else:
+                    self.set_time(_mmss(self.buffered), TEXT if view in ("rec", "paused") else MUTED)
+                if view == "error" and st.get("error"):
+                    self.name.setToolTip(str(st["error"]))
+                for o in self.options:
+                    o.set_long(o.seconds > self.buffered + 0.5)
+            if self.stack.currentIndex() != 0:
+                self.stack.setCurrentIndex(0)
+            self.relayout()
+            w = QApplication.focusWidget()
+            if (self.online and not was_on) or w not in self.focusables():
                 self.focus_default()
 
         def focus_default(self):
             if self.stack.currentIndex() != 0:
-                if not self.start_btn.isHidden() and self.stack.currentIndex() == 1:
-                    self.start_btn.setFocus(Qt.OtherFocusReason)
-                else:
-                    self.setFocus(Qt.OtherFocusReason)
+                self.setFocus(Qt.OtherFocusReason)
                 return
-            want = _last_choice()
-            target = next((o for o in self.options if o.seconds == want), self.options[0])
-            target.setFocus(Qt.OtherFocusReason)
+            if self.online:
+                want = _last_choice()
+                target = next((o for o in self.options if o.seconds == want), self.options[0])
+                target.setFocus(Qt.OtherFocusReason)
+                return
+            c = self.controls[0]
+            # low storage is fixed in settings; otherwise play (start / resume) is the next step
+            target = c["gear"] if self.view == "lowstorage" else c["pause"]
+            if target.isEnabled():
+                target.setFocus(Qt.OtherFocusReason)
+            else:
+                self.setFocus(Qt.OtherFocusReason)
 
         # ---------------- save
         def choose(self, opt):
-            if self.saving or self.done or not self.online or self.mode != "clip" or self.control_busy:
+            if (self.saving or self.done or not self.online or not opt.isEnabled()
+                    or self.mode != "clip" or self.control_busy):
                 return
             self.saving = True
             self.idle.stop()
             _store_choice(opt.seconds)
             shown = min(opt.seconds, self.buffered) if self.buffered else opt.seconds
             self.show_line(f"Saving last {dur_label(shown)}…")
-            self.hintbar.hide()
             self.relayout()
             secs = opt.seconds
 
@@ -882,8 +1115,21 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             QTimer.singleShot(RESULT_CLOSE_MS, QApplication.instance().quit)
 
         # ---------------- pause / resume / stop / start
+        def show_storage_warning(self, text=None):
+            if text is None:
+                text = _status_warning(self.last_status) or _storage_warning({})
+            self.warn = text
+            self.relayout()
+
         def toggle_pause(self):
-            if not self.running or self.control_busy or self.saving or self.done or self.mode != "clip":
+            if self.control_busy or self.saving or self.done or self.mode != "clip":
+                return
+            if not self.running:
+                if self.view == "off":
+                    self.start_recorder()
+                return
+            if self.view == "lowstorage" or (self.paused and _storage_short(self.last_status) is not None):
+                self.show_storage_warning()  # resuming would fail: say why instead
                 return
             cmd = "resume" if self.paused else "pause"
             self.control_busy = True
@@ -915,7 +1161,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             self.control_busy = True
             self.mode = "clip"
-            self.hintbar.hide()
+            self.warn = None
             self.show_line("Stopping Momento…")
             self.relayout()
 
@@ -932,18 +1178,23 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_control(self, cmd, r):
             self.control_busy = False
             if not r.get("ok"):
-                self.show_line(f"<span style='color:{RED}'>{_esc(r.get('error') or cmd + ' failed')}</span>")
+                if r.get("code") == "no_storage":
+                    self.show_storage_warning(_storage_warning(r.get("storage") or {}, r.get("error")))
+                    self.status_inflight = False
+                    self.refresh_async()
+                else:
+                    self.show_line(f"<span style='color:{RED}'>{_esc(r.get('error') or cmd + ' failed')}</span>")
                 return
             if cmd == "quit":
                 self.stopping = True
                 self.running = False
-                self.set_controls(running=False, paused=False, start=False)
             elif cmd == "pause" and self.last_status and self.last_status.get("ok"):
                 # show it right away; the next poll confirms
                 self.apply_status({**self.last_status, "state": "paused", "recording": False})
             elif cmd == "resume":
+                # the buffer survives a pause: footage so far stays saveable while it restarts
                 self.apply_status({**(self.last_status or {}), "ok": True, "state": "starting",
-                                   "recording": False, "buffered": 0})
+                                   "recording": False})
             self.status_inflight = False
             self.refresh_async()
 
@@ -951,21 +1202,27 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.running or self.control_busy or self.saving or self.done:
                 return
             self.control_busy = True
-            self.start_btn.hide()
-            self.show_line(f"<span style='color:{MUTED}'>Starting Momento…</span>")
+            self.warn = None
+            if self.stack.currentIndex() != 0:
+                self.stack.setCurrentIndex(0)
+            self.set_view("starting", False)
+            self.set_time("0:00", MUTED)
+            self.relayout()
+            self.setFocus(Qt.OtherFocusReason)
 
             def work():
                 try:
                     start_daemon()
                 except Exception as e:  # noqa: BLE001
-                    self.bridge.started.emit({"ok": False, "error": f"cannot start Momento: {e}"})
+                    self.bridge.started.emit({"ok": False, "not_running": False,
+                                              "error": f"cannot start Momento: {e}"})
                     return
                 deadline = time.monotonic() + START_TIMEOUT_S
                 st = None
                 while time.monotonic() < deadline:
                     st = fetch_status(timeout=1.0)
                     if st.get("ok") and (st.get("recording") or float(st.get("buffered") or 0) > 0
-                                         or st.get("state") == "error"):
+                                         or st.get("state") in ("error", "no_storage")):
                         break
                     time.sleep(START_POLL_S)
                 if not st or not st.get("ok"):
@@ -986,8 +1243,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.apply_status(st)
             self.relayout()
             page = self.stack.currentIndex()
-            if focus_key and page in (0, 1) and not self.controls[page][focus_key].isHidden():
-                self.controls[page][focus_key].setFocus(Qt.OtherFocusReason)
+            if focus_key and page in (0, 1):
+                b = self.controls[page][focus_key]
+                if b.isVisible() and b.isEnabled():
+                    b.setFocus(Qt.OtherFocusReason)
 
         # ---------------- settings
         def open_settings(self):
@@ -1027,7 +1286,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             vals = data["values"]
             dev = data.get("devices") or {}
             outs, ins = dev.get("outputs") or [], dev.get("inputs") or []
-            avail = self.bar_w - 2 - 16 - LABEL_W - SEG_SPACING - 12
+            avail = self.bar_w - 2 - 16 - GLYPH_W - GLYPH_GAP - LABEL_W - SEG_SPACING - 12
 
             header = QWidget()
             header.setFixedHeight(HEADER_H)
@@ -1036,7 +1295,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             title = QLabel("Settings")
             hl.addWidget(title)
             hl.addStretch(1)
-            self.note = QLabel("Applying restarts the replay buffer" if data.get("online")
+            self.note = QLabel("Applying restarts recording · your replay is kept" if data.get("online")
                                else "Momento is off — changes apply when it starts")
             self.note.setObjectName("dim")
             hl.addWidget(self.note)
@@ -1066,6 +1325,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             for r in self.rows:
                 self.panel_lay.addWidget(r)
             self.row("mic_device").setHidden(vals["mic"] != "on")
+            self.update_fit()
 
         def row(self, key):
             return next(r for r in self.rows if r.key == key)
@@ -1088,8 +1348,62 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             gb = quality.buffer_gb(quality.bitrate_kbps(cap), secs)
             return f"{cap['fps']} fps · ~{gb:.1f} GB for {secs // 60} min"
 
+        # storage: the settings reply carries free space and what each combination needs
+        def storage_free(self):
+            sto = (self.sdata or {}).get("storage")
+            if not isinstance(sto, dict):
+                return None
+            return float(sto.get("free") or 0) + float(sto.get("reclaimable") or 0)
+
+        def storage_need(self, v):
+            sto = (self.sdata or {}).get("storage")
+            if not isinstance(sto, dict):
+                return None
+            need = (sto.get("required") or {}).get(f"{v['resolution']}/{v['quality']}/{v.get('fps', quality.FPS)}")
+            return float(need) if need is not None else None
+
+        def fits(self, v):
+            need, free = self.storage_need(v), self.storage_free()
+            return need is None or free is None or need <= free
+
+        def current_need(self):
+            sto = (self.sdata or {}).get("storage") or {}
+            cur = sto.get("current")
+            if cur and cur in (sto.get("required") or {}):
+                return float(sto["required"][cur])
+            return self.storage_need({k: self.sdata["values"].get(k) for k in ("resolution", "quality", "fps")})
+
+        def can_apply(self, v):
+            """Blocked only when the choice does not fit AND needs more than today's settings:
+            stepping down must always be possible, even while space is still short."""
+            if self.fits(v):
+                return True
+            need, cur = self.storage_need(v), self.current_need()
+            return cur is not None and need is not None and need <= cur
+
+        def update_fit(self):
+            v = self.pending()
+            for key in ("resolution", "quality", "fps"):
+                row = self.row(key)
+                if row.cycle:
+                    continue
+                for val, b in zip(row.values, row.buttons):
+                    b.set_nofit(not self.fits({**v, key: val}))
+            ok = self.can_apply(v)
+            if self.apply_btn.isEnabled() != ok:
+                had = self.apply_btn.hasFocus()
+                self.apply_btn.setEnabled(ok)
+                if had:
+                    self.back_btn.setFocus(Qt.TabFocusReason)
+
         def update_foot(self):
-            if self.apply_state is None:
+            if self.apply_state is not None:
+                return
+            v = self.pending()
+            if not self.fits(v):
+                self.foot.setText(f"<span style='color:{RED}'>Needs {_gb(self.storage_need(v))} GB"
+                                  f" · {_gb(self.storage_free())} GB free</span>")
+            else:
                 self.foot.setText(f"<span style='color:{MUTED}'>{_esc(self.estimate())}</span>")
 
         def on_row_changed(self, row):
@@ -1098,6 +1412,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.relayout()
             if self.apply_state == "error":
                 self.apply_state = None
+            self.update_fit()
             self.update_foot()
 
         def close_settings(self, focus_key="gear"):
@@ -1114,6 +1429,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def apply_settings(self):
             if self.mode != "settings" or self.apply_state in ("busy", "done"):
                 return
+            if not self.apply_btn.isEnabled():
+                return  # the chosen combination needs more space than is free
             changes = self.changes()
             if not changes:
                 self.close_settings()
@@ -1156,6 +1473,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.idle.start()
                 return
             self.apply_state = "done"
+            if r.get("warning") or r.get("state") == "no_storage":
+                # saved, but even the new settings do not fit yet
+                fm = self.foot.fontMetrics()
+                msg = str(r.get("warning") or "Not enough free space")
+                msg = fm.elidedText(f"Saved · {msg}", Qt.ElideRight, max(120, self.foot.width()))
+                self.foot.setText(f"<span style='color:{RED}'>{_esc(msg)}</span>")
+                self.last_status = {**(self.last_status or {}), "ok": True, "state": "no_storage",
+                                    "recording": False, "error": r.get("warning")}
+                QTimer.singleShot(RESULT_CLOSE_MS, self.after_apply)
+                return
             if not r.get("online"):
                 tail = "takes effect when Momento starts"
             elif r.get("paused"):
@@ -1164,9 +1491,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 tail = "recording restarted"
             self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— {tail}</span>")
             if r.get("online") and not r.get("paused"):
-                self.buffered = 0.0  # the buffer started over
+                # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
-                                    "recording": False, "buffered": 0}
+                                    "recording": False}
             QTimer.singleShot(RESULT_CLOSE_MS, self.after_apply)
 
         def after_apply(self):
@@ -1197,13 +1524,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if i < len(rows):
                     rows[i].focus()
                 else:
-                    self.apply_btn.setFocus(Qt.TabFocusReason)
+                    (self.apply_btn if self.apply_btn.isEnabled() else self.back_btn).setFocus(Qt.TabFocusReason)
             elif k in (Qt.Key_Left, Qt.Key_Right):
                 d = -1 if k == Qt.Key_Left else 1
                 if i < len(rows):
                     rows[i].step(d)
                 else:
-                    (self.apply_btn if d < 0 else self.back_btn).setFocus(Qt.TabFocusReason)
+                    tgt = self.apply_btn if d < 0 and self.apply_btn.isEnabled() else self.back_btn
+                    tgt.setFocus(Qt.TabFocusReason)
             elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_Select):
                 if self.back_btn.hasFocus():
                     self.close_settings()
@@ -1242,8 +1570,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if page not in (0, 1):
                 return []
             c = self.controls[page]
-            items = (self.options if page == 0 else [self.start_btn]) + [c["gear"], c["pause"], c["stop"]]
-            return [w for w in items if not w.isHidden()]
+            items = (self.options if page == 0 else []) + [c["gear"], c["pause"], c["stop"]]
+            return [w for w in items if not w.isHidden() and w.isEnabled()]
 
         def move_focus(self, step):
             items = self.focusables()
@@ -1253,7 +1581,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if cur is None:
                 if self.stack.currentIndex() == 0:
                     self.focus_default()
-                else:
+                if QApplication.focusWidget() not in items:
                     items[0 if step > 0 else -1].setFocus(Qt.TabFocusReason)
                 return
             items[(cur + step) % len(items)].setFocus(Qt.TabFocusReason)
@@ -1281,7 +1609,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     w.click()
             elif Qt.Key_1 <= k <= Qt.Key_8:
                 idx = k - Qt.Key_1
-                if idx < len(self.options) and self.online:
+                if idx < len(self.options) and self.online and self.options[idx].isEnabled():
                     self.options[idx].setFocus(Qt.ShortcutFocusReason)
                     self.choose(self.options[idx])
             elif k == Qt.Key_S:
