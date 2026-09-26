@@ -35,3 +35,7 @@ htmlcov/
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+
+# Technical notes kept locally, not published
+docs/DEVELOPMENT.md
+docs/PROTOCOL.md

@@ -13,7 +13,8 @@ This page covers how Momento works under the hood, how to hack on it, and how to
   ximagesrc       │  pulsesrc(@DEFAULT_MONITOR@) [+ mic] → AAC enc ────────┘  (mpegts)  │     seg_000123.ts  (10 s each)
   videotestsrc    │                                                                     │
                   │  ring-buffer janitor: keeps the newest max_seconds of footage       │
-                  │  GlobalShortcuts portal (Super+Shift+G) ──► spawns `momento overlay`    │
+                  │  GlobalShortcuts portal (Super+Shift+G) ──► toggles the resident bar    │
+                  │  child: `momento overlay --resident` (hidden bar, overlay.sock)   │
                   │  IPC server: $XDG_RUNTIME_DIR/momento.sock (JSON lines)           │
                   └─────────────────────────────────────────────────────────────────────┘
                            ▲                                   │ save 5m
@@ -74,11 +75,13 @@ Distro gotchas:
 
 ### Hotkey
 
-The daemon registers a `save-replay` shortcut (preferred trigger from `hotkey.trigger`, default `LOGO+SHIFT+g`) through `org.freedesktop.portal.GlobalShortcuts`. For host (non-Flatpak) apps, the portal identifies the app by its **desktop file id**, so `io.github.mehulchachada.Momento.desktop` must be installed under that exact name. Don't rename it. When the shortcut fires, the daemon launches `momento overlay`. Running `momento overlay` while an overlay is open closes it, so the key toggles.
+The daemon registers a `save-replay` shortcut (preferred trigger from `hotkey.trigger`, default `LOGO+SHIFT+g`) through `org.freedesktop.portal.GlobalShortcuts`. For host (non-Flatpak) apps, the portal identifies the app by its **desktop file id**, so `io.github.mehulchachada.Momento.desktop` must be installed under that exact name. Don't rename it. When the shortcut fires, the daemon sends `toggle` to the resident clip bar (see [Overlay](#overlay)); if none answers, or `[ui] keep_bar_loaded` is `false`, it launches `momento overlay` instead. Running `momento overlay` while a bar is open closes it, so the key toggles either way.
 
 ### Overlay
 
 A slim PySide6 bar that slides in at the bottom of the screen with the eight clip lengths in a row. On KDE Plasma and wlroots compositors it's a wlr-layer-shell surface on the Overlay layer, created through **LayerShellQt** (driven with ctypes, because there are no Python bindings), so it appears above fullscreen games. Anywhere that fails (GNOME, X11, ...) it falls back to a frameless, always-on-top window, which can't cover *exclusive* fullscreen games. In Steam Gaming Mode, gamescope only composites its own focus window, so the overlay doesn't show there (roadmap).
+
+**How it opens.** By default (`[ui] keep_bar_loaded = true`) the daemon starts `momento overlay --resident` once at startup, as a child process in the service's cgroup. That process builds the bar, configures the layer surface and keeps it hidden. It listens on `$XDG_RUNTIME_DIR/overlay.sock` (0600, the same JSON-lines framing as the daemon's socket) for `toggle`, `show`, `hide`, `quit` and `ping`, each answered with `{"ok": true, "visible": …}`. A show paints the last status it has (with the buffer grown by the time since, if it was recording) and fetches a fresh one in the background, so it never waits on IPC. Offscreen, the first paint lands about 4 ms after `show` is sent, compared with about 180 ms from process start to first paint for a one-shot bar. Every show starts from the state a new bar would have: the clip view, focus on the last length, the keyboard focus ring, a new idle timer, and no leftover "Saved", settings or stop question. Replies from the previous open are dropped (every worker result carries `Bar.gen`). Esc, the idle timeout and the pause after "Saved" hide the bar instead of quitting. Hiding the QWindow destroys the layer surface, and the keyboard interactivity is also set to None while hidden, so a hidden bar never holds the keyboard. If the bar exits, the daemon restarts it after 1, 2, 4 … 60 s (the delay resets once a bar has run for 30 s), but never while the daemon is stopping. A `reload`/`configure` starts or stops it to match `keep_bar_loaded`. The trade-off is memory: offscreen, the hidden bar is about 66 MB RSS (38 MB PSS), rising to about 74 MB after its first show and staying flat over hundreds of show/hide cycles. With `keep_bar_loaded = false`, or while no resident bar answers, each press starts a one-shot `momento overlay` process as before. That takes about 0.3-0.5 s on a real desktop, and it quits when closed. `momento overlay` from a terminal or the app menu toggles the resident bar when there is one.
 
 The gear, pause/play and stop buttons are painted with QPainter (no icon font). Settings open inside the same bar: it grows upward by resizing the window, and LayerShellQt passes the new size on to the bottom-anchored surface. While paused, a one-line hint also grows the bar upward. The overlay talks to the daemon with `settings`/`configure`/`pause`/`resume`/`quit`. When the daemon is off, it reads and writes the config file directly through `momento.settings`, and **Start** runs `systemctl --user start momento.service` (or spawns `momento daemon` when the unit isn't installed).
 
@@ -188,8 +191,8 @@ If the installed service is running, stop it first (`systemctl --user stop momen
 python3 -m unittest discover -s tests       # or: make test
 ```
 
-- `tests/test_core.py`: durations, ring-buffer selection, index recovery after a crash, footage-based retention, selection across session gaps, multi-session export (same parameters joined; a resolution change keeps the newest tail), output naming, the CLI, the IPC round trip (needs PyGObject) and the ffmpeg exporter against synthetic TS segments (needs ffmpeg/ffprobe). Tests whose dependencies are missing are skipped.
-- `tests/test_overlay_offscreen.py`: renders the overlay against a fake daemon. Run it with `QT_QPA_PLATFORM=offscreen python3 -m unittest tests.test_overlay_offscreen`. It saves screenshots to `$MOMENTO_SHOT_DIR`.
+- `tests/test_core.py`: durations, ring-buffer selection, index recovery after a crash, footage-based retention, selection across session gaps, multi-session export (same parameters joined; a resolution change keeps the newest tail), output naming, the CLI, the IPC round trip and the daemon's supervision of the resident bar (both need PyGObject) and the ffmpeg exporter against synthetic TS segments (needs ffmpeg/ffprobe). Tests whose dependencies are missing are skipped.
+- `tests/test_overlay_offscreen.py`: renders the overlay against a fake daemon, and drives a resident bar over its control socket (toggle/show/hide, state reset between opens, no focus while hidden, the fallback without a resident bar). Run it with `QT_QPA_PLATFORM=offscreen python3 -m unittest tests.test_overlay_offscreen`. It saves screenshots to `$MOMENTO_SHOT_DIR`.
 - `tests/test_pipeline_live.py`: records a few seconds from the `test` source and cuts a clip. It's skipped without GStreamer. Run it with `python3 tests/test_pipeline_live.py` or pytest.
 
 ## Installer
