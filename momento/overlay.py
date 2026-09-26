@@ -124,8 +124,37 @@ YELLOW = "#F5C542"
 PAD_FACTORY = None
 # Returns the largest connected screen's size in physical pixels, (w, h) or None:
 # what caps the Resolution choices until the daemon knows the recorded picture's
-# size. None here means "ask Qt"; tests swap in a fake.
+# size. None here means "ask the kernel" (drm_screen_size); tests swap in a fake.
 SCREEN_SIZE = None
+DRM_ROOT = "/sys/class/drm"
+
+
+def drm_screen_size(root=None):
+    """The largest enabled display's native mode, from the kernel's DRM connectors.
+
+    Qt can't be asked: with fractional scaling on Wayland it rounds the scale
+    (a 1080p screen at 120% reads as 1600x900 at scale 2, i.e. "1800p"). Each
+    connector's first listed mode is its preferred, native one. None if unknown.
+    """
+    best = None
+    try:
+        conns = sorted(os.scandir(root or DRM_ROOT), key=lambda e: e.name)
+    except OSError:
+        return None
+    for conn in conns:
+        try:
+            base = Path(conn.path)
+            if (base / "status").read_text().strip() != "connected":
+                continue
+            if (base / "enabled").read_text().strip() != "enabled":
+                continue
+            first = (base / "modes").read_text().split("\n", 1)[0].strip()
+            w, h = (int(v) for v in first.split("x", 1))
+        except (OSError, ValueError):
+            continue
+        if w > 0 and h > 0 and (best is None or (h, w) > (best[1], best[0])):
+            best = (w, h)
+    return best
 
 PAUSED_HINT = "Paused · saving uses the footage so far"
 # Stopped (by Stop, or the recorded window closed): what play does next.
@@ -754,16 +783,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         return data
 
     def largest_screen():
-        """The largest connected screen in physical pixels (QScreen size x device pixel ratio)."""
+        """The largest enabled screen in physical pixels (see drm_screen_size), or None."""
         if SCREEN_SIZE is not None:
             return quality.source_size(SCREEN_SIZE())
-        best = None
-        for screen in QGuiApplication.screens():
-            g, dpr = screen.geometry(), screen.devicePixelRatio() or 1.0
-            size = (round(g.width() * dpr), round(g.height() * dpr))
-            if best is None or (size[1], size[0]) > (best[1], best[0]):
-                best = size
-        return quality.source_size(best)
+        return quality.source_size(drm_screen_size())
 
     def ui_font(tabular=False):
         f = QFont()

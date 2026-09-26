@@ -2290,6 +2290,30 @@ class ControllerBar(unittest.TestCase):
         bar.clear_rows()
 
 
+class DrmScreenSize(unittest.TestCase):
+    """The Resolution cap's fallback reads native modes from DRM, never Qt's rounded scale."""
+
+    def make(self, root, name, status="connected", enabled="enabled", modes="1920x1080\n1280x720\n"):
+        d = Path(root) / name
+        d.mkdir()
+        (d / "status").write_text(status + "\n")
+        (d / "enabled").write_text(enabled + "\n")
+        (d / "modes").write_text(modes)
+
+    def test_largest_enabled_native_mode(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsNone(overlay.drm_screen_size(root))                      # nothing connected
+            self.make(root, "card1-eDP-1", enabled="disabled", modes="2560x1600\n")  # screen off
+            self.make(root, "card1-DP-2")                                        # 1080p, any scaling
+            self.make(root, "card1-HDMI-A-1", status="disconnected", modes="")
+            self.make(root, "card1-DP-3", modes="garbage\n")
+            self.assertEqual(overlay.drm_screen_size(root), (1920, 1080))
+            self.make(root, "card1-DP-4", modes="3440x1440\n1920x1080\n")
+            self.assertEqual(overlay.drm_screen_size(root), (3440, 1440))
+        self.assertIsNone(overlay.drm_screen_size("/nonexistent/drm"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
