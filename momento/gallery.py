@@ -10,9 +10,13 @@ Layout: a panel of its own right above the bar, as wide as the bar, with the
 bar row unchanged under it (one surface that grows upward like settings; the
 bar paints the two apart). Top to bottom: the filters (All · Clips ·
 Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9 stage, the transport row
-(−10, play/pause, +10, time, scrubber, length, mute, full screen; a screenshot
-shows its size and format instead) and a footer (what it is and when, the
-controller hints, Back).
+(−10, play/pause, +10, sound, time, scrubber, length, full screen; a
+screenshot shows its size and format instead) and a footer (what it is and
+when, the controller hints, Back).
+
+Clips play muted. The speaker button, M or X / Square (the west button) turns
+the sound on; that sticks while the gallery is open (the next clip too, full
+screen too) and every open starts muted again.
 
 Playback is a QMediaPlayer feeding a QVideoSink; the frames are painted by the
 stage itself (no QVideoWidget, which would be a separate native surface).
@@ -80,7 +84,8 @@ EMPTY_FILTER = {"all": "Nothing saved yet", "clip": "No clips yet", "shot": "No 
 KIND_NAMES = {"clip": "Clip", "shot": "Screenshot"}
 
 # The controller hints in the footer: [([buttons], word), ...]
-CLIP_HINT = [(["LB", "RB"], "browse"), (["A"], "play"), (["LT", "RT"], "10 s"), (["Y"], "full screen")]
+CLIP_HINT = [(["LB", "RB"], "browse"), (["A"], "play"), (["LT", "RT"], "10 s"), (["X"], "sound"),
+             (["Y"], "full screen")]
 SHOT_HINT = [(["LB", "RB"], "browse"), (["Y"], "full screen")]
 BACK_HINT = [(["B"], "Back")]
 
@@ -955,11 +960,12 @@ class Gallery(QObject):
         self.bar.gallery_host.installEventFilter(self)
 
     def _transport(self, c, lay, height):
-        """−10 · play · +10 · time · scrubber · length · mute (into ``lay``)."""
+        """−10 · play · +10 · sound · time · scrubber · length (into ``lay``)."""
         W = self.W
         for name, kind, fn in (("back10", "back10", lambda: self.seek(-SEEK_S, focus="back10")),
                                ("play", "play", lambda: self.toggle_play(focus="play")),
-                               ("fwd10", "fwd10", lambda: self.seek(SEEK_S, focus="fwd10"))):
+                               ("fwd10", "fwd10", lambda: self.seek(SEEK_S, focus="fwd10")),
+                               ("mute", "muted", lambda: self.toggle_mute(focus="mute"))):
             b = W.MediaIcon(kind, height)
             b.clicked.connect(fn)
             c.w[name] = b
@@ -976,9 +982,6 @@ class Gallery(QObject):
         c.w["total"] = _label("0:00", META_PX, ov.MUTED, True, tw)
         lay.addWidget(c.w["total"])
         lay.addSpacing(6)
-        c.w["mute"] = W.MediaIcon("muted", height)
-        c.w["mute"].clicked.connect(lambda: self.toggle_mute(focus="mute"))
-        lay.addWidget(c.w["mute"])
 
     def build_strip(self, parent, kind):
         """The full screen strip for a clip (the whole transport) or a screenshot (compact)."""
@@ -1544,7 +1547,8 @@ class Gallery(QObject):
         self.sync()
 
     def toggle_mute(self, focus="mute"):
-        """X / M: sound on or off (off on every open; kept across items)."""
+        """X / Square (west) / M / the speaker button: sound on or off (off on every open;
+        kept across items and in full screen)."""
         if self.is_shot() or self.current() is None:
             return
         self.muted = not self.muted

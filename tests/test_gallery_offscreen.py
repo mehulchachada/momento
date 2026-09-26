@@ -681,6 +681,31 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(len(FakePlayer.made), 2)                     # a new player per open
         self.assertIsNone(self.player.audio)
 
+    def test_mute_button_by_the_transport_and_in_full_screen(self):
+        bar = self.bar()
+        g = self.open(bar)
+        w = g.panel.w
+        order = sorted(("back10", "play", "fwd10", "mute", "now"), key=lambda k: w[k].x())
+        self.assertEqual(order, ["back10", "play", "fwd10", "mute", "now"])   # right after +10
+        self.assertEqual(w["mute"].x(), w["fwd10"].x() + w["fwd10"].width())
+        self.assertEqual(w["mute"].accessibleName(), "Turn sound on (M)")
+        QTest.mouseClick(w["mute"], Qt.LeftButton)                    # a click: sound on
+        self.assertFalse(g.muted)
+        self.assertEqual(w["mute"].accessibleName(), "Mute (M)")
+        self.key(Qt.Key_F)                                            # full screen keeps it
+        f = g.fullc.w
+        self.assertEqual(f["mute"].kind, "sound")
+        self.assertEqual(f["mute"].x(), f["fwd10"].x() + f["fwd10"].width())
+        self.key(Qt.Key_M)                                            # M in full screen
+        self.assertTrue(g.muted)
+        self.assertIsNone(g.audio)
+        bar.on_pad_action("pause")                                    # X / Square in full screen
+        self.assertFalse(g.muted)
+        self.assertEqual(f["mute"].kind, "sound")
+        self.key(Qt.Key_Escape)
+        self.assertEqual(w["mute"].kind, "sound")                     # the panel shows it too
+        self.assertIn((["X"], "sound"), self.gallery_mod.CLIP_HINT)
+
     def test_end_stays_on_last_frame_and_replays(self):
         bar = self.bar()
         g = self.open(bar)
