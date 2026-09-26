@@ -12,8 +12,11 @@ Two ways to run it:
   process per open. Running it while another one-shot bar is open closes the
   open one instead, so the same key toggles it.
 
-Besides the clip lengths the bar has three painted glyph buttons: settings
-(gear, key S), pause/resume (key P) and stop (asks inline first). Settings
+Besides the clip lengths the bar has four painted glyph buttons, in this
+order: pause/resume (key P), stop (asks inline first), screenshot (camera,
+only while recording) and settings (gear, key S). A screenshot hides the bar
+first and then asks the daemon for the next recorded frame, so the bar is not
+in the picture; the daemon's desktop notification confirms it. Settings
 open in the same bar, which grows upward into a few segmented rows; applying
 goes through the daemon's ``configure`` IPC, or straight to the config file
 when the daemon is off.
@@ -68,9 +71,13 @@ IDLE_CLOSE_MS = 10_000   # no interaction: hide after this long
 RESULT_CLOSE_MS = 1_200  # "Saved <file>" or a save error
 STOP_CLOSE_MS = 800      # the Off state after a confirmed Stop
 APPLY_CLOSE_MS = 1_200   # "Saved — recording restarted" after Apply in settings
+# Screenshot: the bar hides, then waits this long before asking for the frame, so
+# the compositor has redrawn the screen without it (a few frames at 30-60 fps).
+SHOT_DELAY_MS = 150
+SHOT_TIMEOUT_S = 30
 TICK_MS = 250            # the recording timer ticks locally between the 1 s status polls
 DEFAULT_SECONDS = 60
-ICON_W = PILL_H + 2 * PILL_INSET   # gear / pause / stop: circles
+ICON_W = PILL_H + 2 * PILL_INSET   # pause / stop / screenshot / gear: circles
 HINT_H = 30              # the "Paused" line above the bar
 HEADER_H = 34            # settings: title line
 ROW_H = 40               # settings: one row
@@ -426,6 +433,24 @@ def _gear_path(cx: float, cy: float, r_out=8.0, r_in=6.0, r_hole=2.6, teeth=8):
     return path
 
 
+def _camera_path(cx: float, cy: float):
+    """A filled camera (body, viewfinder hump, lens ring and lens) as one QPainterPath."""
+    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtGui import QPainterPath, QPolygonF
+
+    body = QPainterPath()
+    body.addRoundedRect(QRectF(cx - 8, cy - 4.5, 16, 11.5), 2.5, 2.5)
+    hump = QPainterPath()
+    hump.addPolygon(QPolygonF([QPointF(cx - 3.8, cy - 4), QPointF(cx - 2.3, cy - 7),
+                               QPointF(cx + 2.3, cy - 7), QPointF(cx + 3.8, cy - 4)]))
+    hump.closeSubpath()
+    ring = QPainterPath()
+    ring.addEllipse(QPointF(cx, cy + 1.2), 3.9, 3.9)
+    lens = QPainterPath()
+    lens.addEllipse(QPointF(cx, cy + 1.2), 2.1, 2.1)
+    return body.united(hump).subtracted(ring).united(lens)
+
+
 def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float = 1.6):
     """Stroke a ~16 px line icon centred on (x, y). No fills except tiny knobs."""
     from PySide6.QtCore import QPointF, QRectF, Qt
@@ -568,6 +593,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         configured = Signal(int, object)
         control = Signal(int, str, object)
         started = Signal(int, object)
+        shot = Signal(object)          # screenshot reply (the bar is already hidden)
 
     def fetch_status(timeout=2.0):
         try:
@@ -812,10 +838,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             p.end()
 
     class IconButton(Pill):
-        """gear / pause / play / stop in a circle, painted so it never depends on a font."""
+        """pause / play / stop / camera / gear in a circle, painted so it never depends on a font."""
 
         TIPS = {"gear": "Settings (S)", "pause": "Pause recording (P)", "play": "Resume recording (P)",
-                "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a game window"}
+                "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a game window",
+                "shot": "Take a screenshot"}
 
         def __init__(self, kind):
             super().__init__("")
@@ -853,6 +880,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                                          QPointF(x + 7, y)]))
             elif self.kind == "stop":
                 p.drawRoundedRect(QRectF(x - 5.5, y - 5.5, 11, 11), 1.5, 1.5)
+            elif self.kind == "shot":
+                p.drawPath(_camera_path(x, y))
 
     class SegButton(Pill):
         def __init__(self, text="", tip=None):
@@ -1109,6 +1138,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.bridge.configured.connect(self._sig_configured)
             self.bridge.control.connect(self._sig_control)
             self.bridge.started.connect(self._sig_started)
+            self.bridge.shot.connect(self.on_shot)
             QApplication.instance().focusChanged.connect(self.on_focus_changed)
             QApplication.instance().aboutToQuit.connect(self.pads_close)  # one-shot bar: let go first
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -1311,14 +1341,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             gen = self.gen
             QTimer.singleShot(ms, lambda: fn() if gen == self.gen else None)
 
+        # The control buttons, left to right (also the keyboard / controller order).
+        CONTROL_ORDER = ("pause", "stop", "shot", "gear")
+
         def _controls(self, lay):
-            gear, pause, stop = IconButton("gear"), IconButton("pause"), IconButton("stop")
-            gear.clicked.connect(self.open_settings)
-            pause.clicked.connect(self.toggle_pause)
-            stop.clicked.connect(self.ask_stop)
-            for b in (gear, pause, stop):
-                lay.addWidget(b)
-            return {"gear": gear, "pause": pause, "stop": stop}
+            btns = {k: IconButton(k) for k in self.CONTROL_ORDER}
+            btns["pause"].clicked.connect(self.toggle_pause)
+            btns["stop"].clicked.connect(self.ask_stop)
+            btns["shot"].clicked.connect(self.take_screenshot)
+            btns["gear"].clicked.connect(self.open_settings)
+            for k in self.CONTROL_ORDER:
+                lay.addWidget(btns[k])
+            return btns
 
         @property
         def gear(self):
@@ -1407,6 +1441,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     pb.set_kind("pause")
                     pb.setEnabled(True)
                 c["stop"].setEnabled(running and view != "off")
+                c["shot"].setEnabled(view == "rec")   # a frame of the recording: only while recording
                 for b in c.values():
                     b.show()
             for o in self.options:
@@ -1616,6 +1651,45 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 err = fm.elidedText(str(r.get("error") or "Save failed"), Qt.ElideRight, room)
                 self.show_line(f"<span style='color:{RED}'>{_esc(err)}</span>")
             self.after(RESULT_CLOSE_MS, self.close_bar)
+
+        # ---------------- screenshot
+        def take_screenshot(self):
+            """Hide the bar, then ask the daemon for a screenshot.
+
+            The request goes out SHOT_DELAY_MS after the hide, and the daemon takes
+            the first frame captured after the request, so the bar is not in the
+            picture on any desktop. The bar doesn't come back to report it: the
+            daemon's desktop notification does. A one-shot bar quits after the reply.
+            """
+            if (self.view != "rec" or self.saving or self.done or self.control_busy
+                    or self.mode != "clip"):
+                return
+            self.done = True
+            self.idle.stop()
+            self.poll.stop()
+            bridge = self.bridge
+            if self.resident:
+                self.dismiss()
+            else:
+                QApplication.instance().setQuitOnLastWindowClosed(False)  # quit after the reply
+                self.hide()
+
+            def work():
+                try:
+                    r = ipc.request({"cmd": "screenshot"}, timeout=SHOT_TIMEOUT_S)
+                except Exception as e:  # noqa: BLE001
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
+                bridge.shot.emit(r)
+
+            QTimer.singleShot(SHOT_DELAY_MS, lambda: threading.Thread(target=work, daemon=True).start())
+
+        def on_shot(self, r):
+            if r.get("ok"):
+                log.info("screenshot saved: %s", r.get("path"))
+            else:
+                log.warning("screenshot failed: %s", r.get("error"))
+            if not self.resident:
+                QApplication.instance().quit()
 
         # ---------------- pause / resume / stop / start
         def show_storage_warning(self, text=None):
@@ -2386,7 +2460,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if page not in (0, 1):
                 return []
             c = self.controls[page]
-            items = (self.options if page == 0 else []) + [c["gear"], c["pause"], c["stop"]]
+            items = (self.options if page == 0 else []) + [c[k] for k in self.CONTROL_ORDER]
             return [w for w in items if not w.isHidden() and w.isEnabled()]
 
         def move_focus(self, step):

@@ -2,7 +2,7 @@
 
     python3 -m unittest tests.test_overlay_offscreen
 
-Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3,v4,v5}-*.png
+Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,screenshot,v3,v4,v5}-*.png
 (override with $MOMENTO_SHOT_DIR). Each is the bar composited over a plain backdrop that
 stands in for the game.
 """
@@ -92,6 +92,8 @@ class FakeDaemon:
         self.save_msgs = []
         self.configures = []
         self.controls = []
+        self.shots = []                  # (monotonic time, what on_shot() saw) per screenshot request
+        self.on_shot = None              # called when a screenshot request arrives (e.g. is the bar visible?)
 
     def request(self, msg, timeout=120, **_):
         if not self.running:
@@ -135,6 +137,10 @@ class FakeDaemon:
             elif msg["cmd"] == "quit":
                 self.running = False
             return {"ok": True, "state": "paused" if self.paused else "starting"}
+        if msg["cmd"] == "screenshot":
+            self.shots.append((time.monotonic(), self.on_shot() if self.on_shot else None))
+            return {"ok": True, "path": "/home/user/Videos/Momento/Images/Momento_2026-09-26_21-04-11.png",
+                    "width": 1920, "height": 1080}
         if msg["cmd"] == "save":
             self.saves.append(msg["seconds"])
             self.save_msgs.append(dict(msg))
@@ -334,15 +340,15 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(FakeDaemon(True))
         bar.options[-1].setFocus()
         self.key(Qt.Key_Right)
-        self.assertTrue(bar.gear.hasFocus())
-        self.key(Qt.Key_Tab)
         self.assertTrue(bar.controls[0]["pause"].hasFocus())
         self.key(Qt.Key_Tab)
         self.assertTrue(bar.controls[0]["stop"].hasFocus())
+        self.key(Qt.Key_Tab)
+        self.assertTrue(bar.controls[0]["shot"].hasFocus())
+        self.key(Qt.Key_Tab)
+        self.assertTrue(bar.gear.hasFocus())
         self.key(Qt.Key_Tab)  # wraps to 15s
         self.assertTrue(bar.options[0].hasFocus())
-        self.key(Qt.Key_Left)
-        self.key(Qt.Key_Left)
         self.key(Qt.Key_Left)
         self.assertTrue(bar.gear.hasFocus())
         self.shot(bar, "clip-gear-focus", "settings")
@@ -812,10 +818,8 @@ class OverlayOffscreen(unittest.TestCase):
             r = b.pill_rect()
             self.assertEqual((r.width(), r.height()), (overlay.PILL_H, overlay.PILL_H))
         self.shot(bar, "keyboard-focus-pill", "v4")
-        self.key(Qt.Key_Tab)
-        self.key(Qt.Key_Tab)
-        self.key(Qt.Key_Tab)
-        self.key(Qt.Key_Tab)                                 # 60m -> gear
+        for _ in range(7):
+            self.key(Qt.Key_Tab)                             # 60m -> pause, stop, screenshot, gear
         self.assertEqual(bar.gear.visual_state, "focus")
         self.assertEqual(bar.options[4].visual_state, "rest")
 
@@ -1056,6 +1060,120 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.controls[0]["pause"].hasFocus())         # play is the next step
         QTest.mouseClick(bar.controls[0]["pause"], Qt.LeftButton)
         self.wait_for(lambda: daemon.controls == ["pick_window"])
+
+    # ---------------------------------------------------------------- screenshot
+
+    SHOT_BUTTONS = os.environ.get("MOMENTO_SHOT_BUTTONS_DIR")  # optional: the button-row pictures
+
+    def shot_buttons(self, bar, name):
+        self.shot(bar, name, "screenshot")
+        if self.SHOT_BUTTONS:
+            Path(self.SHOT_BUTTONS).mkdir(parents=True, exist_ok=True)
+            bar.settle()
+            img = bar.grab()
+            canvas = QPixmap(img.width() + 80, img.height() + 60)
+            canvas.fill(QColor("#4a5563"))
+            p = QPainter(canvas)
+            p.drawPixmap(QPoint(40, 20), img)
+            p.end()
+            canvas.save(str(Path(self.SHOT_BUTTONS) / f"bar-{name}.png"))
+
+    def test_control_order_and_screenshot_enabled_only_while_recording(self):
+        bar = self.make(FakeDaemon(True))
+        for c in bar.controls:
+            xs = [c[k].mapTo(bar, QPoint(0, 0)).x() for k in ("pause", "stop", "shot", "gear")]
+            self.assertEqual(xs, sorted(xs))                     # play/pause, stop, screenshot, settings
+        self.assertEqual(list(bar.controls[0]), ["pause", "stop", "shot", "gear"])
+        shot = bar.controls[0]["shot"]
+        self.assertEqual(shot.kind, "shot")
+        self.assertTrue(shot.isEnabled())
+        self.assertEqual(shot.accessibleName(), "Take a screenshot")
+        shot.setFocus()
+        pump(self.app, 0.05)
+        self.shot_buttons(bar, "recording-screenshot-focus")
+        bar.options[2].setFocus()
+        pump(self.app, 0.05)
+        self.shot_buttons(bar, "recording")
+        paused = self.make(FakeDaemon(True, paused=True))
+        self.assertFalse(paused.controls[0]["shot"].isEnabled())
+        self.assertEqual(paused.controls[0]["shot"].visual_state, "disabled")
+        self.shot_buttons(paused, "paused")
+        # A disabled screenshot button is skipped by the keyboard: stop -> gear.
+        paused.controls[0]["stop"].setFocus()
+        self.key(Qt.Key_Right)
+        self.assertTrue(paused.gear.hasFocus())
+        paused.controls[0]["shot"].click()                   # and ignored if clicked anyway
+        pump(self.app, 0.3)
+        self.assertTrue(paused.isVisible())
+        stopped = FakeDaemon(True)
+        stopped.stopped = True
+        off = self.make(stopped)
+        self.assertEqual(off.view, "off")
+        self.assertFalse(off.controls[0]["shot"].isEnabled())
+        self.shot_buttons(off, "stopped")
+        daemon_off = self.make(FakeDaemon(False))
+        self.assertFalse(daemon_off.controls[0]["shot"].isEnabled())
+        starting = self.make(FakeDaemon(True, extra={"state": "starting", "recording": False}))
+        self.assertFalse(starting.controls[0]["shot"].isEnabled())
+        nowin = self.make(FakeDaemon(True, extra=dict(self.NO_WINDOW)))
+        self.assertFalse(nowin.controls[0]["shot"].isEnabled())
+
+    def check_screenshot_hides_first(self, bar, daemon, activate):
+        events = []
+        daemon.on_shot = lambda: bar.isVisible()
+        orig_hide = bar.hideEvent
+
+        def hide_event(ev):
+            events.append(("hidden", time.monotonic()))
+            orig_hide(ev)
+        bar.hideEvent = hide_event
+        activate()
+        self.wait_for(lambda: daemon.shots, timeout=3)
+        (t_req, visible), = daemon.shots
+        self.assertFalse(visible)                              # the bar was gone when the request went out
+        self.assertEqual([e for e, _ in events], ["hidden"])
+        self.assertGreaterEqual(t_req - events[0][1], overlay.SHOT_DELAY_MS / 1000 - 0.01)
+        pump(self.app, 0.2)
+        self.assertFalse(bar.isVisible())                      # no feedback in the bar: the notification says it
+        self.assertEqual((daemon.saves, daemon.controls), ([], []))
+
+    def test_screenshot_hides_bar_then_asks(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.resident = True
+        shot = bar.controls[0]["shot"]
+        self.check_screenshot_hides_first(bar, daemon, lambda: QTest.mouseClick(shot, Qt.LeftButton))
+        # The next open starts afresh, the screenshot button ready again.
+        bar.present()
+        pump(self.app, 0.1)
+        self.assertTrue(bar.isVisible())
+        self.assertFalse(bar.done)
+        self.assertTrue(bar.controls[0]["shot"].isEnabled())
+
+    def test_screenshot_from_keyboard(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.resident = True
+
+        def keys():
+            bar.options[-1].setFocus()
+            for _ in range(3):
+                self.key(Qt.Key_Right)                         # 60m -> pause, stop, screenshot
+            self.assertTrue(bar.controls[0]["shot"].hasFocus())
+            self.key(Qt.Key_Return)
+        self.check_screenshot_hides_first(bar, daemon, keys)
+
+    def test_screenshot_one_shot_bar_quits_after_reply(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.assertFalse(bar.resident)
+        quits = []
+        orig = QApplication.quit
+        QApplication.quit = staticmethod(lambda: quits.append(True))
+        self.addCleanup(setattr, QApplication, "quit", orig)
+        self.addCleanup(self.app.setQuitOnLastWindowClosed, self.app.quitOnLastWindowClosed())
+        self.check_screenshot_hides_first(bar, daemon, bar.controls[0]["shot"].click)
+        self.wait_for(lambda: quits)
 
     def test_kwin_version_gate(self):
         parse = overlay._parse_kwin_version
@@ -1474,7 +1592,7 @@ class ControllerBar(unittest.TestCase):
         self.down()                                    # down = next, like the keyboard
         self.assertTrue(bar.options[i].hasFocus())
         self.press(self.RB)                            # bumpers jump between groups
-        self.assertTrue(bar.controls[0]["gear"].hasFocus())
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())   # the first button
         self.press(self.LB)
         self.assertTrue(bar.options[i].hasFocus())
         self.press(self.LB)
@@ -1486,6 +1604,22 @@ class ControllerBar(unittest.TestCase):
         self.press(self.A)                             # save
         self.wait_for(lambda: daemon.saves == [bar.options[i].seconds])
         self.wait_for(lambda: bar.done)
+
+    def test_screenshot_with_controller(self):
+        daemon = FakeDaemon(True)
+        bar = self.open(daemon)
+        bar.resident = True
+        daemon.on_shot = lambda: bar.isVisible()
+        self.press(self.RB)                            # the buttons: play/pause first
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())
+        self.right()
+        self.right()                                   # stop, screenshot
+        self.assertTrue(bar.controls[0]["shot"].hasFocus())
+        self.press(self.A)
+        self.wait_for(lambda: daemon.shots)
+        self.assertEqual(daemon.shots[0][1], False)    # hidden before the request
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(self.dev.grabbed)             # a hidden bar lets go of the controller
 
     def test_back_closes_and_x_pauses(self):
         daemon = FakeDaemon(True)
@@ -1560,8 +1694,7 @@ class ControllerBar(unittest.TestCase):
     def test_stop_confirmation(self):
         daemon = FakeDaemon(True)
         bar = self.open(daemon)
-        self.press(self.RB)                            # gear
-        self.right()
+        self.press(self.RB)                            # pause (the first button)
         self.right()                                   # stop
         self.assertTrue(bar.controls[0]["stop"].hasFocus())
         self.press(self.A)
