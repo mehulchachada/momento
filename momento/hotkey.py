@@ -193,9 +193,12 @@ class GlobalShortcut:
         if code == 0:
             for sid, props in results.get("shortcuts", []):
                 bound[str(sid)] = dict(props)
+        # Bind every time, even if the desktop remembers the shortcut from an
+        # earlier run: KDE only activates shortcuts bound in the *current*
+        # session, so skipping this leaves the key dead after a restart.
+        # Re-binding a known shortcut keeps the user's chosen key and shows no dialog.
         if self.shortcut_id in bound:
-            self._set_active(bound[self.shortcut_id])
-            return
+            log.debug("shortcut already known: %s", bound[self.shortcut_id])
         shortcut = dbus.Struct(
             (dbus.String(self.shortcut_id), dbus.Dictionary({
                 "description": dbus.String(self.description),
@@ -226,10 +229,12 @@ class GlobalShortcut:
         log.info("Global hotkey ready: %s (%s)", trig or "unassigned", self.description)
 
     def _on_activated_signal(self, session_handle, shortcut_id, timestamp=0, options=None):
+        log.debug("Activated %s on %s (ours: %s)", shortcut_id, session_handle, self.session_handle)
         if self._closed or str(session_handle) != self.session_handle:
             return
         if str(shortcut_id) != self.shortcut_id:
             return
+        log.info("hotkey pressed")
         try:
             self.on_activated()
         except Exception:  # noqa: BLE001

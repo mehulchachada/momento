@@ -42,7 +42,8 @@ def spawn_overlay() -> None:
     try:
         subprocess.Popen(
             [sys.executable, "-m", "momento", "overlay"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            # stderr stays attached so overlay crashes land in the daemon's journal.
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             start_new_session=True, close_fds=True,
         )
     except OSError as e:
