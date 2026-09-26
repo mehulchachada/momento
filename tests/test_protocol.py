@@ -327,29 +327,59 @@ class DaemonContractTest(_DaemonCase):
         r = self.check({"cmd": "settings"}, ok=True)
         self.assertEqual(r["resolution_allowed"], r["choices"]["resolution"])
         self.assertEqual((r["source_size"], r["resolution_effective"]), (None, "1080p"))
-        # The recorder learns a 1920x1080 screen; 4K is saved but records at 1080p.
-        _FakeRecorder.source_size = (1920, 1080)
+        # The recorder learns a 1280x720 screen; 1080p is saved but records at 720p.
+        _FakeRecorder.source_size = (1280, 720)
         self.addCleanup(setattr, _FakeRecorder, "source_size", None)
-        r = self.check({"cmd": "configure", "changes": {"resolution": "4k"}}, ok=True)
-        self.assertEqual(r["changed"], {"resolution": "2160p"})
+        r = self.check({"cmd": "configure", "changes": {"resolution": "720p"}}, ok=True)
+        r = self.check({"cmd": "configure", "changes": {"resolution": "fhd"}}, ok=True)
+        self.assertEqual(r["changed"], {"resolution": "1080p"})
         r = self.check({"cmd": "status"}, ok=True)
         self.assertEqual((r["resolution"], r["resolution_effective"], r["source_size"]),
-                         ("2160p", "native", [1920, 1080]))
-        self.assertEqual(r["bitrate_kbps"], 15000)
-        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p"))
+                         ("1080p", "native", [1280, 720]))
+        self.assertEqual(r["bitrate_kbps"], 10000)
+        self.assertEqual(r["storage"]["required"], self.need(resolution="720p"))
         r = self.check({"cmd": "settings"}, ok=True)
-        self.assertEqual(r["resolution_allowed"], ["720p", "1080p", "native"])
-        self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("2160p", "native"))
+        self.assertEqual(r["resolution_allowed"], ["720p", "native"])
+        self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("1080p", "native"))
         req = r["storage"]["required"]
-        self.assertEqual(req["2160p/high/60"], req["1080p/high/60"])
+        self.assertEqual(req["1080p/high/60"], req["720p/high/60"])
         self.assertTrue(validate_reply("status", {**self.call({"cmd": "status"}), "source_size": [1920]}))
         self.assertTrue(validate_reply("status", {**self.call({"cmd": "status"}), "source_size": [0, 1080]}))
 
+    def test_resolution_choices_up_to_1080p(self):
+        """v1.0.0 offers 720p, 1080p and native; 1440p/4K are refused (additive: version 1)."""
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual(r["choices"]["resolution"], list(protocol.RESOLUTION_CHOICES))
+        before = self.path.read_text()
+        for value in ("1440p", "2160p", "4k", "2k"):
+            r = self.check({"cmd": "configure", "changes": {"resolution": value}}, ok=False)
+            self.assertEqual(r["error"], "1440p and 4K aren't available yet; Momento records up to 1080p for now.")
+            self.assertNotIn("code", r)
+        self.assertEqual(self.path.read_text(), before)
+        # an older config with 4K: reported (and recorded) as 1080p, the file untouched
+        self.path.write_text(self.path.read_text().replace('resolution = "1080p"', 'resolution = "2160p"'))
+        self.check({"cmd": "reload"}, ok=True)
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("1080p", "1080p", 15000))
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual(r["values"]["resolution"], "1080p")
+        self.assertIn(r["storage"]["current"], r["storage"]["required"])
+        self.assertIn('resolution = "2160p"', self.path.read_text())
+        # native on a 4K screen records 1080 lines, at 1080p's bitrate
+        _FakeRecorder.source_size = (3840, 2160)
+        self.addCleanup(setattr, _FakeRecorder, "source_size", None)
+        self.check({"cmd": "configure", "changes": {"resolution": "native"}}, ok=True)
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["resolution_effective"], r["bitrate_kbps"]), ("native", 15000))
+        self.assertEqual(r["storage"]["required"], self.need(resolution="1080p"))
+        # older daemons' values in status stay valid
+        self.assertEqual(validate_reply("status", {**r, "resolution": "2160p", "resolution_effective": "native"}), [])
+
     def test_configure_storage_rules(self):
         shutil.rmtree(self.d.buffer_dir)
-        self.free = self.need(resolution="1440p", quality="ultra") - 1
+        self.free = self.need(quality="ultra", fps=120) - 1
         before = self.path.read_text()
-        big = {"cmd": "configure", "changes": {"resolution": "1440p", "quality": "ultra"}}
+        big = {"cmd": "configure", "changes": {"quality": "ultra", "fps": 120}}
         r = self.check(big, ok=False, code="no_storage")
         self.assertFalse(r["storage"]["ok"])
         self.assertEqual(self.path.read_text(), before)  # nothing written
@@ -380,7 +410,7 @@ class DaemonContractTest(_DaemonCase):
         self.assertEqual(r["storage"]["needed"], self.need() + storage.buffer_bytes(self.d.cfg))
         # the configure refusal carries the same fields
         with mock.patch.object(storage, "same_disk", return_value=True):
-            r = self.check({"cmd": "configure", "changes": {"resolution": "1440p"}}, ok=False, code="no_storage")
+            r = self.check({"cmd": "configure", "changes": {"quality": "ultra"}}, ok=False, code="no_storage")
         self.assertTrue(r["storage"]["low"])
 
     def test_window_mode(self):
@@ -676,8 +706,10 @@ class ValidatorTest(unittest.TestCase):
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)
             self.assertIn("ok", spec["reply"], name)
-        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 30)
+        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 18)
         self.assertEqual(protocol.RESOLUTION_TOLERANCE, quality.SOURCE_TOLERANCE)
+        self.assertEqual(protocol.RESOLUTION_CHOICES, tuple(quality.RESOLUTIONS))
+        self.assertEqual(protocol.MAX_HEIGHT, quality.MAX_HEIGHT)
 
 
 class IndexRecordTest(unittest.TestCase):

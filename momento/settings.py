@@ -67,9 +67,13 @@ _RECORD_ALIASES = {"screen": "screen", "full": "screen", "fullscreen": "screen",
 CONTROLLER_OPEN_LABELS = {"hold": "Hold", "tap": "Tap"}
 _OPEN_ALIASES = {"hold": "hold", "long": "hold", "tap": "tap", "press": "tap", "instant": "tap"}
 
-_RES_ALIASES = {"4k": "2160p", "uhd": "2160p", "2k": "1440p", "qhd": "1440p", "fhd": "1080p", "hd": "720p"}
 _ON = {"on", "true", "yes", "1"}
 _OFF = {"off", "false", "no", "0"}
+
+
+class Unavailable(ValueError):
+    """A known value that is not offered yet (1440p, 4K). Its message is a whole
+    sentence, so ``validate`` passes it on without the "key: " prefix."""
 
 
 def _device(text) -> str:
@@ -121,7 +125,9 @@ def normalize(key: str, value):
         return v
     if key == "resolution":
         v = str(value).strip().lower()
-        v = _RES_ALIASES.get(v, v)
+        v = quality.ALIASES.get(v, v)
+        if v in quality.LATER:
+            raise Unavailable(quality.later_message())
         if v not in quality.RESOLUTIONS:
             raise ValueError(f"choose one of: {', '.join(quality.RESOLUTIONS)}")
         return v
@@ -232,6 +238,8 @@ def validate(changes: dict) -> dict:
     for key, value in changes.items():
         try:
             out[key] = normalize(key, value)
+        except Unavailable:
+            raise
         except ValueError as e:
             raise ValueError(f"{key}: {e}") from None
     return out
@@ -288,7 +296,8 @@ def current(cfg: dict) -> dict:
     ctl = config.controller(cfg)
     return {
         "record": config.capture_target(cap),
-        "resolution": str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower(),
+        # an older config's 1440p/2160p reads as what it records at (1080p)
+        "resolution": quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
         "fps": int(cap.get("fps") or quality.FPS),
         "bitrate": int(cap.get("bitrate_kbps") or 0),

@@ -181,16 +181,27 @@ open bar reads the controllers itself and releases them when it hides.
     the reply is ok with ``restarted: false``, ``state: "no_storage"`` and a
     ``warning``.
 
+Resolution choices: ``RESOLUTION_CHOICES`` (720p, 1080p, native), nothing
+taller than ``MAX_HEIGHT`` (1080) lines for now. 1440p and 2160p (4K) are not
+offered: ``configure`` refuses them (and ``4k``/``2k``/``uhd``/``qhd``) with
+the error ``1440p and 4K aren't available yet; Momento records up to 1080p for
+now.``, and a config file that still has one records at 1080p (``values`` and
+``status`` then say ``"1080p"``; the file is not rewritten). ``native``
+records the picture's own size, scaled down (aspect kept, even numbers) to at
+most ``MAX_HEIGHT`` lines: a 3840x2160 screen records 1920x1080, a 3440x1440
+one 2580x1080. Clients should show ``choices.resolution`` as sent rather than
+a list of their own.
+
 Resolution cap: a preset is allowed when its height is at most the source's
 height * (1 + ``RESOLUTION_TOLERANCE``); ``native`` always is. So a 1920x1080
-screen offers 720p, 1080p and native; 2560x1440 and 3440x1440 add 1440p;
-3840x2160 offers all; 1920x1200 stops at 1080p. A saved preset above the cap
-is kept in config.toml (``configure`` accepts it) but records at the source's
-own size, rounded down to even numbers, as ``native`` would, with the bitrate
-of the smallest preset at least as tall as the source (an explicit
-``bitrate`` still wins). A client that has no ``source_size`` yet MAY apply
-the rule to the largest screen it can see (in physical pixels), which is what
-the clip bar does to grey out choices.
+(or taller) screen offers 720p, 1080p and native; a 1280x720 window 720p and
+native. A saved preset above the cap is kept in config.toml (``configure``
+accepts it) but records at the source's own size, rounded down to even
+numbers, as ``native`` would. The bitrate (and the storage math) is the one of
+the smallest preset at least as tall as what is really recorded, for
+``native`` too (an explicit ``bitrate`` still wins). A client that has no
+``source_size`` yet MAY apply the rule to the largest screen it can see (in
+physical pixels), which is what the clip bar does to grey out choices.
 
 Storage math: full buffer = (video kbps + audio kbps, audio counted only when
 desktop sound or the mic is on) * 1000 / 8 * max_seconds * 1.05; required =
@@ -240,6 +251,11 @@ PROTOCOL_VERSION = 1
 # Resolution cap (see the docstring): a preset is offered when its height is at
 # most the recorded picture's height * (1 + this). Same as quality.SOURCE_TOLERANCE.
 RESOLUTION_TOLERANCE = 0.02
+# The resolutions offered (settings choices.resolution, in order) and the tallest
+# recording, in lines (native is scaled down to it). Same as quality.RESOLUTIONS /
+# quality.MAX_HEIGHT. Additive: 1440p/2160p come back by raising MAX_HEIGHT.
+RESOLUTION_CHOICES = ("720p", "1080p", "native")
+MAX_HEIGHT = 1080
 MAX_REQUEST_BYTES = 1 << 20  # daemon socket; the clip-bar socket allows 64 KiB
 CLIP_BAR_MAX_REQUEST_BYTES = 1 << 16
 
@@ -311,7 +327,7 @@ STORAGE_REQUIREMENTS = {
 
 SETTING_VALUES = {
     "record": (("string",), True),         # "screen" | "window"
-    "resolution": (("string",), True),
+    "resolution": (("string",), True),     # one of choices.resolution ("720p" | "1080p" | "native")
     "quality": (("string",), True),
     "fps": (("integer",), True),
     "bitrate": (("integer",), True),       # video kbps, 0 = automatic

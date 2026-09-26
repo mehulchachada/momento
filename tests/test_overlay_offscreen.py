@@ -430,9 +430,9 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Down)
         self.assertTrue(bar.row("resolution").buttons[1].hasFocus())  # 1080p
         self.assertEqual([b.text() for b in bar.row("resolution").buttons],
-                         ["720p", "1080p", "1440p", "4K", "Native"])
-        self.key(Qt.Key_Right)                   # 1440p
-        self.assertIn("11 GB", bar.foot.text().replace("10.8", "11"))
+                         ["720p", "1080p", "Native"])          # up to 1080p for now
+        self.key(Qt.Key_Left)                    # 720p
+        self.assertIn("4.5 GB for 60 min", bar.foot.text())
         self.key(Qt.Key_Down)                    # frame rate row (stays 60 fps)
         self.assertTrue(bar.row("fps").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
@@ -478,7 +478,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertIn("Applying", bar.foot.text())
         self.shot(bar, "applying", "settings")
         self.wait_for(lambda: bar.apply_state == "done")
-        self.assertEqual(daemon.configures, [{"resolution": "1440p", "quality": "ultra",
+        self.assertEqual(daemon.configures, [{"resolution": "720p", "quality": "ultra",
                                               "audio_source": "ROG Ally.monitor", "mic": "on"}])
         self.assertIn("recording restarted", bar.foot.text())
         self.shot(bar, "saved", "settings")
@@ -802,7 +802,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertIn("Not enough free space", bar.hintbar.text())
 
     def test_resume_reply_no_storage(self):
-        err = "1440p Ultra needs 18.9 GB free, 9.4 GB available"
+        err = "1080p Ultra needs 18.9 GB free, 9.4 GB available"
         # status without a storage block (an older daemon): the refusal's own warning must stay
         daemon = FakeDaemon(True, paused=True, storage=None,
                             resume_reply={"ok": False, "code": "no_storage", "error": err})
@@ -815,18 +815,18 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertFalse(bar.hintbar.isHidden())
 
     def test_settings_storage_blocks_apply(self):
-        daemon = FakeDaemon(True, free=9.4e9)
+        daemon = FakeDaemon(True, free=6e9, values={"resolution": "720p"})
         bar = self.make(daemon)
         self.open_settings(bar)
         res = bar.row("resolution")
         self.assertTrue(bar.apply_btn.isEnabled())
         self.assertIn("60 fps", bar.foot.text())
-        self.assertEqual([b.property("nofit") for b in res.buttons], [False, False, True, True, True])
+        self.assertEqual([b.property("nofit") for b in res.buttons], [False, True, True])
         self.key(Qt.Key_PageDown)                 # Video: Resolution
-        self.key(Qt.Key_Right)                    # 1440p: 10.8 GB > 9.4 GB
-        self.assertEqual(res.value, "1440p")
+        self.key(Qt.Key_Right)                    # 1080p: 6.8 GB > 6.0 GB
+        self.assertEqual(res.value, "1080p")
         self.assertFalse(bar.apply_btn.isEnabled())
-        self.assertIn("Needs 10.8 GB · 9.4 GB free", bar.foot.text())
+        self.assertIn("Needs 6.8 GB · 6.0 GB free", bar.foot.text())
         self.assertIn(overlay.RED, bar.foot.text())
         q = bar.row("quality")
         self.assertTrue(any(b.property("nofit") for b in q.buttons))
@@ -838,42 +838,43 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.back_btn.hasFocus())  # Apply is skipped
         self.key(Qt.Key_Left)
         self.assertTrue(bar.back_btn.hasFocus())
-        res.buttons[2].setFocus()
+        res.buttons[1].setFocus()
         pump(self.app, 0.05)
         self.shot(bar, "lowstorage-settings", "v3")
-        self.key(Qt.Key_Left)                     # back to 1080p: fits again
+        self.key(Qt.Key_Left)                     # back to 720p: fits again
         self.assertTrue(bar.apply_btn.isEnabled())
         self.assertNotIn("Needs", bar.foot.text())
 
     def test_settings_storage_lowering_always_allowed(self):
-        # today's 1440p Ultra does not fit; a lower choice that still does not fit may be applied
-        warn = "Not enough free space: needs 10.8 GB, 9.4 GB free"
-        daemon = FakeDaemon(True, free=9.4e9, values={"resolution": "1440p", "quality": "ultra"},
+        # today's 1080p Ultra does not fit; a lower choice that still does not fit may be applied
+        warn = "Not enough free space: needs 7.2 GB, 6.0 GB free"
+        daemon = FakeDaemon(True, free=6e9, values={"resolution": "1080p", "quality": "ultra"},
                             configure_reply={"ok": True, "online": True, "state": "no_storage", "warning": warn})
         bar = self.make(daemon)
         self.open_settings(bar)
         self.assertIn("Needs", bar.foot.text())
         self.assertTrue(bar.apply_btn.isEnabled())         # no change is not a raise
         self.key(Qt.Key_PageDown)                           # Video: Resolution
-        self.key(Qt.Key_Right)                              # 4K: raises the requirement
+        self.key(Qt.Key_Down)                               # frame rate
+        self.key(Qt.Key_Right)                              # 120 fps: raises the requirement
+        self.assertEqual(bar.row("fps").value, 120)
         self.assertFalse(bar.apply_btn.isEnabled())
         self.key(Qt.Key_Left)
         self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Left)                               # quality: high, still > 9.4 GB
+        self.key(Qt.Key_Left)                               # quality: high, still > 6.0 GB
         self.assertEqual(bar.row("quality").value, "high")
         self.assertFalse(bar.fits(bar.pending()))
         self.assertTrue(bar.apply_btn.isEnabled())
         daemon.extra = {"state": "no_storage", "recording": False, "error": warn,
-                        "storage": {**LOW, "free": 9.4e9, "required": 10.8e9}}
+                        "storage": {**LOW, "free": 6e9, "required": 7.2e9}}
         self.key(Qt.Key_Return)
         self.wait_for(lambda: bar.apply_state == "done")
         self.assertEqual(daemon.configures, [{"quality": "high"}])
-        self.assertIn("needs 10.8 GB", bar.foot.text())
+        self.assertIn("needs 7.2 GB", bar.foot.text())
         self.assertNotIn("recording restarted", bar.foot.text())
         self.wait_for(lambda: bar.mode == "clip", timeout=overlay.APPLY_CLOSE_MS / 1000 + 2)
         self.assertEqual(bar.view, "lowstorage")
-        self.assertIn("needs 10.8 GB", bar.hintbar.text())
+        self.assertIn("needs 7.2 GB", bar.hintbar.text())
 
     # ---------------------------------------------------------------- resolution cap
 
@@ -889,98 +890,108 @@ class OverlayOffscreen(unittest.TestCase):
         return bar, bar.row("resolution")
 
     def test_resolution_capped_by_the_screen(self):
-        self.screen((1920, 1080))                      # nothing recorded yet: the bar's own screen
-        daemon = FakeDaemon(True)
+        self.screen((1280, 720))                       # nothing recorded yet: the bar's own screen
+        daemon = FakeDaemon(True, values={"resolution": "720p"})
         bar, res = self.open_video(daemon)
-        self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "1440p", "4K", "Native"])
-        self.assertEqual([b.isEnabled() for b in res.buttons], [True, True, False, False, True])
-        self.assertEqual([b.visual_state for b in res.buttons][2:4], ["disabled", "disabled"])
-        self.assertEqual(res.disabled, {"1440p", "2160p"})
+        self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "Native"])
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, True])
+        self.assertEqual(res.buttons[1].visual_state, "disabled")
+        self.assertEqual(res.disabled, {"1080p"})
         self.assertFalse(res.note.isHidden())
-        self.assertEqual(res.note.text(), "Your screen is 1080p")
-        self.assertTrue(res.buttons[1].hasFocus())     # 1080p, the saved value
-        self.assertIn("6.8 GB for 60 min", bar.foot.text())
+        self.assertEqual(res.note.text(), "Your screen is 720p")
+        self.assertTrue(res.buttons[0].hasFocus())     # 720p, the saved value
+        self.assertIn("4.5 GB for 60 min", bar.foot.text())
         pump(self.app, 0.05)
-        self.shot(bar, "resolution-1080p-screen", "rescap")
-        self.key(Qt.Key_Right)                          # 1440p and 4K are skipped
+        self.shot(bar, "resolution-720p-screen", "rescap")
+        self.key(Qt.Key_Right)                          # 1080p is skipped
         self.assertEqual(res.value, "native")
-        self.assertTrue(res.buttons[4].hasFocus())
+        self.assertTrue(res.buttons[2].hasFocus())
         self.key(Qt.Key_Right)                          # the end: stays
         self.assertEqual(res.value, "native")
         self.key(Qt.Key_Left)
-        self.assertEqual(res.value, "1080p")
-        self.key(Qt.Key_Left)
+        self.assertEqual(res.value, "720p")
         self.key(Qt.Key_Left)                           # the start: stays
         self.assertEqual(res.value, "720p")
-        QTest.mouseClick(res.buttons[3], Qt.LeftButton)  # a click on 4K does nothing
-        self.assertEqual(res.value, "720p")
-        self.assertEqual(res.note.text(), "Your screen is 1080p")
-        self.assertEqual(bar.changes(), {"resolution": "720p"})
+        self.key(Qt.Key_Right)
+        QTest.mouseClick(res.buttons[1], Qt.LeftButton)  # a click on 1080p does nothing
+        self.assertEqual(res.value, "native")
+        self.assertEqual(res.note.text(), "Your screen is 720p")
+        self.assertEqual(bar.changes(), {"resolution": "native"})
         self.assertFalse(any(b.property("nofit") for b in res.buttons))
+
+    def test_resolution_on_a_1080p_screen(self):
+        self.screen((1920, 1080))
+        bar, res = self.open_video(FakeDaemon(True))
+        self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "Native"])
+        self.assertTrue(all(b.isEnabled() for b in res.buttons))
+        self.assertTrue(res.note.isHidden())            # nothing capped: no note
+        pump(self.app, 0.05)
+        self.shot(bar, "resolution-1080p-screen", "rescap")
 
     def test_resolution_on_a_4k_screen(self):
         self.screen((3840, 2160))
         bar, res = self.open_video(FakeDaemon(True))
+        self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "Native"])   # no 1440p / 4K
         self.assertTrue(all(b.isEnabled() for b in res.buttons))
         self.assertTrue(res.note.isHidden())            # nothing capped: no note
         pump(self.app, 0.05)
         self.shot(bar, "resolution-4k-screen", "rescap")
         self.key(Qt.Key_Right)
-        self.key(Qt.Key_Right)
-        self.assertEqual(res.value, "2160p")
-        self.assertIn("20.2 GB for 60 min", bar.foot.text())
+        self.assertEqual(res.value, "native")
+        self.assertIn("6.8 GB for 60 min", bar.foot.text())   # native records 1080 lines here
 
     def test_daemon_source_wins_over_the_screen(self):
-        self.screen((1920, 1080))
+        self.screen((1280, 720))
         _bar, res = self.open_video(FakeDaemon(True, source=[3840, 2160]))
         self.assertTrue(all(b.isEnabled() for b in res.buttons))
         self.screen((3840, 2160))
-        _bar, res = self.open_video(FakeDaemon(True, source=[2560, 1440], values={"record": "screen"}))
-        self.assertEqual([b.isEnabled() for b in res.buttons], [True, True, True, False, True])
-        self.assertEqual(res.note.text(), "Your screen is 1440p")
+        _bar, res = self.open_video(FakeDaemon(True, source=[1280, 720],
+                                               values={"record": "screen", "resolution": "720p"}))
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, True])
+        self.assertEqual(res.note.text(), "Your screen is 720p")
 
     def test_resolution_saved_above_the_screen(self):
-        # an older config (or another monitor): 4K saved, a 1080p screen recorded
-        daemon = FakeDaemon(True, values={"resolution": "2160p", "record": "screen"}, source=[1920, 1080])
+        # another monitor: 1080p saved, a 720p screen recorded
+        daemon = FakeDaemon(True, values={"record": "screen"}, source=[1280, 720])
         bar, res = self.open_video(daemon)
-        four_k = res.buttons[3]
-        self.assertEqual(res.value, "2160p")
-        self.assertFalse(four_k.isEnabled())
-        self.assertEqual(four_k.visual_state, "capped")  # still shown as chosen, dimmed
-        self.assertEqual(res.note.text(), "Recording at 1080p (your screen)")
-        self.assertTrue(res.buttons[4].hasFocus())      # the nearest choice that applies: Native
-        self.assertIn("6.8 GB for 60 min", bar.foot.text())   # what is really recorded, not 4K's 20 GB
+        full_hd = res.buttons[1]
+        self.assertEqual(res.value, "1080p")
+        self.assertFalse(full_hd.isEnabled())
+        self.assertEqual(full_hd.visual_state, "capped")  # still shown as chosen, dimmed
+        self.assertEqual(res.note.text(), "Recording at 720p (your screen)")
+        self.assertTrue(res.buttons[0].hasFocus())      # the nearest choice that applies: 720p
+        self.assertIn("4.5 GB for 60 min", bar.foot.text())   # what is really recorded, not 1080p's 6.8 GB
         self.assertEqual(bar.changes(), {})
         pump(self.app, 0.05)
-        self.shot(bar, "resolution-4k-saved-1080p-screen", "rescap")
-        self.key(Qt.Key_Left)                           # from Native, past 4K and 1440p
-        self.assertEqual(res.value, "1080p")
-        self.assertEqual(four_k.visual_state, "disabled")
-        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.shot(bar, "resolution-1080p-saved-720p-screen", "rescap")
+        self.key(Qt.Key_Left)                           # the step toward it chooses it
+        self.assertEqual(res.value, "720p")
+        self.assertEqual(full_hd.visual_state, "disabled")
+        self.assertEqual(res.note.text(), "Your screen is 720p")
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Up)                              # back on the row: the chosen value
-        self.assertTrue(res.buttons[1].hasFocus())
+        self.assertTrue(res.buttons[0].hasFocus())
         self.key(Qt.Key_Return)
         self.wait_for(lambda: bar.apply_state == "done")
-        self.assertEqual(daemon.configures, [{"resolution": "1080p"}])
+        self.assertEqual(daemon.configures, [{"resolution": "720p"}])
 
     def test_resolution_saved_above_the_screen_left_alone(self):
-        daemon = FakeDaemon(True, values={"resolution": "1440p", "record": "screen"}, source=[1920, 1080])
+        daemon = FakeDaemon(True, values={"resolution": "1080p", "record": "screen"}, source=[1280, 720])
         bar, res = self.open_video(daemon)
-        self.assertTrue(res.buttons[1].hasFocus())      # the nearest choice: 1080p (not chosen)
-        self.assertEqual(res.value, "1440p")
-        self.key(Qt.Key_Down)                           # other rows: the saved 1440p stays
+        self.assertTrue(res.buttons[0].hasFocus())      # the nearest choice: 720p (not chosen)
+        self.assertEqual(res.value, "1080p")
+        self.key(Qt.Key_Down)                           # other rows: the saved 1080p stays
         self.key(Qt.Key_Right)                          # 120 fps
         self.assertEqual(bar.changes(), {"fps": 120})
         self.key(Qt.Key_Up)
-        self.key(Qt.Key_Right)                          # from the saved 1440p, past 4K: Native
+        self.key(Qt.Key_Right)                          # from the saved 1080p: Native
         self.assertEqual(res.value, "native")
-        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.assertEqual(res.note.text(), "Your screen is 720p")
 
     def test_resolution_capped_by_the_window(self):
         daemon = FakeDaemon(True, values={"record": "window"}, source=[1280, 720], extra={"target": "window"})
         bar, res = self.open_video(daemon)
-        self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, False, False, True])
+        self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, True])
         self.assertEqual(res.note.text(), "Recording at 1280\u00d7720 (window size)")   # 1080p saved
         self.assertTrue(res.buttons[0].hasFocus())      # the nearest choice: 720p
         self.key(Qt.Key_Left)                           # the step toward it chooses it
@@ -990,9 +1001,9 @@ class OverlayOffscreen(unittest.TestCase):
         self.shot(bar, "resolution-720p-window", "rescap")
 
     def test_resolution_note_fits_the_row(self):
-        daemon = FakeDaemon(True, values={"resolution": "2160p", "record": "window"}, source=[3440, 1439])
+        daemon = FakeDaemon(True, values={"resolution": "1080p", "record": "window"}, source=[3440, 1050])
         bar, res = self.open_video(daemon)
-        self.assertEqual(res.note.text(), "Recording at 3440\u00d71439 (window size)")
+        self.assertEqual(res.note.text(), "Recording at 3440\u00d71050 (window size)")
         pump(self.app, 0.05)
         right = res.note.mapTo(bar, res.note.rect().topRight()).x()
         self.assertLessEqual(right, bar.width())
@@ -1062,7 +1073,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(qual.buttons[qual.idx].visual_state, "selected")
         self.assertEqual(fps.buttons[fps.idx].visual_state, "selected")
         self.assertEqual(res.buttons[0].visual_state, "rest")
-        self.assertTrue(res.buttons[2].property("nofit"))            # still marked
+        self.assertTrue(qual.buttons[2].property("nofit"))           # Ultra: 11.3 GB > 9.4, still marked
         self.key(Qt.Key_Down)                                        # frame rate row
         self.assertEqual(res.buttons[1].visual_state, "selected")
         self.assertEqual(fps.buttons[fps.idx].visual_state, "focus")
@@ -2229,8 +2240,8 @@ class ControllerBar(unittest.TestCase):
         self.press(self.RB)                            # bumpers switch tabs: Video
         self.assertEqual(bar.tab_names[bar.tab], "Video")
         self.assertTrue(bar.row("resolution").buttons[1].hasFocus())
-        self.right()                                   # 1440p
-        self.assertEqual(bar.row("resolution").value, "1440p")
+        self.right()                                   # Native
+        self.assertEqual(bar.row("resolution").value, "native")
         self.left()
         self.press(self.LB)                            # back to General
         self.assertTrue(bar.row("record").buttons[1].hasFocus())
@@ -2271,21 +2282,20 @@ class ControllerBar(unittest.TestCase):
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
 
     def test_settings_resolution_skips_what_the_screen_cannot_show(self):
-        daemon = FakeDaemon(True, source=[1920, 1080], values={"record": "screen"})
+        daemon = FakeDaemon(True, source=[1280, 720], values={"record": "screen", "resolution": "720p"})
         bar = self.open(daemon)
         self.press(self.Y)
         self.wait_for(lambda: bar.mode == "settings")
         pump(self.app, 0.05)
         self.press(self.RB)                            # Video
         res = bar.row("resolution")
-        self.assertTrue(res.buttons[1].hasFocus())     # 1080p
-        self.right()                                   # 1440p and 4K are skipped
+        self.assertTrue(res.buttons[0].hasFocus())     # 720p
+        self.right()                                   # 1080p is skipped
         self.assertEqual(res.value, "native")
-        self.assertTrue(res.buttons[4].hasFocus())
-        self.left()
+        self.assertTrue(res.buttons[2].hasFocus())
         self.left()
         self.assertEqual(res.value, "720p")
-        self.assertEqual(res.note.text(), "Your screen is 1080p")
+        self.assertEqual(res.note.text(), "Your screen is 720p")
 
     def test_settings_back(self):
         daemon = FakeDaemon(True, values={"record": "window"}, extra={"target": "window"})

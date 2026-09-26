@@ -36,7 +36,5 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 
-# Technical and maintainer notes kept locally, not published
-docs/DEVELOPMENT.md
-docs/PROTOCOL.md
-docs/PUBLISHING.md
+# Technical notes, maintainer checklists and test data: kept locally, not published
+docs/

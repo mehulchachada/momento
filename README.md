@@ -41,16 +41,16 @@ Press play once and Momento records in the background. When something worth keep
 
 ## How it compares
 
-| | **Momento** | Steam recording | OBS replay |
-|---|:---:|:---:|:---:|
-| Works with any game | ✓ | Steam games only | ✓ |
-| Pick the length when you save (15 s – 60 min) | ✓ | Trim on a timeline | Whole buffer only |
-| Controller-friendly overlay | ✓ | ✓ | ✗ |
-| Memory for an hour of replay | ~150 MB | Kept on disk | ~6.8 GB |
-| Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin |
-| Steam Gaming Mode | Records; bar coming | ✓ | ✗ |
-
-More detail, including GPU Screen Recorder: [docs/COMPARISON.md](docs/COMPARISON.md).
+| | **Momento** | Steam recording | OBS replay | GPU Screen Recorder |
+|---|:---:|:---:|:---:|:---:|
+| Works with any game | ✓ | Steam games only | ✓ | ✓ |
+| Pick the length when you save | 15 s – 60 min | Trim on a timeline | Whole buffer | Whole, 1 or 10 min |
+| Controller-friendly overlay | ✓ | ✓ | ✗ | ✓ |
+| Memory for an hour at 1080p | ~150 MB | Kept on disk | ~6.8 GB | ~6.8 GB (RAM mode) |
+| Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin | ✓ |
+| Steam Gaming Mode | Records; bar coming | ✓ | ✗ | ? |
+| Longest replay | 60 min | 120 min | 6 h | 24 h |
+| Video formats | H.264 | MP4 | H.264, HEVC, AV1 | H.264, HEVC, AV1 |
 
 ## Install
 
@@ -187,7 +187,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 <img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p to Native, Frame rate 60 or 120 fps, Quality Standard, High or Ultra">
 
-- **Resolution**: 720p, 1080p (default), 1440p, 4K, or Native (your screen's own).
+- **Resolution**: 720p, 1080p (default), or Native (your screen's own size, up to 1080p). 1440p and 4K are coming later.
   Sizes bigger than your screen (or the window you record) aren't offered: they would only take more space, not look sharper.
 - **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
 - **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
@@ -255,13 +255,12 @@ Free space Momento needs to start (a full hour of replay in brackets):
 |---|---|---|---|
 | **1080p, 60 fps** (default) | 6 GB (4.8) | **8 GB (7.2)** | 13 GB (11.9) |
 | 1080p, 120 fps | 8 GB (7.2) | 12 GB (10.5) | 19 GB (18) |
-| 1440p, 60 fps | 9 GB (7.6) | 12 GB (11.4) | 20 GB (19) |
-| 2160p (4K), 60 fps | 15 GB (14.3) | 22 GB (21.3) | 34 GB (33.2) |
+| 720p, 60 fps | 4 GB (2.9) | 6 GB (4.8) | 8 GB (7.2) |
 
 - **Handheld or 1080p screen:** 1080p High, 60 fps (the default).
 - **120 Hz screen and fast games:** 1080p High, 120 fps.
-- **1440p or 4K monitor:** 1440p High.
-- **Different screen shape** (like a 16:10 handheld): you get black bars. The picture is never stretched.
+- **1440p, 4K or ultrawide monitor:** Native High. It keeps your screen's shape and records at 1080p.
+- **Different screen shape** (like a 16:10 handheld) at 720p or 1080p: you get black bars. The picture is never stretched.
 
 The replay never grows past its hour: older footage is replaced as new footage comes in. The free-space number in the bar is green when there's plenty of room, yellow when it's getting tight and red when there isn't enough. A setting that won't fit gets a red mark in settings, and **Apply** is disabled.
 
