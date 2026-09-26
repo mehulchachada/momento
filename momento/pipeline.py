@@ -6,6 +6,15 @@ capture session id and the negotiated stream parameters. The RingBuffer keeps
 an on-disk index of them, so footage from earlier sessions (before a pause,
 setting change or restart) stays saveable.
 
+Window mode (``[capture] target = "window"``, portal source): the portal is
+asked for one window instead of a monitor. When that window closes, the stream
+ends; capture then stops in state ``no_window`` with no automatic retry (a
+retry could open the picker again and again). The buffered footage stays, and
+the segment being written is finished first. A window's size can change
+mid-stream: it is scaled (with black bars) to the configured resolution, and
+with ``native`` the output size is locked to the first size of the session, so
+the encoder output never changes inside a session.
+
 Everything here runs on the GLib main loop of the caller.
 """
 
@@ -44,6 +53,11 @@ STOP_TIMEOUT = 3.0
 # covering it: the forced keyframe is stamped with its capture time, which is a
 # few frames of pipeline latency behind the moment flush() was called.
 FLUSH_TOLERANCE = 0.25
+
+# Window mode messages (state "no_window"); the clip bar shows its own wording.
+WINDOW_CLOSED = "The game window closed \u2014 pick a window to keep recording"
+WINDOW_NOT_PICKED = "No game window picked \u2014 press play to pick one"
+WINDOW_STOPPED = "Window capture stopped \u2014 pick a window to keep recording"
 
 
 @dataclass(frozen=True)
@@ -117,6 +131,8 @@ class Recorder:
         self.buffer_dir = Path(cfg["buffer"]["dir"])
         self.fps = quality.fps(cfg["capture"])
         self.size = quality.resolution(cfg["capture"])
+        self.target = config.capture_target(cfg["capture"])
+        self.window_mode = False  # target "window" on a source that can do it (set by start())
 
         self._pipeline: Gst.Pipeline | None = None
         self._bus_watch = None
@@ -134,10 +150,19 @@ class Recorder:
         self._params: dict | None = None
         self._open: dict[str, float] = {}
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
+        self._size_caps: str | None = None      # caps of the "size" capsfilter, without width/height
+        self._locked_size: tuple[int, int] | None = None
 
     # --- public API -------------------------------------------------------------
 
-    def start(self) -> None:
+    def start(self, interactive: bool = False) -> None:
+        """Start capturing.
+
+        ``interactive`` marks a start the user asked for (resume, pick a window,
+        switching to window mode). In window mode only such a start may open the
+        window picker: an automatic one (daemon start, a reload, free space
+        coming back) without a stored window token stops in "no_window" instead.
+        """
         if self._pipeline is not None or (self._portal is not None and not self._stop_requested):
             return
         self._stop_requested = False
@@ -147,10 +172,21 @@ class Recorder:
         self.ring.attach(self.buffer_dir)
         self._next_index = max(self._next_index, self.ring.recover())
         self.source_name = resolve_source(self.cfg["capture"]["source"])
+        # "test" stands in for a window too, so window mode can be exercised without a portal.
+        self.window_mode = self.target == "window" and self.source_name in ("portal", "test")
+        if self.target == "window" and not self.window_mode:
+            log.warning("window capture needs the screen-share portal; recording the whole %s source",
+                        self.source_name)
         self._variants = self._plan_variants()
         self._variant_idx = 0
         if not self._variants:
             self._fatal("no usable H.264 encoder found (tried: %s)" % ", ".join(ENCODER_ORDER))
+            return
+        if (self.window_mode and self.source_name == "portal" and not interactive
+                and not config.portal_token_path("window").exists()):
+            # Nothing to restore and nobody asked: don't pop the picker on our own.
+            self._stop_requested = True
+            self._set_state("no_window", WINDOW_NOT_PICKED)
             return
         self._set_state("starting")
         self._begin()
@@ -206,8 +242,12 @@ class Recorder:
             from dbus.mainloop.glib import DBusGMainLoop
 
             self._dbus = dbus.SessionBus(mainloop=DBusGMainLoop())
+        from .portal import SOURCE_MONITOR, SOURCE_WINDOW
+
+        target = "window" if self.window_mode else "screen"
         self._portal = ScreenCastPortal(
-            self._dbus, config.STATE_DIR / "portal_token", bool(self.cfg["capture"].get("show_cursor"))
+            self._dbus, config.portal_token_path(target), bool(self.cfg["capture"].get("show_cursor")),
+            SOURCE_WINDOW if self.window_mode else SOURCE_MONITOR,
         )
         self._portal.start(self._on_portal_ready, self._on_portal_error)
 
@@ -219,9 +259,25 @@ class Recorder:
         self._build_and_play()
 
     def _on_portal_error(self, message: str) -> None:
-        self._close_portal()
         if self._stop_requested:
+            self._close_portal()
             return
+        if self.window_mode:
+            if message == "cancelled":
+                # The picker was dismissed: the stored window (if any) could not be restored.
+                self._teardown(graceful=False)
+                self._window_gone(WINDOW_NOT_PICKED, forget_token=True)
+            elif message == "session closed":
+                # The compositor ended the stream: the window is gone.
+                self._teardown(graceful=self._got_fragment, source_lost=True)
+                self._window_gone(WINDOW_CLOSED if self._got_fragment else WINDOW_NOT_PICKED,
+                                  forget_token=True)
+            else:
+                self._teardown(graceful=False)
+                self._close_portal()
+                self._fatal(f"screen capture portal: {message}")  # no retry: it could open the picker
+            return
+        self._close_portal()
         self._teardown(graceful=False)
         if message == "cancelled":
             # The user dismissed the picker: do not nag them with a retry loop.
@@ -278,7 +334,9 @@ class Recorder:
         cap = self.cfg["capture"]
         src = self.source_name
         if src == "test":
-            return "videotestsrc name=src is-live=true pattern=ball ! video/x-raw,width=1280,height=720"
+            # Named caps so a test can change the "window" size mid-stream.
+            return ("videotestsrc name=src is-live=true pattern=ball ! "
+                    "capsfilter name=testcaps caps=video/x-raw,width=1280,height=720")
         if src == "x11":
             return f"ximagesrc name=src use-damage=false show-pointer={'true' if cap.get('show_cursor') else 'false'}"
         if src == "gamescope":
@@ -289,27 +347,39 @@ class Recorder:
             return f"pipewiresrc name=src fd={self._pw_fd} path={self._pw_node} min-buffers=4"
         raise RuntimeError(f"unknown capture source {src!r}")
 
+    def _lock_size(self) -> bool:
+        """Native resolution in window mode: the output keeps the first window size."""
+        return self.size is None and self.window_mode
+
     def _video_chain(self, v: _Variant) -> str:
         fps = f"{self.fps}/1"
         size = f",width={self.size[0]},height={self.size[1]}" if self.size else ""
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
-        scale = "videoscale add-borders=true ! " if self.size else ""
+        # (A window that is resized mid-stream is scaled into the same frame.)
+        scale = "videoscale add-borders=true ! " if self.size or self._lock_size() else ""
         queue = "queue max-size-buffers={} max-size-bytes=0 max-size-time=0 leaky=downstream"
+        # The output size lives in one named capsfilter ("size") so native window
+        # capture can pin it to the first negotiated size (see _pin_size).
+        if v.zero_copy or v.encoder in VA_ENCODERS:
+            self._size_caps = "video/x-raw(memory:VAMemory),format=NV12"
+        elif v.encoder in ("x264enc", "openh264enc"):
+            self._size_caps = f"video/x-raw,format=I420,framerate={fps}"
+        else:
+            self._size_caps = f"video/x-raw,framerate={fps}"
+        sized = f'capsfilter name=size caps="{self._size_caps}{size}"'
         if v.zero_copy:
             # Copy each frame into our own VA surface right away (GPU colour
             # conversion + scaling) so the compositor gets its buffer back within
             # a millisecond. KWin shares only 3-4 buffers; holding them in a
             # queue/videorate made it skip every other frame (~30 fps real motion).
-            return (f"vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size} ! "
+            return (f"vapostproc add-borders=true ! {sized} ! "
                     f"{queue.format(8)} ! videorate ! video/x-raw(memory:VAMemory),framerate={fps} ! "
                     f"{self._encoder_tail(v)}")
         conv = f"{queue.format(3)} ! "
         if v.encoder in VA_ENCODERS:
-            conv += f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! video/x-raw(memory:VAMemory),format=NV12{size}"
-        elif v.encoder in ("x264enc", "openh264enc"):
-            conv += f"videoconvert ! {scale}videorate ! video/x-raw,format=I420,framerate={fps}{size}"
+            conv += f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! {sized}"
         else:
-            conv += f"videoconvert ! {scale}videorate ! video/x-raw,framerate={fps}{size}"
+            conv += f"videoconvert ! {scale}videorate ! {sized}"
         return f"{conv} ! {self._encoder_tail(v)}"
 
     @staticmethod
@@ -378,6 +448,10 @@ class Recorder:
             # Resend the last frame on a static screen so the encoder (and
             # segment splitting) keeps going; error out when the stream dies.
             _set(src, keepalive_time=250, on_disconnect="error")
+        self._locked_size = None
+        if self._lock_size():
+            src.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._pin_size,
+                                                pipeline.get_by_name("size"))
 
         kbps = quality.bitrate_kbps(self.cfg["capture"])
         enc = pipeline.get_by_name("enc")
@@ -402,6 +476,30 @@ class Recorder:
         # fixed offset (audio devices would otherwise provide a drifting clock).
         pipeline.use_clock(Gst.SystemClock.obtain())
         return pipeline
+
+    def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, capsfilter: Gst.Element):
+        """Streaming thread: fix the output size to the window's first size.
+
+        Runs before the caps event travels on, so the first negotiation already
+        carries the pinned size; later window resizes are scaled into it.
+        """
+        event = info.get_event()
+        if event is None or event.type != Gst.EventType.CAPS:
+            return Gst.PadProbeReturn.OK
+        st = event.parse_caps().get_structure(0)
+        ok_w, w = st.get_int("width")
+        ok_h, h = st.get_int("height")
+        if not (ok_w and ok_h and w > 0 and h > 0):
+            return Gst.PadProbeReturn.OK
+        if self._locked_size is None:
+            size = (max(2, w - w % 2), max(2, h - h % 2))  # H.264 wants even sizes
+            self._locked_size = size
+            capsfilter.set_property("caps", Gst.Caps.from_string(
+                f"{self._size_caps},width={size[0]},height={size[1]}"))
+            log.info("window capture: output size locked to %dx%d for this session", *size)
+        elif (w, h) != self._locked_size:
+            log.info("window resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
+        return Gst.PadProbeReturn.OK
 
     # --- bus ------------------------------------------------------------------------
 
@@ -433,11 +531,14 @@ class Recorder:
                     self._compute_start_wall()
         elif t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
-            log.warning("pipeline error from %s: %s (%s)", msg.src.get_name() if msg.src else "?", err.message, dbg)
-            self._on_pipeline_failure(err.message)
+            name = msg.src.get_name() if msg.src else "?"
+            log.warning("pipeline error from %s: %s (%s)", name, err.message, dbg)
+            # The video source failing means the captured stream went away (for a
+            # window: it was closed).
+            self._on_pipeline_failure(err.message, source_lost=name == "src")
         elif t == Gst.MessageType.EOS:
             log.warning("pipeline reached EOS unexpectedly")
-            self._on_pipeline_failure("capture stream ended")
+            self._on_pipeline_failure("capture stream ended", source_lost=True)
         elif t == Gst.MessageType.WARNING:
             err, dbg = msg.parse_warning()
             log.info("pipeline warning: %s (%s)", err.message, dbg)
@@ -504,8 +605,15 @@ class Recorder:
             self._params = params  # caps are fixed for the life of this pipeline
         return params
 
-    def _on_pipeline_failure(self, message: str) -> None:
+    def _on_pipeline_failure(self, message: str, source_lost: bool = False) -> None:
         if self._stop_requested:
+            return
+        if self.window_mode and (source_lost or self._got_fragment):
+            # No automatic retry for a window: a new session could open the picker
+            # again and again. Finish the segment being written, keep the buffer.
+            self._teardown(graceful=self._got_fragment, source_lost=source_lost)
+            self._window_gone(WINDOW_CLOSED if source_lost else WINDOW_STOPPED,
+                              forget_token=source_lost and self.source_name == "portal")
             return
         self._teardown(graceful=False)
         if not self._got_fragment:
@@ -543,7 +651,7 @@ class Recorder:
 
     # --- teardown / retry ------------------------------------------------------------
 
-    def _teardown(self, graceful: bool) -> None:
+    def _teardown(self, graceful: bool, source_lost: bool = False) -> None:
         pipeline = self._pipeline
         if pipeline is None:
             return
@@ -554,6 +662,14 @@ class Recorder:
             self._bus_watch = None
         bus.remove_signal_watch()
         if graceful:
+            if source_lost:
+                # A source that errored out never sends its EOS: end the video
+                # branch right after it, so splitmuxsink can finish the segment.
+                src = pipeline.get_by_name("src")
+                pad = src.get_static_pad("src") if src is not None else None
+                peer = pad.get_peer() if pad is not None else None
+                if peer is not None:
+                    peer.send_event(Gst.Event.new_eos())
             # EOS finalises the segment being written so it is usable.
             pipeline.send_event(Gst.Event.new_eos())
             deadline = time.monotonic() + STOP_TIMEOUT
@@ -586,7 +702,26 @@ class Recorder:
             self._pw_fd = None
             self._pw_node = None
 
+    def _window_gone(self, message: str, forget_token: bool) -> None:
+        """Window mode: capture ends here and stays off until the user picks again."""
+        self._stop_requested = True
+        self._cancel_retry()
+        self._close_portal()
+        if forget_token:
+            # A window token restores only that window, which no longer exists.
+            config.forget_portal_token("window")
+        self.recording = False
+        self._fire_flush_waiters()
+        self._set_state("no_window", message)
+
     def _error_and_retry(self, message: str) -> None:
+        if self.window_mode:
+            # No automatic retry for a window (it could open the picker again and
+            # again); the user resumes or picks a window from the bar.
+            self._close_portal()
+            self._fatal(message)
+            self._fire_flush_waiters()
+            return
         self.recording = False
         self._set_state("error", message)
         self._fire_flush_waiters()
@@ -596,6 +731,7 @@ class Recorder:
 
     def _fatal(self, message: str) -> None:
         self._stop_requested = True
+        self._cancel_retry()
         self.recording = False
         self._set_state("error", message)
 

@@ -130,6 +130,74 @@ def test_pipeline_live(tmp_path):
     check(tmp_path)
 
 
+WINDOW_SECONDS = 4
+
+
+def check_window(tmp_path: Path) -> dict:
+    """Window mode with the test source standing in for a window: resized mid-stream
+    at native resolution (the output keeps its first size), then the "window" goes
+    away (the source errors out): capture stops in no_window, no retry, and the
+    segment being written is finished and kept."""
+    from gi.repository import Gst
+
+    from momento import config
+    from momento.pipeline import WINDOW_CLOSED, Recorder
+    from momento.ringbuffer import RingBuffer
+
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg["capture"].update(source="test", target="window", resolution="native", bitrate_kbps=2000)
+    cfg["audio"]["desktop"] = False
+    cfg["buffer"].update(segment_seconds=1, dir=str(tmp_path / "wbuffer"))
+    ring = RingBuffer(max_seconds=3600)
+    states = []
+    loop = GLib.MainLoop()
+    rec = Recorder(cfg, ring, lambda s, m: states.append((s, m)))
+
+    def resize():
+        caps = Gst.Caps.from_string("video/x-raw,width=1001,height=701")
+        rec._pipeline.get_by_name("testcaps").set_property("caps", caps)
+        return False
+
+    def close_window():
+        src = rec._pipeline.get_by_name("src")
+        err = GLib.Error.new_literal(Gst.ResourceError.quark(), "stream disconnected (simulated)", 0)
+        src.post_message(Gst.Message.new_error(src, err, "test"))
+        GLib.timeout_add(2000, lambda: (loop.quit(), False)[1])  # time for a (wrong) retry to show
+        return False
+
+    GLib.timeout_add(WINDOW_SECONDS * 500, resize)
+    GLib.timeout_add(WINDOW_SECONDS * 1000, close_window)
+    GLib.timeout_add((WINDOW_SECONDS + 10) * 1000, lambda: (loop.quit(), False)[1])
+    rec.start()
+    loop.run()
+    result = {"states": list(states), "locked": rec._locked_size, "pipeline": rec._pipeline}
+    with ring._lock:
+        result["segments"] = [s for s in ring._segments if s.closed]
+    rec.stop()
+
+    states = result["states"]
+    assert [s for s, _ in states] == ["starting", "recording", "no_window"], states
+    assert states[-1][1] == WINDOW_CLOSED, states
+    assert result["pipeline"] is None and rec._retry_id == 0, "window mode must not retry"
+    assert result["locked"] == (1280, 720), result["locked"]
+    segs = result["segments"]
+    assert len(segs) >= 3, segs
+    assert {(s.width, s.height) for s in segs} == {(1280, 720)}, segs  # never the resized size
+    covered = sum(s.end - s.start for s in segs)
+    assert covered >= WINDOW_SECONDS - 1.2, covered  # the last piece before the close is kept
+    if shutil.which("ffprobe"):
+        for seg in (segs[-1], segs[len(segs) // 2]):
+            out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "frame=width,height", "-of", "csv=p=0", str(seg.path)],
+                                 capture_output=True, text=True).stdout.split()
+            assert out and set(out) == {"1280,720"}, (seg, set(out))
+    return result
+
+
+def test_window_mode_live(tmp_path):
+    check_window(tmp_path)
+
+
 if __name__ == "__main__":
     import logging
 
@@ -144,4 +212,7 @@ if __name__ == "__main__":
             print(f"  {s.path.name} {s.start:.3f} -> {s.end if s.end is None else round(s.end, 3)}"
                   f" ({(s.end - s.start) if s.end else 0:.2f}s)")
         print(f"flush requested {r['flush_requested']:.3f}, flushed {r.get('flushed_at', 0):.3f}")
+        w = check_window(Path(d))
+        print(f"window mode: states={[s for s, _ in w['states']]} locked={w['locked']} "
+              f"segments={len(w['segments'])} ({sum(s.end - s.start for s in w['segments']):.2f}s kept)")
         print("OK")

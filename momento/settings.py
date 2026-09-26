@@ -20,6 +20,7 @@ DEFAULT_SOURCE = "@DEFAULT_SOURCE@"
 
 # key -> one-line help (also the order `momento set` lists them in)
 KEYS = {
+    "record": "screen (the whole screen), window (only the game window you pick)",
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
@@ -28,6 +29,13 @@ KEYS = {
     "mic": "on, off",
     "mic_device": "default, or an input source name",
 }
+
+# What gets recorded: user-facing value -> label (the bar, `momento settings`).
+RECORD_LABELS = {"screen": "Full screen", "window": "Game window"}
+_RECORD_ALIASES = {"screen": "screen", "full": "screen", "fullscreen": "screen", "full screen": "screen",
+                   "full-screen": "screen", "monitor": "screen", "display": "screen", "desktop": "screen",
+                   "window": "window", "game": "window", "game window": "window", "game-window": "window",
+                   "app": "window"}
 
 _RES_ALIASES = {"4k": "2160p", "uhd": "2160p", "2k": "1440p", "qhd": "1440p", "fhd": "1080p", "hd": "720p"}
 _ON = {"on", "true", "yes", "1"}
@@ -45,6 +53,11 @@ def _device(text) -> str:
 
 def normalize(key: str, value):
     """Return the canonical user-facing value for ``key`` or raise ValueError."""
+    if key == "record":
+        v = _RECORD_ALIASES.get(" ".join(str(value).strip().lower().split()))
+        if v is None:
+            raise ValueError("choose one of: screen, window")
+        return v
     if key == "resolution":
         v = str(value).strip().lower()
         v = _RES_ALIASES.get(v, v)
@@ -113,6 +126,8 @@ def validate(changes: dict) -> dict:
 
 def writes(key: str, value) -> list[tuple[str, str, object]]:
     """Config (section, key, value) triples for one normalised setting."""
+    if key == "record":
+        return [("capture", "target", value)]
     if key == "resolution":
         return [("capture", "resolution", value)]
     if key == "quality":
@@ -139,6 +154,7 @@ def current(cfg: dict) -> dict:
     dev = a.get("desktop_device") or DEFAULT_MONITOR
     mic_dev = a.get("microphone_device") or DEFAULT_SOURCE
     return {
+        "record": config.capture_target(cap),
         "resolution": str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower(),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
         "fps": int(cap.get("fps") or quality.FPS),
@@ -180,8 +196,8 @@ def describe(cfg: dict, devices: dict | None = None) -> dict:
     return {
         "ok": True,
         "values": current(cfg),
-        "choices": {"resolution": list(quality.RESOLUTIONS), "quality": list(quality.QUALITIES),
-                    "fps": list(quality.FPS_CHOICES)},
+        "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
+                    "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES)},
         "devices": list_audio_devices() if devices is None else devices,
         "fps": quality.fps(cfg["capture"]),
         "max_seconds": int(cfg["buffer"]["max_seconds"]),

@@ -15,6 +15,16 @@
 #   "test"      a moving test pattern — for trying Momento without a game
 source = "auto"
 
+# What to record:
+#   "screen"   your whole screen (default)
+#   "window"   only the game window you pick. The Momento bar and desktop
+#              notifications are then never in your clips (handy where the bar
+#              can't hide itself from recordings). You pick the window once per
+#              game: when the game closes, open the bar and press play to pick
+#              it again. Needs the "portal" source (the default on Wayland).
+# Change it with:  momento set record window      (or Settings -> Record in the bar)
+target = "screen"
+
 # Frames per second: 60 or 120. 120 only helps on a 120 Hz (or faster) screen
 # and uses about 1.5x the disk space. Change it with:  momento set fps 120
 fps = 60
@@ -23,7 +33,8 @@ fps = 60
 #   "720p" | "1080p" | "1440p" | "2160p"   scaled to this size; if your screen has
 #                                          a different shape you get black bars,
 #                                          never a stretched picture
-#   "native"                               your screen's own size
+#   "native"                               your screen's own size (window mode:
+#                                          the window's size when you picked it)
 # Change it from a terminal with:  momento set resolution 1440p
 resolution = "1080p"
 

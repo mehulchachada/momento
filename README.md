@@ -208,6 +208,7 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 
 | Setting | Key | Default |
 |---|---|---|
+| Record | `[capture] target` | `screen` (full screen). `window` records only the game window you pick |
 | Resolution | `[capture] resolution` | `1080p` (also `720p`, `1440p`, `2160p`, `native`) |
 | Frame rate | `[capture] fps` | `60` (or `120`) |
 | Quality | `[capture] quality` | `high` (also `standard`, `ultra`) |
@@ -228,6 +229,10 @@ The wrong thing was picked in the share dialog. Reset it and pick your monitor a
 rm ~/.local/state/momento/portal_token
 systemctl --user restart momento.service
 ```
+</details>
+<details><summary><b>Keep the Momento bar out of my clips</b></summary>
+
+On KDE Plasma 6.6 or newer this is automatic: the bar never shows up in your clips. Elsewhere, open settings and set **Record** to **Game window**, so Momento records only your game (no bar, no notifications). You pick the game window once. When the game closes, open the bar and press play to pick it again.
 </details>
 <details><summary><b>My clip has no sound</b></summary>
 

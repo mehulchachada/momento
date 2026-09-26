@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = [
             ("state", r.get("state", "?") + (f" ({r['error']})" if r.get("error") else "")),
             ("buffered", f"{durations.clock(r.get('buffered', 0))} / {durations.clock(r.get('max_seconds', 0))}"),
+            ("record", settings.RECORD_LABELS.get(r.get("target") or "screen", r.get("target") or "-").lower()),
             ("video", f"{r.get('resolution', '?')} {r.get('fps', 60)} fps, {r.get('quality', '?')} "
                       f"({r.get('bitrate_kbps', 0) / 1000:g} Mbps)"),
             ("source", r.get("source") or "-"),
@@ -156,7 +157,11 @@ def main(argv: list[str] | None = None) -> int:
         if cur["mic"] == "on":
             mic = "on, " + ("default input" if cur["mic_device"] == "default"
                             else labels.get(cur["mic_device"], cur["mic_device"]))
+        record = settings.RECORD_LABELS[cur["record"]].lower()
+        if cur["record"] == "window":
+            record += " (only the window you pick; the bar and notifications stay out)"
         rows = [
+            ("record", record),
             ("resolution", cur["resolution"]),
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
@@ -205,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
             elif r.get("paused"):
                 print("Saved. Recording is paused; the new setting applies when you resume.")
+            elif r.get("restarted") and clean.get("record") == "window":
+                print("Recording restarted. Pick your game window in the dialog that opens.")
             elif r.get("restarted"):
                 print("Recording restarted with the new setting.")
             else:

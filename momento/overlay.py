@@ -18,6 +18,11 @@ open in the same bar, which grows upward into a few segmented rows; applying
 goes through the daemon's ``configure`` IPC, or straight to the config file
 when the daemon is off.
 
+Window mode (settings: Record -> Game window): when the picked window closes
+the daemon reports "no_window"; the bar then shows "No window" and its play
+button asks the daemon to open the window picker (``pick_window``). The bar
+hides itself right after, so the desktop's picker dialog is usable.
+
 On KDE/wlroots Wayland the bar is a wlr-layer-shell surface on the Overlay
 layer (drawn above fullscreen games), anchored to the bottom edge and sized to
 the bar itself so clicks elsewhere still reach the game. LayerShellQt has no
@@ -58,8 +63,12 @@ PILL_H = 32              # every button is a pill (or a circle) this tall, centr
 PILL_INSET = 4           # each side: the gap between pills, with room for the focus ring
 PILL_PAD = 14            # text padding inside a clip-length pill
 OPTION_MIN_WIDTH = 60
-IDLE_CLOSE_MS = 10_000
-RESULT_CLOSE_MS = 1_500
+IDLE_CLOSE_MS = 10_000   # no interaction: hide after this long
+# After an interaction the result is shown briefly, then the bar hides:
+RESULT_CLOSE_MS = 1_200  # "Saved <file>" or a save error
+STOP_CLOSE_MS = 800      # the Off state after a confirmed Stop
+APPLY_CLOSE_MS = 1_200   # "Saved — recording restarted" after Apply in settings
+TICK_MS = 250            # the recording timer ticks locally between the 1 s status polls
 DEFAULT_SECONDS = 60
 ICON_W = PILL_H + 2 * PILL_INSET   # gear / pause / stop: circles
 HINT_H = 30              # the "Paused" line above the bar
@@ -94,6 +103,7 @@ GREEN = "#4CC38A"
 YELLOW = "#F5C542"
 
 PAUSED_HINT = "Paused · saving uses the footage so far"
+NO_WINDOW_HINT = "Game closed · press play to pick a window"
 
 
 def _gb(n) -> str:
@@ -471,6 +481,25 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.drawLine(P(x + 6.3, y - 3), P(x + 6.3, y - 5.5))
     elif kind == "check":
         p.drawPolyline(QPolygonF([P(x - 5.5, y + 0.5), P(x - 1.8, y + 4.2), P(x + 5.5, y - 4)]))
+    elif kind == "stopsq":
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawRoundedRect(QRectF(x - 4.5, y - 4.5, 9, 9), 1.5, 1.5)
+    elif kind == "cross":
+        p.drawLine(P(x - 4.5, y - 4.5), P(x + 4.5, y + 4.5))
+        p.drawLine(P(x - 4.5, y + 4.5), P(x + 4.5, y - 4.5))
+    elif kind == "fullscreen":
+        # four corner brackets: everything on the screen
+        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+            cx, cy = x + sx * 7, y + sy * 5.5
+            p.drawPolyline(QPolygonF([P(cx, cy - sy * 3.5), P(cx, cy), P(cx - sx * 3.5, cy)]))
+    elif kind == "window":
+        # one app window: a frame with a title bar
+        p.drawRoundedRect(QRectF(x - 7, y - 5.5, 14, 11), 1.5, 1.5)
+        p.drawLine(P(x - 7, y - 2.2), P(x + 7, y - 2.2))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(P(x + 4.6, y - 3.9), 0.9, 0.9)
     elif kind == "back":
         p.drawLine(P(x - 6, y), P(x + 6, y))
         p.drawPolyline(QPolygonF([P(x - 1.5, y - 4.5), P(x - 6, y), P(x - 1.5, y + 4.5)]))
@@ -478,8 +507,9 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
 
 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
-ROW_ICONS = {"resolution": "display", "fps": "gauge", "quality": "sliders", "audio_source": "speaker",
-             "mic": "mic", "mic_device": "micdev"}
+ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
+             "audio_source": "speaker", "mic": "mic", "mic_device": "micdev"}
+RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
 
@@ -749,7 +779,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         """gear / pause / play / stop in a circle, painted so it never depends on a font."""
 
         TIPS = {"gear": "Settings (S)", "pause": "Pause recording (P)", "play": "Resume recording (P)",
-                "start": "Start recording (P)", "stop": "Stop recording"}
+                "start": "Start recording (P)", "stop": "Stop recording", "pick": "Pick a game window"}
 
         def __init__(self, kind):
             super().__init__("")
@@ -782,7 +812,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             elif self.kind == "pause":
                 p.drawRoundedRect(QRectF(x - 5, y - 6.5, 3.5, 13), 1, 1)
                 p.drawRoundedRect(QRectF(x + 1.5, y - 6.5, 3.5, 13), 1, 1)
-            elif self.kind in ("play", "start"):
+            elif self.kind in ("play", "start", "pick"):
                 p.drawPolygon(QPolygonF([QPointF(x - 3.5, y - 6.5), QPointF(x - 3.5, y + 6.5),
                                          QPointF(x + 7, y)]))
             elif self.kind == "stop":
@@ -897,9 +927,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class SettingRow(QWidget):
         """A label and a segmented choice. Long lists collapse to ‹ current ›."""
 
-        def __init__(self, bar, key, title, choices, value, avail, cycle=False):
+        def __init__(self, bar, key, title, choices, value, avail, cycle=False, extra=None):
             super().__init__()
             self.bar, self.key = bar, key
+            self.extra = extra        # a button at the end of the row (Record: "Change window")
             self.values = [c[0] for c in choices]
             self.labels = [c[1] for c in choices]
             self.idx = self.values.index(value) if value in self.values else 0
@@ -952,6 +983,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     lay.addWidget(b)
                     self.buttons.append(b)
             lay.addStretch(1)
+            if extra is not None:
+                lay.addWidget(extra)
             self.refresh()
 
         @property
@@ -968,6 +1001,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             else:
                 for i, b in enumerate(self.buttons):
                     b.set_sel(i == self.idx)
+            if self.key == "record":
+                self.icon.kind = RECORD_ICONS.get(self.value, "fullscreen")
+                self.icon.update()
+
+        def extra_shown(self):
+            return self.extra is not None and not self.extra.isHidden()
 
         def focus(self):
             (self.cur if self.cycle else self.buttons[self.idx]).setFocus(Qt.TabFocusReason)
@@ -981,6 +1020,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.bar.on_row_changed(self)
 
         def step(self, d):
+            if self.extra_shown():
+                # the row's extra button sits right of the last value
+                if self.extra.hasFocus():
+                    if d < 0:
+                        self.focus()
+                    return
+                if d > 0 and not self.cycle and self.idx == len(self.values) - 1:
+                    self.extra.setFocus(Qt.TabFocusReason)
+                    return
             n = len(self.values)
             i = (self.idx + d) % n if self.cycle else max(0, min(n - 1, self.idx + d))
             self.select(i)
@@ -1008,6 +1056,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.resident = False     # kept loaded: hide instead of quitting
             self.gen = 0              # bumped on every show / hide of a resident bar
             self.status_at = 0.0      # when last_status was current (monotonic)
+            # The time shown: status "buffered_live" (display only) at a monotonic
+            # moment, ticked locally between polls while recording. Everything
+            # logical (lengths, saves) uses self.buffered.
+            self.live = (0.0, 0.0)
+            self.live_ticking = False
+            self.max_seconds = 3600.0
+            self.change_btn = None    # settings: "Change window" (window mode)
             self.bridge = Bridge()
             self.bridge.status.connect(self._sig_status)
             self.bridge.saved.connect(self._sig_saved)
@@ -1095,7 +1150,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             head.setFixedWidth(LOGO_SIZE + 12 + 8 + 8 + 2 + max(
                 (nfm.horizontalAdvance(n) + 8 if n else 0) + tfm.horizontalAdvance(t)
                 for n, t in (("", "00:00"), ("Paused", "00:00"), ("Starting", "00:00"),
-                             ("Off", "—"), ("Error", "00:00"), ("Low storage", "00:00")))
+                             ("Off", "—"), ("Error", "00:00"), ("Low storage", "00:00"),
+                             ("No window", "00:00")))
                 + 16 + self.storage_hint.width())
             row.addWidget(head)
             row.addSpacing(12)
@@ -1156,9 +1212,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.confirm.setTextFormat(Qt.RichText)
             self.confirm.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             crow.addWidget(self.confirm, 1)
-            self.stop_yes = TextButton("Stop")
+            self.stop_yes = TextButton("Stop", glyph="stopsq")
             self.stop_yes.clicked.connect(self.confirm_stop)
-            self.stop_no = TextButton("Cancel", quiet=True)
+            self.stop_no = TextButton("Cancel", glyph="cross", quiet=True)
             self.stop_no.clicked.connect(self.cancel_confirm)
             crow.addWidget(self.stop_yes)
             crow.addWidget(self.stop_no)
@@ -1181,6 +1237,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.poll = QTimer(self)
             self.poll.setInterval(1000)
             self.poll.timeout.connect(self.refresh_async)
+            self.ticker = QTimer(self)
+            self.ticker.setInterval(TICK_MS)
+            self.ticker.timeout.connect(self.on_tick)
 
         # Results from worker threads, dropped when they belong to an earlier open.
         def _sig_status(self, gen, st):
@@ -1244,6 +1303,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     hint = f"<span style='color:{RED}'>{_esc(text)}</span>"
                 elif self.paused and self.running:
                     hint = PAUSED_HINT
+                elif self.view == "nowindow" and self.running:
+                    hint = NO_WINDOW_HINT
             if hint is not None and self.hintbar.text() != hint:
                 self.hintbar.setText(hint)
             self.hintbar.setHidden(hint is None)
@@ -1279,13 +1340,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     focus.setFocus(Qt.OtherFocusReason)
 
         NAMES = {"rec": "", "paused": "Paused", "starting": "Starting", "off": "Off",
-                 "error": "Error", "lowstorage": "Low storage"}
+                 "error": "Error", "lowstorage": "Low storage", "nowindow": "No window"}
 
         def set_view(self, view, opts_on):
             """One bar for every state: only the dot, label, time and enablement change."""
             self.view = view
             running = self.running
-            dot = RED if view in ("rec", "lowstorage") else MUTED if view == "paused" else DIM
+            dot = RED if view in ("rec", "lowstorage") else MUTED if view in ("paused", "nowindow") else DIM
             self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
             self.dot.show()
             self.name.setText(self.NAMES[view])
@@ -1298,6 +1359,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     pb.setEnabled(view == "off")
                 elif view in ("paused", "lowstorage"):
                     pb.set_kind("play" if view == "paused" else "start")
+                    pb.setEnabled(True)
+                elif view == "nowindow":
+                    pb.set_kind("pick")          # play = pick a game window
                     pb.setEnabled(True)
                 else:
                     pb.set_kind("pause")
@@ -1321,6 +1385,38 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def set_time(self, text, color=TEXT):
             self.time.setText(text)
             self.time.setStyleSheet(f"color: {color};")
+
+        # ---------------- the recording timer
+        def set_live(self, st, ticking):
+            """Take the time to show from a status: "buffered_live" (falls back to "buffered")."""
+            v = st.get("buffered_live")
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                v = st.get("buffered") or 0.0
+            v = float(v)
+            if ticking and self.live_ticking:
+                est = self.live_seconds()
+                if 0 < est - v < 1.5:
+                    v = est  # a poll a moment behind the local tick: never step back
+            self.max_seconds = float(st.get("max_seconds") or 3600)
+            self.live = (min(v, self.max_seconds), time.monotonic())
+            self.live_ticking = ticking
+            if ticking and self.isVisible():
+                self.ticker.start()
+            elif not ticking:
+                self.ticker.stop()
+
+        def live_seconds(self):
+            v, t = self.live
+            if self.live_ticking:
+                v += time.monotonic() - t
+            return min(v, self.max_seconds)
+
+        def on_tick(self):
+            if not self.live_ticking or self.view != "rec" or self.stack.currentIndex() != 0:
+                return
+            text = _mmss(self.live_seconds())
+            if self.time.text() != text:
+                self.time.setText(text)
 
         # ---------------- status
         def refresh_async(self):
@@ -1352,6 +1448,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.paused = False
                 self.stopped = False
                 self.buffered = 0.0
+                self.set_live({}, False)
                 self.warn = None
                 self.storage_hint.set_storage(None)
                 if not st.get("not_running", True):
@@ -1378,6 +1475,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     view = "lowstorage"
                 elif self.paused:
                     view = "paused"
+                elif st.get("state") == "no_window":
+                    view = "nowindow"     # window mode: the game window closed
                 elif st.get("recording"):
                     view = "rec"
                 elif st.get("state") == "error":
@@ -1385,13 +1484,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 else:
                     view = "starting"
                 self.set_view(view, self.buffered > 0 and not self.stopped)
+                self.set_live({} if self.stopped else st, view == "rec")
+                shown = self.live_seconds()
                 if view == "off":
                     self.set_time("—", DIM)
                 elif view == "lowstorage":
                     # the numbers are in the warning strip right above; keep the head compact
-                    self.set_time(_mmss(self.buffered) if self.buffered > 0 else "", MUTED)
+                    self.set_time(_mmss(shown) if shown > 0 else "", MUTED)
                 else:
-                    self.set_time(_mmss(self.buffered), TEXT if view in ("rec", "paused") else MUTED)
+                    self.set_time(_mmss(shown), TEXT if view in ("rec", "paused") else MUTED)
                 if view == "error" and st.get("error"):
                     # Shown in the strip above the bar; the bar has no tooltips (see main()).
                     self.warn = str(st["error"])
@@ -1424,7 +1525,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         # ---------------- save
         def showEvent(self, ev):
             self.shown_at = time.time()
+            if self.live_ticking:
+                self.ticker.start()   # the timer only runs while the bar is on screen
             super().showEvent(ev)
+
+        def hideEvent(self, ev):
+            self.ticker.stop()
+            super().hideEvent(ev)
 
         def choose(self, opt):
             if (self.saving or self.done or not self.online or not opt.isEnabled()
@@ -1482,6 +1589,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if self.view == "off":
                     self.start_recorder()
                 return
+            if self.view == "nowindow":
+                self.pick_window()
+                return
             if self.view == "lowstorage" or (self.paused and _storage_short(self.last_status) is not None):
                 self.show_storage_warning()  # resuming would fail: say why instead
                 return
@@ -1495,6 +1605,25 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
                 self.bridge.control.emit(gen, cmd, r)
+            threading.Thread(target=work, daemon=True).start()
+
+        def pick_window(self):
+            """Ask the daemon to open the window picker (play in "No window", "Change window").
+
+            The bar hides once the daemon has answered, so the picker dialog can
+            take the keyboard; a one-shot bar must not quit before the request is out.
+            """
+            if self.control_busy or self.saving or self.done:
+                return
+            self.control_busy = True
+            gen = self.gen
+
+            def work():
+                try:
+                    r = ipc.request({"cmd": "pick_window"}, timeout=30)
+                except Exception as e:  # noqa: BLE001
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
+                self.bridge.control.emit(gen, "pick_window", r)
             threading.Thread(target=work, daemon=True).start()
 
         def ask_stop(self):
@@ -1511,6 +1640,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             self.mode = "clip"
             self.back_to_clip("stop")
+            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.start()                   # back to the normal auto-hide
 
         def confirm_stop(self):
             if self.mode != "confirm" or self.control_busy:
@@ -1540,6 +1671,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def on_control(self, cmd, r):
             self.control_busy = False
+            if cmd == "pick_window":
+                if r.get("ok"):
+                    self.close_bar()            # out of the way of the picker dialog
+                    return
+                if self.mode == "settings":
+                    fm = self.foot.fontMetrics()
+                    err = fm.elidedText(str(r.get("error") or "Could not pick a window"), Qt.ElideRight,
+                                        max(120, self.foot.width()))
+                    self.foot.setText(f"<span style='color:{RED}'>{_esc(err)}</span>")
+                    return
             if not r.get("ok"):
                 if r.get("code") == "no_storage":
                     self.show_storage_warning(_storage_warning(r.get("storage") or {}, r.get("error")))
@@ -1550,10 +1691,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             if cmd == "stop":
                 self.apply_status({**(self.last_status or {}), "ok": True, "state": "stopped",
-                                   "recording": False, "buffered": 0})
+                                   "recording": False, "buffered": 0, "buffered_live": 0})
+                self.idle.stop()
+                self.after(STOP_CLOSE_MS, self.close_bar)  # show Off briefly, then get out of the way
             elif cmd == "quit":
                 self.stopping = True
                 self.running = False
+                self.idle.stop()
+                self.after(STOP_CLOSE_MS, self.close_bar)  # an older daemon's Stop: same quick exit
             elif cmd == "pause" and self.last_status and self.last_status.get("ok"):
                 # show it right away; the next poll confirms
                 self.apply_status({**self.last_status, "state": "paused", "recording": False})
@@ -1647,6 +1792,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def clear_rows(self):
             """Delete the settings rows (rebuilt on every open of the settings)."""
             self.rows = []
+            self.change_btn = None
             old = self.panel_lay.takeAt(0)
             while old is not None:
                 if old.widget() is not None:
@@ -1684,7 +1830,17 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             micdev = [("default", "Default mic")] + [(d["name"], d["label"], True) for d in ins]
             if vals["mic_device"] not in [c[0] for c in micdev]:
                 micdev.append((vals["mic_device"], vals["mic_device"], True))
-            self.rows = [
+            self.rows = []
+            if "record" in vals:
+                # What to record. In window mode a "Change window" pill sits at the end of the row.
+                rec = [(r, settings.RECORD_LABELS.get(r, r))
+                       for r in data["choices"].get("record", list(settings.RECORD_LABELS))]
+                self.change_btn = TextButton("Change window", ROW_H, quiet=True)
+                self.change_btn.setAccessibleName("Change window: pick another game window")
+                self.change_btn.clicked.connect(self.change_window)
+                self.rows.append(SettingRow(self, "record", "Record", rec, vals["record"],
+                                            avail - self.change_btn.width(), extra=self.change_btn))
+            self.rows += [
                 SettingRow(self, "resolution", "Resolution", res, vals["resolution"], avail),
                 SettingRow(self, "fps", "Frame rate",
                            [(f, f"{f} fps") for f in data["choices"].get("fps", [60])],
@@ -1699,7 +1855,25 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             for r in self.rows:
                 self.panel_lay.addWidget(r)
             self.row("mic_device").setHidden(vals["mic"] != "on")
+            self.update_change_btn()
             self.update_fit()
+
+        def update_change_btn(self):
+            """"Change window" shows while the daemon runs in window mode and the row still says so."""
+            if self.change_btn is None:
+                return
+            vals = self.sdata["values"]
+            on = (bool(self.sdata.get("online")) and self.running and vals.get("record") == "window"
+                  and self.row("record").value == "window")
+            if self.change_btn.hasFocus() and not on:
+                self.row("record").focus()
+            self.change_btn.setHidden(not on)
+
+        def change_window(self):
+            if self.mode != "settings" or self.apply_state in ("busy", "done"):
+                return
+            self.foot.setText(f"<span style='color:{MUTED}'>Opening the window picker…</span>")
+            self.pick_window()
 
         def row(self, key):
             return next(r for r in self.rows if r.key == key)
@@ -1781,6 +1955,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.foot.setText(f"<span style='color:{MUTED}'>{_esc(self.estimate())}</span>")
 
         def on_row_changed(self, row):
+            if row.key == "record":
+                self.update_change_btn()
             if row.key == "mic":
                 self.row("mic_device").setHidden(row.value != "on")
                 self.relayout()
@@ -1856,7 +2032,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.foot.setText(f"<span style='color:{RED}'>{_esc(msg)}</span>")
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "no_storage",
                                     "recording": False, "error": r.get("warning")}
-                self.after(RESULT_CLOSE_MS, self.after_apply)
+                self.after(APPLY_CLOSE_MS, self.after_apply)
                 return
             if not r.get("online"):
                 tail = "takes effect when Momento starts"
@@ -1869,12 +2045,19 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
                                     "recording": False}
-            self.after(RESULT_CLOSE_MS, self.after_apply)
+                if (r.get("changed") or {}).get("record") == "window":
+                    # the desktop's window picker opens now: get out of its way
+                    self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— pick the game window</span>")
+                    self.after(0, self.after_apply)
+                    return
+            self.after(APPLY_CLOSE_MS, self.after_apply)
 
         def after_apply(self):
+            """After Apply: back to the clip view (the state a new open starts in), then hide."""
             if self.mode == "settings" and self.apply_state == "done":
                 self.apply_state = None
                 self.close_settings(focus_key=None)
+                self.close_bar()
 
         def settings_row_index(self):
             w = QApplication.focusWidget()
@@ -1910,6 +2093,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space, Qt.Key_Select):
                 if self.back_btn.hasFocus():
                     self.close_settings()
+                elif self.change_btn is not None and self.change_btn.hasFocus():
+                    self.change_window()
                 else:
                     self.apply_settings()
             return True
@@ -1960,6 +2145,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 grown = max(0.0, time.monotonic() - self.status_at)
                 cap = float(st.get("max_seconds") or 3600)
                 st = {**st, "buffered": min(cap, float(st.get("buffered") or 0.0) + grown)}
+                if isinstance(st.get("buffered_live"), (int, float)):
+                    st["buffered_live"] = min(cap, float(st["buffered_live"]) + grown)
             return st
 
         def reset(self):
@@ -1967,6 +2154,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.gen += 1                       # replies to the previous open are dropped
             self.idle.stop()
             self.poll.stop()
+            self.ticker.stop()
+            self.live_ticking = False
             self.saving = self.done = False
             self.control_busy = self.stopping = self.loading_settings = False
             self.status_inflight = False
@@ -2036,6 +2225,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.gen += 1
             self.idle.stop()
             self.poll.stop()
+            self.ticker.stop()
             if self.isVisible():
                 self.hide()
             if self.layered:
@@ -2168,18 +2358,62 @@ workspace.windowAdded.connect(mark);
 """
 
 
+# KWin gained the per-window "exclude from capture" property in 6.6.0; setting
+# it on an older KWin does nothing, so the bar would still be in clips.
+KWIN_EXCLUDE_MIN = (6, 6)
+
+
 def _kwin_script_name(pid: int) -> str:
     return f"momento-exclude-{pid}"
+
+
+def _parse_kwin_version(text) -> tuple[int, int, int] | None:
+    """(6, 6, 0) from KWin's supportInformation ("KWin version: 6.6.0") or
+    ``kwin_wayland --version`` ("kwin 6.6.0"); None when there is no version."""
+    import re
+
+    m = re.search(r"(?:KWin version:|\bkwin(?:_wayland|_x11)?)\s+(\d+)\.(\d+)(?:\.(\d+))?",
+                  str(text or ""), re.IGNORECASE)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+
+
+def _kwin_can_exclude(version) -> bool:
+    return version is not None and tuple(version[:2]) >= KWIN_EXCLUDE_MIN
+
+
+def _kwin_version(bus=None) -> tuple[int, int, int] | None:
+    """The running KWin's version: D-Bus supportInformation, else ``kwin_wayland --version``."""
+    if bus is not None:
+        try:
+            from PySide6.QtDBus import QDBusInterface
+
+            kwin = QDBusInterface("org.kde.KWin", "/KWin", "org.kde.KWin", bus)
+            if kwin.isValid():
+                kwin.setTimeout(2000)
+                reply = kwin.call("supportInformation")
+                args = reply.arguments() if reply is not None else []
+                version = _parse_kwin_version(args[0]) if args else None
+                if version is not None:
+                    return version
+        except Exception as e:  # noqa: BLE001
+            log.debug("KWin supportInformation failed: %s", e)
+    try:
+        out = subprocess.run(["kwin_wayland", "--version"], capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return _parse_kwin_version(out.stdout or out.stderr)
 
 
 def _exclude_from_capture() -> bool:
     """Ask KWin to hide this process's windows from screen capture.
 
-    KDE Plasma 6 has a per-window "exclude from capture" switch that also keeps
+    KWin 6.6+ has a per-window "exclude from capture" switch that also keeps
     a window out of full-monitor screencasts, which is what Momento records. The
     bar is an unnamed layer surface, so a tiny KWin script matches it by our
-    PID. Returns False on other desktops (no KWin), where the bar falls back to
-    ending clips at the moment it was opened.
+    PID. Returns False on other desktops (no KWin) and on older KWin, where the
+    bar falls back to ending clips at the moment it was opened.
     """
     global CAPTURE_EXCLUDED
     if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or os.environ.get("MOMENTO_TEST_SANDBOX"):
@@ -2193,6 +2427,11 @@ def _exclude_from_capture() -> bool:
         return False
     kwin = QDBusInterface("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting", bus)
     if not kwin.isValid():
+        return False
+    version = _kwin_version(bus)
+    if not _kwin_can_exclude(version):
+        log.info("KWin %s cannot hide the bar from capture (needs %d.%d+); clips end when the bar opens",
+                 ".".join(map(str, version)) if version else "(unknown version)", *KWIN_EXCLUDE_MIN)
         return False
     pid = os.getpid()
     path = RUNTIME_DIR / f"{_kwin_script_name(pid)}.js"

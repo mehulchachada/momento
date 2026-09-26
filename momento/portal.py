@@ -4,6 +4,11 @@ Flow: CreateSession -> SelectSources -> Start -> OpenPipeWireRemote, each step
 answered asynchronously through an org.freedesktop.portal.Request "Response"
 signal. The restore token is persisted so later sessions start without the
 picker dialog (persist_mode=2, "until explicitly revoked").
+
+The source type is a monitor (full screen) or a single window. Each kind keeps
+its own token file (see ``config.portal_token_path``). A window token only
+restores while that window still exists: the compositor matches the window
+itself, so a relaunched game is picked again.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ REQUEST_IFACE = "org.freedesktop.portal.Request"
 SESSION_IFACE = "org.freedesktop.portal.Session"
 
 SOURCE_MONITOR = 1
+SOURCE_WINDOW = 2
 CURSOR_HIDDEN = 1
 CURSOR_EMBEDDED = 2
 PERSIST_PERSISTENT = 2
@@ -50,10 +56,11 @@ def register_app_id(bus: dbus.Bus, app_id: str) -> None:
 
 
 class ScreenCastPortal:
-    def __init__(self, bus: dbus.Bus, token_path: Path, cursor: bool):
+    def __init__(self, bus: dbus.Bus, token_path: Path, cursor: bool, source_type: int = SOURCE_MONITOR):
         self.bus = bus
         self.token_path = Path(token_path)
         self.cursor = cursor
+        self.source_type = source_type
         self.session_handle: str | None = None
         self.node_id: int | None = None
         self._sender = bus.get_unique_name().lstrip(":").replace(".", "_")
@@ -108,10 +115,14 @@ class ScreenCastPortal:
             )
         )
         version = self._prop("version", 1)
+        if not int(self._prop("AvailableSourceTypes", self.source_type)) & self.source_type:
+            what = "single windows" if self.source_type == SOURCE_WINDOW else "monitors"
+            self._fail(f"this desktop cannot share {what}")
+            return
         cursor_modes = self._prop("AvailableCursorModes", CURSOR_HIDDEN)
         cursor_mode = CURSOR_EMBEDDED if self.cursor and int(cursor_modes) & CURSOR_EMBEDDED else CURSOR_HIDDEN
         options = {
-            "types": dbus.UInt32(SOURCE_MONITOR),
+            "types": dbus.UInt32(self.source_type),
             "multiple": dbus.Boolean(False),
         }
         if int(cursor_modes) & cursor_mode:

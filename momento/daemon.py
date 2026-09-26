@@ -266,8 +266,15 @@ class Daemon:
 
     def _on_state(self, state: str, detail: str | None) -> None:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
+        was = self.state
         self.state = state
-        self.error = detail if state == "error" else None
+        self.error = detail if state in ("error", "no_window") else None
+        if state == "no_window" and was == "recording":
+            # Window mode: the game window went away mid-recording. Capture stays
+            # off (no retry could pick a window without asking); say so once.
+            notify(self.bus, "Momento: the game window closed",
+                   "Recording stopped; what was recorded can still be saved.\n"
+                   "Open the bar and press play to pick a window.", "dialog-information")
 
     # --- disk space ---------------------------------------------------------------
 
@@ -277,14 +284,18 @@ class Daemon:
             reclaimable = storage.dir_bytes(self.buffer_dir)
         return storage.check(cfg or self.cfg, reclaimable)
 
-    def _start_recorder(self, reclaimable: int | None = None) -> bool:
-        """Start capture if a full buffer fits on disk; otherwise enter "no_storage"."""
+    def _start_recorder(self, reclaimable: int | None = None, interactive: bool = False) -> bool:
+        """Start capture if a full buffer fits on disk; otherwise enter "no_storage".
+
+        ``interactive``: the user asked for this start (resume, pick_window, switching
+        to window mode), so in window mode it may open the window picker.
+        """
         chk = self.storage_check(reclaimable=reclaimable)
         if not chk["ok"]:
             self._block(storage.start_error(chk), "start")
             return False
         self._unblock()
-        self.recorder.start()
+        self.recorder.start(interactive=interactive)
         return True
 
     def _block(self, message: str, reason: str) -> None:
@@ -309,8 +320,8 @@ class Daemon:
     def _storage_tick(self) -> bool:
         """Every STORAGE_CHECK_SECONDS: auto-start once space appears; stop when it runs low."""
         try:
-            if self.paused or self.recorder is None or self._stopping:
-                return True
+            if self.paused or self.recorder is None or self._stopping or self.state == "no_window":
+                return True  # (no_window: nothing is being written, and only the user restarts it)
             if self.state == "no_storage":
                 # After a low-space stop, only restart once real free space is back:
                 # the kept footage stays on disk, so it can't be counted as room to grow.
@@ -352,6 +363,8 @@ class Daemon:
             self.pause(reply)
         elif cmd == "resume":
             self.resume(reply)
+        elif cmd == "pick_window":
+            self.pick_window(reply)
         elif cmd == "stop":
             self.stop_recording(reply)
         elif cmd == "quit":
@@ -368,7 +381,7 @@ class Daemon:
     def _cfg_path(self) -> Path | None:
         return Path(self.cfg["_path"]) if self.cfg.get("_path") else None
 
-    def reload(self, reply) -> None:
+    def reload(self, reply, interactive: bool = False) -> None:
         """Re-read the config file and restart capture with it (buffered footage is kept).
 
         While paused the new settings are loaded but capture stays off until resume.
@@ -389,7 +402,7 @@ class Daemon:
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
         started = False
         if not self.paused:
-            started = self._start_recorder()
+            started = self._start_recorder(interactive=interactive)
         result = {"ok": True, "restarted": started, "paused": self.paused,
                   "state": self._idle_state(), "storage": self._storage_status()}
         if self.state == "no_storage" and not self.paused:
@@ -447,7 +460,9 @@ class Daemon:
             reply({"ok": True, "changed": {}, "restarted": False, "paused": self.paused,
                    "state": self._idle_state(), "storage": self._storage_status()})
             return
-        self.reload(lambda r: reply({**r, "changed": changed}))
+        # Switching what is recorded is the user's choice: in window mode the new
+        # session may open the window picker (a new portal session either way).
+        self.reload(lambda r: reply({**r, "changed": changed}), interactive="record" in changed)
 
     def pause(self, reply) -> None:
         """Stop capturing but keep what is buffered; saves keep working on it."""
@@ -474,11 +489,33 @@ class Daemon:
     def resume(self, reply) -> None:
         """Start capturing again as a new session; the footage from before the pause stays."""
         # Also retry after an error (e.g. the screen-share prompt was dismissed),
-        # so the bar's play button is always a way back to recording.
-        if self.paused or self.state in ("no_storage", "error"):
+        # so the bar's play button is always a way back to recording. From
+        # no_window it restores the stored window, or asks for one if there is none.
+        if self.paused or self.state in ("no_storage", "error", "no_window"):
             self.paused = False
             self.stopped = False
-            if self.recorder is not None and not self._start_recorder():
+            if self.recorder is not None and not self._start_recorder(interactive=True):
+                reply({"ok": False, "code": "no_storage", "error": self.storage_error,
+                       "state": self.state, "storage": self._storage_status()})
+                return
+        reply({"ok": True, "state": self.state})
+
+    def pick_window(self, reply) -> None:
+        """Window mode: forget the stored window and ask for one (the window picker opens).
+
+        The only path meant to open the picker on purpose: the bar's play button in
+        "no_window" and its "Change window". Footage recorded so far is kept; a
+        pause or stop is left, since picking a window means "record this".
+        """
+        if config.capture_target(self.cfg["capture"]) != "window":
+            reply({"ok": False, "error": "Record is set to Full screen; choose Game window first"})
+            return
+        config.forget_portal_token("window")
+        self.paused = False
+        self.stopped = False
+        if self.recorder is not None:
+            self.recorder.stop()
+            if not self._start_recorder(interactive=True):
                 reply({"ok": False, "code": "no_storage", "error": self.storage_error,
                        "state": self.state, "storage": self._storage_status()})
                 return
@@ -500,6 +537,7 @@ class Daemon:
             "source": getattr(rec, "source_name", None),
             "encoder": getattr(rec, "encoder_name", None),
             "output_dir": self.cfg["output"]["dir"],
+            "target": config.capture_target(self.cfg["capture"]),
             "resolution": self.cfg["capture"]["resolution"],
             "quality": self.cfg["capture"]["quality"],
             "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"]),

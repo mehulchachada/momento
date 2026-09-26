@@ -67,6 +67,10 @@ below 512 MiB; ``no_storage`` -> ``starting`` when space appears (checked every
 30 s) or on ``resume``; any -> ``paused`` (``pause``); any -> ``stopped``
 (``stop``); ``paused``/``stopped`` -> ``starting`` or ``no_storage``
 (``resume``); ``reload``/``configure`` restart capture unless paused/stopped.
+Window mode (``status.target`` ``"window"``): ``recording``/``starting`` ->
+``no_window`` when the picked window closes (or the picker was dismissed, or
+there is no window to restore on an automatic start); it is never retried
+automatically, and ``resume``/``pick_window`` leave it (-> ``starting``).
 ``status.recording`` is the authoritative "frames are being written" flag.
 
 Commands (fields are in ``COMMANDS``)
@@ -75,7 +79,8 @@ Commands (fields are in ``COMMANDS``)
     What the recorder is doing; cheap, clients poll it. ``buffered`` = seconds of
     footage on disk (footage, not wall clock; 0 after ``stop``). ``source`` /
     ``encoder`` are null until capture has started once. ``error`` is present in
-    state ``error``/``no_storage``. ``storage`` is a ``STORAGE_CHECK``.
+    state ``error``/``no_storage``/``no_window``. ``storage`` is a ``STORAGE_CHECK``.
+    ``target`` is what is recorded: ``"screen"`` or ``"window"`` (absent: screen).
 ``save`` {seconds}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
@@ -91,9 +96,17 @@ Commands (fields are in ``COMMANDS``)
     ``state: "paused"``.
 ``resume``
     Start a new capture session (earlier footage stays); also leaves ``stopped``
-    and retries from ``no_storage``. A no-op in other states. Refusal:
-    ``code: no_storage`` with ``state`` and ``storage``; the daemon is then
-    unpaused in ``no_storage`` and starts by itself once there is room.
+    and retries from ``no_storage``/``error``/``no_window`` (window mode: the stored
+    window is restored, or the window picker opens when there is none). A no-op
+    in other states. Refusal: ``code: no_storage`` with ``state`` and
+    ``storage``; the daemon is then unpaused in ``no_storage`` and starts by
+    itself once there is room.
+``pick_window``
+    Window mode only: forget the stored window and start a new capture session
+    that opens the desktop's window picker (the one request meant to open it).
+    Leaves ``paused``/``stopped``/``no_window``; earlier footage stays. Reply
+    ``state`` (usually ``starting``). Errors: ``Record is set to Full screen...``
+    in screen mode; ``code: no_storage`` as for ``resume``.
 ``stop``
     End recording AND clear the replay history, but keep the service and hotkey
     running (``resume`` starts afresh). Reply ``state: "stopped"``,
@@ -147,8 +160,10 @@ Files other implementations must stay compatible with
 * Clips: ``output.filename`` template with ``{date}`` (YYYY-MM-DD), ``{time}``
   (HH-MM-SS), ``{length}`` (``15s``/``5m``/``3m20s``); ``/`` -> ``_``, ``.mp4``
   appended if missing, ``_2``, ``_3``... on collision.
-* ``$XDG_STATE_HOME/momento/portal_token``: the ScreenCast restore token, one
-  line, replaced atomically after each session.
+* ``$XDG_STATE_HOME/momento/portal_token``: the ScreenCast restore token for
+  the full screen, one line, replaced atomically after each session;
+  ``portal_token_window`` the same for window mode (deleted when that window
+  closes, the picker is dismissed, or on ``pick_window``).
 
 Schema conventions
 ------------------
@@ -174,12 +189,13 @@ STATES = {
     "paused": "capture stopped by `pause`; the buffer is kept and saveable",
     "stopped": "capture stopped by `stop`; the buffer was cleared; the service keeps running",
     "no_storage": "capture blocked: a full buffer does not fit on disk (or the disk ran low)",
+    "no_window": "window mode: the picked window closed (or none is picked); `resume`/`pick_window` asks for one",
     "error": "capture failed; `error` says why (retried automatically unless fatal)",
 }
 
 # Values of `code` in an error reply ({"ok": false, "code": ..., "error": ...}).
 ERROR_CODES = {
-    "no_storage": "not enough disk space for a full buffer (configure/resume) or for the clip (save)",
+    "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip (save)",
 }
 
 
@@ -215,6 +231,7 @@ STORAGE_REQUIREMENTS = {
 }
 
 SETTING_VALUES = {
+    "record": (("string",), True),         # "screen" | "window"
     "resolution": (("string",), True),
     "quality": (("string",), True),
     "fps": (("integer",), True),
@@ -225,6 +242,7 @@ SETTING_VALUES = {
 }
 
 SETTING_CHOICES = {
+    "record": (("array",), True),
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),
@@ -266,12 +284,13 @@ COMMANDS: dict[str, dict] = {
             "source": (("string", "null"), True),   # capture source in use, null before the first start
             "encoder": (("string", "null"), True),
             "output_dir": (("string",), True),
+            "target": (("string",), False),         # "screen" | "window" (absent: screen)
             "resolution": (("string",), True),
             "quality": (("string",), True),
             "bitrate_kbps": (("integer",), True),   # effective video bitrate
             "fps": (("integer",), True),
             "storage": ((STORAGE_CHECK,), True),
-            "error": (("string",), False),          # with state error / no_storage
+            "error": (("string",), False),          # with state error / no_storage / no_window
             "protocol": (("integer",), False),      # REQUIRED by the spec; see Pending implementation
         },
         "error": {},
@@ -303,6 +322,17 @@ COMMANDS: dict[str, dict] = {
         "error": {},
     },
     "resume": {
+        "request": {},
+        "reply": {
+            "ok": (("boolean",), True),
+            "state": (("string",), True),
+        },
+        "error": {
+            "state": (("string",), False),
+            "storage": ((STORAGE_CHECK,), False),
+        },
+    },
+    "pick_window": {
         "request": {},
         "reply": {
             "ok": (("boolean",), True),

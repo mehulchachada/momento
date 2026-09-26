@@ -53,7 +53,7 @@ class _FakeRecorder:
         self.source_name, self.encoder_name = "test", "x264enc"
         _FakeRecorder.instances.append(self)
 
-    def start(self):
+    def start(self, interactive=False):
         self.started += 1
         self.recording = True
         self.on_state("recording", None)
@@ -303,6 +303,33 @@ class DaemonContractTest(_DaemonCase):
         r = self.check({"cmd": "configure", "changes": {"quality": "high"}}, ok=True)  # shrinking goes through
         self.assertEqual(r["state"], "recording")
 
+    def test_window_mode(self):
+        from momento import config
+
+        self.addCleanup(config.portal_token_path("window").unlink, missing_ok=True)
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual(r["target"], "screen")
+        self.check({"cmd": "pick_window"}, ok=False)                 # screen mode: refused
+        r = self.check({"cmd": "configure", "changes": {"record": "window"}}, ok=True)
+        self.assertEqual(r["changed"], {"record": "window"})
+        self.assertEqual(self.check({"cmd": "status"})["target"], "window")
+        # the picked window closes: no_window, with a message, footage kept
+        self.fill(2)
+        self.d.recorder.recording = False
+        self.d.recorder.on_state("no_window", "The game window closed \u2014 pick a window to keep recording")
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["state"], r["recording"]), ("no_window", False))
+        self.assertIn("window closed", r["error"])
+        self.assertGreater(r["buffered"], 0)
+        r = self.check({"cmd": "pick_window"}, ok=True)
+        self.assertIn(r["state"], ("starting", "recording"))
+        self.d.recorder.on_state("no_window", "No game window picked")
+        self.assertIn(self.check({"cmd": "resume"}, ok=True)["state"], ("starting", "recording"))
+        shutil.rmtree(self.d.buffer_dir)
+        self.free = self.need() - 1
+        r = self.check({"cmd": "pick_window"}, ok=False, code="no_storage")
+        self.assertEqual(r["state"], "no_storage")
+
     def test_unknown_command(self):
         for msg in ({"cmd": "frobnicate"}, {}, {"cmd": 3}):
             r = self.call(msg)
@@ -438,9 +465,19 @@ class ValidatorTest(unittest.TestCase):
                   "storage": {"ok": True, "free": 1, "required": 1, "reclaimable": 0, "path": "/b"}}
         self.assertEqual(validate_reply("status", status), [])
         self.assertTrue(validate_reply("status", {**status, "storage": {**status["storage"], "free": "1"}}))
+        # window mode (additive: target is optional, no_window a new state)
+        self.assertEqual(validate_reply("status", {**status, "target": "window", "state": "no_window",
+                                                   "error": "The game window closed"}), [])
+        self.assertTrue(validate_reply("status", {**status, "target": 2}))
+        self.assertEqual(validate_reply("pick_window", {"ok": True, "state": "starting"}), [])
+        self.assertEqual(validate_reply("pick_window", {"ok": False, "code": "no_storage", "error": "x",
+                                                        "state": "no_storage"}), [])
+        self.assertTrue(validate_reply("pick_window", {"ok": True}))
 
     def test_requests(self):
         self.assertEqual(validate_request({"cmd": "save", "seconds": "5m"}), [])
+        self.assertEqual(validate_request({"cmd": "pick_window"}), [])
+        self.assertEqual(validate_request({"cmd": "configure", "changes": {"record": "window"}}), [])
         self.assertTrue(validate_request({"cmd": "save"}))
         self.assertTrue(validate_request({"cmd": "configure", "changes": {}}))
         self.assertTrue(validate_request({"cmd": "configure", "changes": {"colour": "red"}}))
@@ -451,6 +488,9 @@ class ValidatorTest(unittest.TestCase):
         from momento import quality, settings
 
         self.assertEqual(set(protocol.SETTING_KEYS), set(settings.KEYS))
+        self.assertIn("record", protocol.SETTING_CHOICES)
+        self.assertIn("no_window", protocol.STATES)
+        self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode is an additive change
         self.assertEqual(protocol.PROTOCOL_VERSION, 1)
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)

@@ -48,6 +48,9 @@ DEFAULTS = {
         # auto | vah264enc | vaapih264enc | nvh264enc | qsvh264enc | x264enc | openh264enc
         "encoder": "auto",
         "show_cursor": False,
+        # screen = the whole monitor | window = only the game window the user picks
+        # (screen-share portal only; the bar and notifications are then never recorded).
+        "target": "screen",
     },
     "audio": {
         "desktop": True,
@@ -78,6 +81,32 @@ DEFAULTS = {
         "keep_bar_loaded": True,
     },
 }
+
+
+CAPTURE_TARGETS = ("screen", "window")
+
+
+def capture_target(capture: dict) -> str:
+    """"screen" or "window" for a [capture] table (anything unknown counts as "screen")."""
+    return "window" if str(capture.get("target") or "").strip().lower() == "window" else "screen"
+
+
+def portal_token_path(target: str = "screen") -> Path:
+    """Where the ScreenCast restore token for ``target`` is kept.
+
+    One token per target, so switching between full screen and a window never
+    throws away the other one. The screen token keeps its original file name.
+    """
+    return STATE_DIR / ("portal_token_window" if target == "window" else "portal_token")
+
+
+def forget_portal_token(target: str) -> bool:
+    """Drop the stored restore token for ``target`` (the next session asks again)."""
+    try:
+        portal_token_path(target).unlink()
+        return True
+    except OSError:  # not there (nothing to forget) or not removable
+        return False
 
 
 def _merge(base: dict, over: dict) -> dict:

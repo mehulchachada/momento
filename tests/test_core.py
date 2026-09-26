@@ -620,10 +620,12 @@ class FakeRecorder:
         self.cfg, self.on_state = cfg, on_state
         self.recording = False
         self.started = self.stopped = 0
+        self.interactive = []  # the interactive flag of every start()
         FakeRecorder.instances.append(self)
 
-    def start(self):
+    def start(self, interactive=False):
         self.started += 1
+        self.interactive.append(interactive)
         self.recording = True
         self.on_state("recording", None)
 
@@ -1429,6 +1431,437 @@ class DaemonBarTest(unittest.TestCase):
 
         self.assertTrue(cli.build_parser().parse_args(["overlay", "--resident"]).resident)
         self.assertFalse(cli.build_parser().parse_args(["overlay"]).resident)
+
+
+# ---------------------------------------------------------------- window mode
+
+
+class RecordSettingTest(unittest.TestCase):
+    """The "record" setting: full screen (default) or one game window."""
+
+    def setUp(self):
+        from momento import config, settings
+
+        self.config, self.settings = config, settings
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "config.toml"
+        self.path.write_text("# mine\n[capture]\nresolution = \"1080p\"\n")
+
+    def test_validate(self):
+        v = self.settings.validate
+        self.assertEqual(v({"record": "window"}), {"record": "window"})
+        self.assertEqual(v({"record": " Game  Window "}), {"record": "window"})
+        self.assertEqual(v({"record": "Full screen"}), {"record": "screen"})
+        self.assertEqual(v({"record": "fullscreen"}), {"record": "screen"})
+        for bad in ("tv", "", 2):
+            with self.assertRaises(ValueError) as cm:
+                v({"record": bad})
+            self.assertTrue(str(cm.exception).startswith("record: choose one of: screen, window"))
+
+    def test_default_apply_and_describe(self):
+        cfg = self.config.load(self.path)
+        self.assertEqual(cfg["capture"]["target"], "screen")
+        self.assertEqual(self.settings.current(cfg)["record"], "screen")
+        self.assertEqual(self.settings.apply({"record": "game"}, self.path), {"record": "window"})
+        self.assertIn("# mine", self.path.read_text())
+        cfg = self.config.load(self.path)
+        self.assertEqual(cfg["capture"]["target"], "window")
+        d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["values"]["record"], "window")
+        self.assertEqual(d["choices"]["record"], ["screen", "window"])
+        self.assertEqual(self.settings.RECORD_LABELS, {"screen": "Full screen", "window": "Game window"})
+        # a hand-edited unknown value reads as the default
+        self.assertEqual(self.config.capture_target({"target": "Monitor 2"}), "screen")
+
+    def test_cli(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        self.assertEqual(cli.build_parser().parse_args(["set", "record", "window"]).key, "record")
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "record", "window"]), 0)
+        self.assertEqual(self.config.load(self.path)["capture"]["target"], "window")
+        out = io.StringIO()
+        with mock.patch.object(self.settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
+        self.assertIn("record: game window (only the window you pick", out.getvalue())
+        # daemon running: the restart message tells the user a dialog is coming
+        out = io.StringIO()
+        reply = {"ok": True, "changed": {"record": "window"}, "restarted": True, "paused": False}
+        with mock.patch.object(ipc, "request", return_value=reply), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "record", "window"]), 0)
+        self.assertIn("Pick your game window", out.getvalue())
+
+    def test_token_paths(self):
+        from momento import config
+
+        self.assertEqual(config.portal_token_path("screen").name, "portal_token")   # the original name
+        self.assertEqual(config.portal_token_path("window").name, "portal_token_window")
+        self.assertTrue(str(config.portal_token_path("window")).startswith(os.environ["MOMENTO_TEST_SANDBOX"]))
+        self.assertFalse(config.forget_portal_token("window"))
+
+
+class DaemonWindowTest(unittest.TestCase):
+    """Window mode in the daemon: no_window, pick_window, resume, configure (fake Recorder)."""
+
+    # the same fake daemon as DaemonControlTest, without running its tests again
+    call = DaemonControlTest.call
+    _need = DaemonControlTest._need
+    tearDown = DaemonControlTest.tearDown
+
+    CLOSED = "The game window closed — pick a window to keep recording"
+
+    def setUp(self):
+        DaemonControlTest.setUp(self)
+        from momento import config
+
+        self.token = config.portal_token_path("window")
+        self.addCleanup(self.token.unlink, missing_ok=True)
+
+    def window_mode(self):
+        self.call({"cmd": "configure", "changes": {"record": "window"}})
+        return self.d.recorder
+
+    def test_status_reports_target(self):
+        self.assertEqual(self.d.status()["target"], "screen")
+        rec = self.window_mode()
+        self.assertEqual(self.d.status()["target"], "window")
+        self.assertIs(rec, FakeRecorder.instances[-1])
+
+    def test_window_closed_keeps_history_and_does_not_retry(self):
+        rec = self.window_mode()
+        buf = Path(self.d.cfg["buffer"]["dir"])
+        buf.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        for i in range(3):
+            seg = buf / f"seg{i:08d}.ts"
+            seg.write_bytes(b"x" * 188)
+            self.d.ring.opened(seg, now - 30 + 10 * i)
+            self.d.ring.closed(seg, now - 20 + 10 * i)
+        before = self.d.status()["buffered"]
+        self.notes.clear()
+        rec.recording = False
+        rec.on_state("no_window", self.CLOSED)   # what the Recorder reports when the window closes
+        st = self.d.status()
+        self.assertEqual((st["state"], st["recording"], st["error"]), ("no_window", False, self.CLOSED))
+        self.assertEqual(st["buffered"], before)  # the replay history is kept
+        self.assertEqual(self.notes, ["Momento: the game window closed"])
+        rec.on_state("no_window", self.CLOSED)   # e.g. the portal session closing as well
+        self.assertEqual(len(self.notes), 1)      # one notification
+        started = rec.started
+        self.d._storage_tick()                    # nothing restarts it by itself
+        self.assertEqual((rec.started, self.d.status()["state"]), (started, "no_window"))
+
+    def test_no_notification_without_a_recording(self):
+        rec = self.window_mode()
+        self.notes.clear()
+        rec.on_state("starting", None)
+        rec.on_state("no_window", "No game window picked — press play to pick one")  # e.g. at login
+        self.assertEqual(self.d.status()["state"], "no_window")
+        self.assertEqual(self.notes, [])
+
+    def test_pick_window(self):
+        self.assertFalse(self.call({"cmd": "pick_window"})["ok"])   # screen mode: nothing to pick
+        rec = self.window_mode()
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("old-window")
+        stopped, started = rec.stopped, rec.started
+        r = self.call({"cmd": "pick_window"})
+        self.assertEqual(r, {"ok": True, "state": "recording"})
+        self.assertFalse(self.token.exists())                        # the stored window is dropped
+        self.assertEqual((rec.stopped, rec.started), (stopped + 1, started + 1))
+        self.assertTrue(rec.interactive[-1])                         # so the picker may open
+        # from pause (or no_window) it records again
+        self.call({"cmd": "pause"})
+        self.assertTrue(self.call({"cmd": "pick_window"})["ok"])
+        self.assertEqual(self.d.status()["state"], "recording")
+        self.assertFalse(self.d.paused)
+
+    def test_pick_window_without_space(self):
+        rec = self.window_mode()
+        self.free = self._need() - 1
+        r = self.call({"cmd": "pick_window"})
+        self.assertEqual((r["ok"], r["code"], r["state"]), (False, "no_storage", "no_storage"))
+        self.assertEqual(rec.interactive[-1:], [True])               # nothing new started
+
+    def test_resume_from_no_window(self):
+        rec = self.window_mode()
+        rec.recording = False
+        rec.on_state("no_window", self.CLOSED)
+        started = rec.started
+        r = self.call({"cmd": "resume"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(rec.started, started + 1)
+        self.assertTrue(rec.interactive[-1])     # restores the stored window, or asks for one
+        self.assertEqual(self.d.status()["state"], "recording")
+
+    def test_configure_record_switch(self):
+        from momento import config
+
+        first = self.d.recorder
+        r = self.call({"cmd": "configure", "changes": {"record": "window"}})
+        self.assertEqual((r["ok"], r["changed"], r["restarted"]), (True, {"record": "window"}, True))
+        self.assertEqual(first.stopped, 1)                           # a new portal session
+        rec = self.d.recorder
+        self.assertIsNot(rec, first)
+        self.assertEqual(rec.interactive, [True])                    # the user switched: picker allowed
+        self.assertEqual(rec.cfg["capture"]["target"], "window")
+        self.assertEqual(config.load(self.path)["capture"]["target"], "window")
+        # any other change in window mode restarts without asking (the stored window is restored)
+        self.call({"cmd": "configure", "changes": {"resolution": "720p"}})
+        self.assertEqual(self.d.recorder.interactive, [False])
+        r = self.call({"cmd": "configure", "changes": {"record": "screen"}})
+        self.assertEqual(r["changed"], {"record": "screen"})
+        self.assertEqual(self.d.status()["target"], "screen")
+
+
+def _have_gst() -> bool:
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst  # noqa: F401
+        return True
+    except (ImportError, ValueError):
+        return False
+
+
+@unittest.skipUnless(_have_gst(), "GStreamer (PyGObject) not available")
+class RecorderWindowTest(unittest.TestCase):
+    """pipeline.Recorder's window-mode decisions, without building a real pipeline."""
+
+    def setUp(self):
+        import copy
+
+        from momento import config, pipeline
+        from momento.ringbuffer import RingBuffer
+
+        self.pipeline = pipeline
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.token = config.portal_token_path("window")
+        self.addCleanup(self.token.unlink, missing_ok=True)
+        self.cfg = copy.deepcopy(config.DEFAULTS)
+        self.cfg["capture"].update(source="portal", target="window")
+        self.cfg["buffer"]["dir"] = str(Path(self._tmp.name) / "buffer")
+        self.states = []
+        self.ring = RingBuffer(3600)
+
+    def recorder(self, **capture):
+        from unittest import mock
+
+        self.cfg["capture"].update(capture)
+        rec = self.pipeline.Recorder(self.cfg, self.ring, lambda s, m: self.states.append((s, m)))
+        rec._plan_variants = lambda: [self.pipeline._Variant("x264enc", False)]
+        rec._start_portal = mock.Mock()          # never the real portal
+        rec._build_and_play = mock.Mock()
+        self.addCleanup(rec._cancel_retry)
+        return rec
+
+    def test_automatic_start_without_a_window_does_not_ask(self):
+        rec = self.recorder()
+        rec.start()                               # daemon start / reload: no token -> no picker
+        self.assertEqual(self.states, [("no_window", self.pipeline.WINDOW_NOT_PICKED)])
+        rec._start_portal.assert_not_called()
+        self.assertTrue(rec.window_mode)
+        rec.start(interactive=True)               # resume / pick_window: the picker may open
+        rec._start_portal.assert_called_once()
+        self.assertEqual(self.states[-1][0], "starting")
+
+    def test_stored_window_is_restored(self):
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("tok")
+        rec = self.recorder()
+        rec.start()
+        rec._start_portal.assert_called_once()
+        self.assertEqual(self.states, [("starting", None)])
+
+    def test_window_closed_stops_without_retry(self):
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("tok")
+        rec = self.recorder()
+        rec.start()
+        rec._got_fragment = rec.recording = True
+        rec._on_pipeline_failure("stream disconnected", source_lost=True)
+        self.assertEqual(self.states[-1], ("no_window", self.pipeline.WINDOW_CLOSED))
+        self.assertEqual(rec._retry_id, 0)                           # no automatic retry
+        self.assertTrue(rec._stop_requested)
+        self.assertFalse(rec.recording)
+        self.assertFalse(self.token.exists())                        # that window is gone for good
+        rec._on_pipeline_failure("late error", source_lost=True)     # later messages are ignored
+        self.assertEqual(len([s for s, _ in self.states if s == "no_window"]), 1)
+
+    def test_other_failure_keeps_the_window(self):
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("tok")
+        rec = self.recorder()
+        rec.start()
+        rec._got_fragment = True
+        rec._on_pipeline_failure("encoder hiccup")                   # not the source
+        self.assertEqual(self.states[-1], ("no_window", self.pipeline.WINDOW_STOPPED))
+        self.assertTrue(self.token.exists())                         # resume restores it quietly
+        self.assertEqual(rec._retry_id, 0)
+
+    def test_portal_outcomes(self):
+        for message, expect in (("cancelled", self.pipeline.WINDOW_NOT_PICKED),
+                                ("session closed", self.pipeline.WINDOW_NOT_PICKED)):
+            self.token.parent.mkdir(parents=True, exist_ok=True)
+            self.token.write_text("tok")
+            self.states.clear()
+            rec = self.recorder()
+            rec.start()
+            rec._on_portal_error(message)
+            self.assertEqual(self.states[-1], ("no_window", expect), message)
+            self.assertFalse(self.token.exists(), message)
+            self.assertEqual(rec._retry_id, 0)
+        rec = self.recorder()
+        rec.start(interactive=True)
+        rec._on_portal_error("this desktop cannot share single windows")
+        self.assertEqual(self.states[-1][0], "error")
+        self.assertEqual(rec._retry_id, 0)                           # no retry loop in window mode
+
+    def test_screen_mode_still_retries(self):
+        rec = self.recorder(target="screen")
+        rec.start()
+        self.assertFalse(rec.window_mode)
+        rec._got_fragment = True
+        rec._on_pipeline_failure("stream disconnected", source_lost=True)
+        self.assertEqual(self.states[-1][0], "error")
+        self.assertNotEqual(rec._retry_id, 0)
+
+    def test_native_window_size_is_locked(self):
+        rec = self.recorder(resolution="native")
+        rec.start(interactive=True)
+        self.assertTrue(rec._lock_size())
+        chain = rec._video_chain(self.pipeline._Variant("x264enc", False))
+        self.assertIn("videoscale add-borders=true", chain)          # resizes are scaled into the first size
+        self.assertIn("capsfilter name=size", chain)
+        screen = self.recorder(target="screen", resolution="native")
+        screen.start()
+        self.assertFalse(screen._lock_size())
+        self.assertNotIn("videoscale", screen._video_chain(self.pipeline._Variant("x264enc", False)))
+
+
+class _FakeMatch:
+    def __init__(self, bus, key):
+        self.bus, self.key = bus, key
+
+    def remove(self):
+        self.bus.receivers.pop(self.key, None)
+
+
+class _FakePortalBus:
+    """Just enough of a dbus-python session bus for ScreenCastPortal (no real D-Bus)."""
+
+    def __init__(self, source_types=3):
+        self.receivers = {}
+        self.calls = []
+        self.props = {"version": 5, "AvailableCursorModes": 3, "AvailableSourceTypes": source_types}
+
+    def get_unique_name(self):
+        return ":1.42"
+
+    def get_object(self, name, path, **_):
+        return _FakePortalObject(self, path)
+
+    def add_signal_receiver(self, handler, signal_name=None, dbus_interface=None, path=None, **_):
+        key = (signal_name, path)
+        self.receivers[key] = handler
+        return _FakeMatch(self, key)
+
+    def respond(self, options, results):
+        token = str(options["handle_token"])
+        path = f"/org/freedesktop/portal/desktop/request/1_42/{token}"
+        self.receivers[("Response", path)](0, results)
+
+
+class _FakePortalObject:
+    def __init__(self, bus, path):
+        self.bus, self.path = bus, path
+
+    def get_dbus_method(self, member, dbus_interface=None):
+        bus = self.bus
+
+        def call(*args, reply_handler=None, error_handler=None, **_):
+            bus.calls.append((member, args))
+            if member == "Get":
+                return bus.props[args[1]]
+            if member == "CreateSession":
+                bus.respond(args[0], {"session_handle": "/org/freedesktop/portal/desktop/session/1_42/s"})
+            elif member == "SelectSources":
+                bus.respond(args[1], {})
+            elif member == "Start":
+                bus.respond(args[2], {"streams": [(77, {})], "restore_token": "fresh-token"})
+            elif member == "OpenPipeWireRemote":
+                reply_handler(os.open(os.devnull, os.O_RDONLY))
+            elif member == "Close":
+                if reply_handler:
+                    reply_handler()
+        return call
+
+
+def _have_dbus() -> bool:
+    try:
+        import dbus  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_have_dbus(), "dbus-python not available")
+class PortalWindowTest(unittest.TestCase):
+    """ScreenCastPortal against a fake bus: source type and token file per target."""
+
+    def setUp(self):
+        from momento import config
+
+        self.config = config
+        for t in ("screen", "window"):
+            self.addCleanup(config.portal_token_path(t).unlink, missing_ok=True)
+        config.portal_token_path("window").parent.mkdir(parents=True, exist_ok=True)
+        config.portal_token_path("screen").write_text("screen-token")
+        config.portal_token_path("window").write_text("window-token")
+
+    def run_portal(self, target, source_types=3):
+        from momento import portal
+
+        bus = _FakePortalBus(source_types)
+        got = {}
+        p = portal.ScreenCastPortal(bus, self.config.portal_token_path(target), False,
+                                    portal.SOURCE_WINDOW if target == "window" else portal.SOURCE_MONITOR)
+        p.start(lambda fd, node: got.update(fd=fd, node=node), lambda msg: got.update(error=msg))
+        if "fd" in got:
+            os.close(got["fd"])
+        select = next((a for m, a in bus.calls if m == "SelectSources"), None)
+        return got, (dict(select[1]) if select else None)
+
+    def test_window_types_and_token(self):
+        got, options = self.run_portal("window")
+        self.assertEqual(got.get("node"), 77, got)
+        self.assertEqual(int(options["types"]), 2)                    # a single window
+        self.assertEqual(str(options["restore_token"]), "window-token")
+        self.assertEqual(int(options["persist_mode"]), 2)
+        self.assertEqual(self.config.portal_token_path("window").read_text(), "fresh-token")
+        self.assertEqual(self.config.portal_token_path("screen").read_text(), "screen-token")  # untouched
+
+    def test_screen_types_and_token(self):
+        got, options = self.run_portal("screen")
+        self.assertEqual(int(options["types"]), 1)                    # a monitor, as before
+        self.assertEqual(str(options["restore_token"]), "screen-token")
+        self.assertEqual(self.config.portal_token_path("screen").read_text(), "fresh-token")
+        self.assertEqual(self.config.portal_token_path("window").read_text(), "window-token")
+
+    def test_desktop_without_window_sharing(self):
+        got, options = self.run_portal("window", source_types=1)
+        self.assertIsNone(options)
+        self.assertEqual(got, {"error": "this desktop cannot share single windows"})
 
 
 if __name__ == "__main__":

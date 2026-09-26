@@ -2,7 +2,7 @@
 
     python3 -m unittest tests.test_overlay_offscreen
 
-Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3,v4}-*.png
+Screenshots land in /tmp/claude-1000/momento-{overlay,settings,controls,v3,v4,v5}-*.png
 (override with $MOMENTO_SHOT_DIR). Each is the bar composited over a plain backdrop that
 stands in for the game.
 """
@@ -114,6 +114,10 @@ class FakeDaemon:
             if self.configure_reply:
                 return self.configure_reply
             return {"ok": True, "changed": msg["changes"], "restarted": True, "paused": False}
+        if msg["cmd"] == "pick_window":
+            self.controls.append("pick_window")
+            self.extra.update(state="starting", recording=False)
+            return {"ok": True, "state": "starting"}
         if msg["cmd"] == "stop":
             # the service keeps running; recording stops and the history is cleared
             self.controls.append("stop")
@@ -361,12 +365,15 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertIn("6.8 GB for 60 min", bar.foot.text())
         self.assertTrue(bar.row("mic_device").isHidden())
         self.assertEqual({r.key: r.icon.kind for r in bar.rows},
-                         {"resolution": "display", "fps": "gauge", "quality": "sliders",
+                         {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
                           "audio_source": "speaker", "mic": "mic", "mic_device": "micdev"})
         xs = {r.icon.mapTo(bar, r.icon.rect().topLeft()).x() for r in bar.visible_rows()}
         self.assertEqual(len(xs), 1)             # one icon column
         self.assertTrue(all(r.height() == overlay.ROW_H for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
+        self.assertEqual(bar.rows[0].key, "record")                 # what to record comes first
+        self.assertTrue(bar.row("record").buttons[0].hasFocus())    # Full screen
+        self.key(Qt.Key_Down)
         self.assertTrue(bar.row("resolution").buttons[1].hasFocus())  # 1080p
         self.assertEqual([b.text() for b in bar.row("resolution").buttons],
                          ["720p", "1080p", "1440p", "4K", "Native"])
@@ -412,7 +419,7 @@ class OverlayOffscreen(unittest.TestCase):
                                               "audio_source": "ROG Ally.monitor", "mic": "on"}])
         self.assertIn("recording restarted", bar.foot.text())
         self.shot(bar, "saved", "settings")
-        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.APPLY_CLOSE_MS / 1000 + 2)
         self.assertEqual(bar.height(), h0)
         self.assertEqual(bar.y() + bar.height(), bottom0)
 
@@ -447,9 +454,8 @@ class OverlayOffscreen(unittest.TestCase):
         row = bar.row("audio_source")
         self.assertTrue(row.cycle)
         self.assertEqual(row.cur.text(), "Default output")
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)
+        for _ in range(4):                       # record, resolution, fps, quality -> sound
+            self.key(Qt.Key_Down)
         self.assertTrue(row.cur.hasFocus())
         self.key(Qt.Key_Right)
         self.assertEqual((row.value, row.cur.text()), ("out0.monitor", "Speaker 0"))
@@ -482,7 +488,7 @@ class OverlayOffscreen(unittest.TestCase):
         cfg = config.load(tmp)
         self.assertEqual(cfg["capture"]["resolution"], "720p")
         self.assertFalse(cfg["audio"]["desktop"])
-        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.APPLY_CLOSE_MS / 1000 + 2)
         self.assert_off(bar)
 
     # ---------------------------------------------------------------- pause / stop / start
@@ -700,6 +706,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.apply_btn.isEnabled())
         self.assertIn("60 fps", bar.foot.text())
         self.assertEqual([b.property("nofit") for b in res.buttons], [False, False, True, True, True])
+        self.key(Qt.Key_Down)                     # from Record to Resolution
         self.key(Qt.Key_Right)                    # 1440p: 10.8 GB > 9.4 GB
         self.assertEqual(res.value, "1440p")
         self.assertFalse(bar.apply_btn.isEnabled())
@@ -731,6 +738,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.open_settings(bar)
         self.assertIn("Needs", bar.foot.text())
         self.assertTrue(bar.apply_btn.isEnabled())         # no change is not a raise
+        self.key(Qt.Key_Down)                               # from Record to Resolution
         self.key(Qt.Key_Right)                              # 4K: raises the requirement
         self.assertFalse(bar.apply_btn.isEnabled())
         self.key(Qt.Key_Left)
@@ -747,7 +755,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(daemon.configures, [{"quality": "high"}])
         self.assertIn("needs 10.8 GB", bar.foot.text())
         self.assertNotIn("recording restarted", bar.foot.text())
-        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.wait_for(lambda: bar.mode == "clip", timeout=overlay.APPLY_CLOSE_MS / 1000 + 2)
         self.assertEqual(bar.view, "lowstorage")
         self.assertIn("needs 10.8 GB", bar.hintbar.text())
 
@@ -811,6 +819,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(FakeDaemon(True, free=9.4e9))
         self.open_settings(bar)
         res, fps, qual = bar.row("resolution"), bar.row("fps"), bar.row("quality")
+        self.key(Qt.Key_Down)                                        # from Record to Resolution
         self.assertEqual(res.buttons[1].visual_state, "focus")      # 1080p: selected + focused
         self.assertEqual(qual.buttons[qual.idx].visual_state, "selected")
         self.assertEqual(fps.buttons[fps.idx].visual_state, "selected")
@@ -860,6 +869,201 @@ class OverlayOffscreen(unittest.TestCase):
         off = self.make(FakeDaemon(False))                   # daemon not running
         self.assertTrue(off.storage_hint.isHidden())
         self.assertEqual(bar.width(), off.width())
+
+    # ---------------------------------------------------------------- timings / result states
+
+    def test_result_timings(self):
+        self.assertLessEqual(overlay.RESULT_CLOSE_MS, 1200)
+        self.assertLessEqual(overlay.APPLY_CLOSE_MS, 1200)
+        self.assertLessEqual(overlay.STOP_CLOSE_MS, 800)
+        self.assertEqual(overlay.IDLE_CLOSE_MS, 10_000)
+
+    def test_stop_hides_quickly_and_cancel_restarts_idle(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.resident = True                       # hiding is observable (a one-shot bar would quit)
+        self.assertEqual((bar.stop_yes.glyph, bar.stop_no.glyph), ("stopsq", "cross"))
+        bar.ask_stop()
+        bar.idle.stop()
+        bar.cancel_confirm()                      # back to the clip view, normal auto-hide again
+        self.assertEqual(bar.mode, "clip")
+        self.assertTrue(bar.idle.isActive())
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)
+        bar.ask_stop()
+        pump(self.app, 0.05)
+        self.shot(bar, "stop-confirm-icons", "v5")
+        t0 = time.monotonic()
+        bar.confirm_stop()
+        self.wait_for(lambda: daemon.controls == ["stop"] and not bar.control_busy)
+        self.assertEqual(bar.view, "off")         # the Off state shows briefly...
+        self.assertTrue(bar.isVisible())
+        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.STOP_CLOSE_MS / 1000 + 1)
+        self.assertLess(time.monotonic() - t0, overlay.STOP_CLOSE_MS / 1000 + 0.8)  # ...then it hides
+
+    def test_apply_hides_after_result(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.resident = True
+        self.open_settings(bar)
+        bar.row("quality").buttons[0].click()
+        bar.apply_settings()
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertTrue(bar.isVisible())
+        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.APPLY_CLOSE_MS / 1000 + 1)
+        self.assertEqual(bar.mode, "clip")
+
+    # ---------------------------------------------------------------- the recording timer
+
+    def test_timer_shows_live_time_but_decides_on_saveable(self):
+        daemon = FakeDaemon(True, extra={"buffered": 10.0, "buffered_live": 13.5})
+        bar = self.make(daemon)
+        self.assertEqual(bar.time.text(), "0:13")               # the display: buffered_live
+        self.assertEqual(bar.buffered, 10.0)                    # the logic: buffered
+        self.assertTrue(bar.options[0].property("long"))        # 15s > 10 s saveable
+        self.assertTrue(bar.live_ticking and bar.ticker.isActive())
+        self.wait_for(lambda: bar.time.text() == "0:14", timeout=1.5)  # ticks between polls
+        bar.choose(bar.options[0])
+        self.assertIn("Saving last 10s", bar.line.text())       # clamped to what is saveable
+        self.wait_done(bar)
+        # an older daemon without buffered_live: the time is buffered
+        bar2 = self.make(FakeDaemon(True))
+        self.assertEqual(bar2.time.text(), "12:34")
+        # a poll slightly behind the local tick never steps the time back
+        bar2.set_live({"buffered": 754.0, "buffered_live": 800.0, "max_seconds": 3600}, True)
+        bar2.live = (800.0, time.monotonic() - 0.9)
+        bar2.set_live({"buffered": 754.0, "buffered_live": 800.2, "max_seconds": 3600}, True)
+        self.assertGreaterEqual(bar2.live_seconds(), 800.9)
+        # never past the buffer length
+        bar2.set_live({"buffered_live": 3599.5, "max_seconds": 3600}, True)
+        bar2.live = (3599.5, time.monotonic() - 5)
+        self.assertEqual(bar2.live_seconds(), 3600)
+        paused = self.make(FakeDaemon(True, paused=True, extra={"buffered_live": 13.5, "buffered": 10.0}))
+        self.assertFalse(paused.live_ticking or paused.ticker.isActive())
+
+    # ---------------------------------------------------------------- window mode
+
+    def test_record_row(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.open_settings(bar)
+        row = bar.row("record")
+        self.assertIs(bar.rows[0], row)
+        self.assertEqual([b.text() for b in row.buttons], ["Full screen", "Game window"])
+        self.assertEqual((row.value, row.icon.kind), ("screen", "fullscreen"))
+        self.assertTrue(bar.change_btn.isHidden())                   # full screen: nothing to change
+        xs = {r.icon.mapTo(bar, r.icon.rect().topLeft()).x() for r in bar.visible_rows()}
+        self.assertEqual(len(xs), 1)
+        self.assertLessEqual(row.sizeHint().width(), bar.width())
+        self.assertTrue(row.buttons[0].hasFocus())
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-record", "v5")
+        self.key(Qt.Key_Right)                                       # Game window
+        self.assertEqual((row.value, row.icon.kind), ("window", "window"))
+        self.assertTrue(bar.change_btn.isHidden())                   # not applied yet
+        self.assertEqual(bar.changes(), {"record": "window"})
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-record-window", "v5")
+        bar.resident = True
+        self.key(Qt.Key_Return)
+        self.wait_for(lambda: daemon.configures == [{"record": "window"}])
+        # the window picker opens now: the bar gets out of its way right after the reply
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+
+    def test_change_window_pill(self):
+        daemon = FakeDaemon(True, values={"record": "window"}, extra={"target": "window"})
+        bar = self.make(daemon)
+        w0 = bar.width()
+        self.open_settings(bar)
+        row = bar.row("record")
+        self.assertEqual((row.value, row.icon.kind), ("window", "window"))
+        self.assertFalse(bar.change_btn.isHidden())
+        self.assertEqual(bar.change_btn.text(), "Change window")
+        self.assertTrue(row.isAncestorOf(bar.change_btn))
+        self.assertEqual(bar.width(), w0)
+        self.assertTrue(row.buttons[1].hasFocus())
+        self.key(Qt.Key_Right)                                       # past "Game window": the pill
+        self.assertTrue(bar.change_btn.hasFocus())
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-change-window", "v5")
+        self.key(Qt.Key_Left)
+        self.assertTrue(row.buttons[1].hasFocus())
+        self.key(Qt.Key_Left)                                        # Full screen hides the pill
+        self.assertTrue(bar.change_btn.isHidden())
+        self.key(Qt.Key_Right)
+        self.assertFalse(bar.change_btn.isHidden())
+        self.key(Qt.Key_Right)
+        bar.resident = True
+        self.key(Qt.Key_Return)                                      # Change window
+        self.wait_for(lambda: daemon.controls == ["pick_window"])
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)       # out of the picker's way
+        self.assertEqual(daemon.configures, [])                      # nothing applied
+
+    def test_change_window_hidden_when_off(self):
+        tmp = Path(self._tmp.name) / "config-window.toml"
+        tmp.write_text('[capture]\ntarget = "window"\n')
+        orig_path, orig_list = config.default_path, settings.list_audio_devices
+        config.default_path = lambda: tmp
+        settings.list_audio_devices = lambda *a, **k: DEVICES
+        self.addCleanup(setattr, config, "default_path", orig_path)
+        self.addCleanup(setattr, settings, "list_audio_devices", orig_list)
+        bar = self.make(FakeDaemon(False))
+        self.open_settings(bar)
+        self.assertEqual(bar.row("record").value, "window")
+        self.assertTrue(bar.change_btn.isHidden())                   # Momento is off: nothing to change
+
+    NO_WINDOW = {"state": "no_window", "recording": False, "target": "window",
+                 "error": "The game window closed \u2014 pick a window to keep recording"}
+
+    def test_no_window_bar(self):
+        ref = self.make(FakeDaemon(True))                            # a recording bar, for its width
+        rec_w = ref.width()
+        ref.close()
+        self.app.removeEventFilter(ref)
+        daemon = FakeDaemon(True, extra=dict(self.NO_WINDOW))
+        bar = self.make(daemon)
+        self.assertEqual(bar.stack.currentIndex(), 0)
+        self.assertEqual((bar.view, bar.name.text(), bar.time.text()), ("nowindow", "No window", "12:34"))
+        self.assertIn(overlay.MUTED, bar.dot.styleSheet())
+        self.assertFalse(bar.hintbar.isHidden())
+        self.assertEqual(bar.hintbar.text(), overlay.NO_WINDOW_HINT)
+        self.assertEqual(overlay.NO_WINDOW_HINT, "Game closed · press play to pick a window")
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2 + overlay.HINT_H + 1)
+        self.assertEqual(bar.width(), rec_w)                         # same bar, same width
+        self.assertTrue(all(o.isEnabled() for o in bar.options))     # the footage is saveable
+        play = bar.controls[0]["pause"]
+        self.assertEqual((play.kind, play.accessibleName()), ("pick", "Pick a game window"))
+        self.assertTrue(play.isEnabled())
+        self.assertFalse(bar.live_ticking)
+        self.shot(bar, "no-window", "v5")
+        play.setFocus()
+        pump(self.app, 0.05)
+        self.shot(bar, "no-window-play-focus", "v5")
+        bar.resident = True
+        self.key(Qt.Key_P)                                           # play = pick a window
+        self.wait_for(lambda: daemon.controls == ["pick_window"])
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)       # the picker dialog gets the screen
+        self.assertNotIn("resume", daemon.controls)
+
+    def test_no_window_without_footage(self):
+        daemon = FakeDaemon(True, extra={**self.NO_WINDOW, "buffered": 0})
+        bar = self.make(daemon)
+        self.assertEqual(bar.view, "nowindow")
+        self.assertTrue(all(not o.isEnabled() for o in bar.options))
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())         # play is the next step
+        QTest.mouseClick(bar.controls[0]["pause"], Qt.LeftButton)
+        self.wait_for(lambda: daemon.controls == ["pick_window"])
+
+    def test_kwin_version_gate(self):
+        parse = overlay._parse_kwin_version
+        self.assertEqual(parse("Version\n=======\nKWin version: 6.6.0\nQt Version: 6.10.1\n"), (6, 6, 0))
+        self.assertEqual(parse("kwin 6.7.4\n"), (6, 7, 4))
+        self.assertEqual(parse("kwin_wayland 6.5.91"), (6, 5, 91))
+        self.assertEqual(parse("KWin version: 6.6"), (6, 6, 0))
+        self.assertIsNone(parse(""))
+        self.assertIsNone(parse("Qt Version: 6.10.1"))
+        can = overlay._kwin_can_exclude
+        self.assertTrue(can((6, 6, 0)) and can((6, 7, 4)) and can((7, 0, 0)))
+        self.assertFalse(can((6, 5, 91)) or can((5, 27, 11)) or can(None))
 
 
 class ResidentBar(unittest.TestCase):
