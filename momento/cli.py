@@ -25,7 +25,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", metavar="COMMAND")
     sub.add_parser("daemon", help="run the recorder in the foreground")
-    sub.add_parser("overlay", help="show (or hide) the save overlay")
+    ov = sub.add_parser("overlay", help="show (or hide) the save overlay")
+    ov.add_argument("--resident", action="store_true",
+                    help="keep a hidden bar loaded for instant opening (the daemon starts this itself)")
     presets = ", ".join(label for _, label in durations.PRESETS)
     s = sub.add_parser("save", help="save the last N of footage")
     s.add_argument("duration", type=_duration, help=f"e.g. {presets}, or 90s / 2m")
@@ -85,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "overlay":
         from . import overlay
 
+        if args.resident:
+            return overlay.main(["--resident"]) or 0
+        # A loaded bar (see [ui] keep_bar_loaded) toggles instantly; else start one.
+        if overlay.toggle():
+            return 0
         return overlay.main([]) or 0
 
     if args.command == "daemon":

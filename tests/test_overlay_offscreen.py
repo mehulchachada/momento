@@ -14,6 +14,7 @@ except ImportError:  # run as a script from tests/
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -25,11 +26,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PySide6.QtCore import QEvent, QPoint, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPixmap  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from momento import config, ipc, overlay, quality, settings  # noqa: E402
 
 SHOT_DIR = Path(os.environ.get("MOMENTO_SHOT_DIR", "/tmp/claude-1000"))
+REAL_REQUEST = ipc.request  # the resident bar's control socket is always reached for real
 
 STATUS = {"ok": True, "state": "recording", "recording": True, "buffered": 754.0,
           "max_seconds": 3600, "source": "portal", "encoder": "vah264enc",
@@ -830,5 +832,248 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.width(), off.width())
 
 
+class ResidentBar(unittest.TestCase):
+    """The resident bar: built once, hidden, driven over its control socket."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(["test"])
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._last = overlay.LAST_FILE
+        overlay.LAST_FILE = Path(cls._tmp.name) / "overlay.last"
+        cls.n = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        ipc.request = REAL_REQUEST
+        overlay.LAST_FILE = cls._last
+        cls._tmp.cleanup()
+
+    wait_for = OverlayOffscreen.wait_for
+    key = OverlayOffscreen.key
+
+    def make(self, daemon):
+        real = REAL_REQUEST
+
+        def route(msg, timeout=120, path=None, **kw):
+            if path is not None:           # the bar's control socket: the real thing
+                return real(msg, timeout=timeout, path=path)
+            return daemon.request(msg, timeout=timeout)
+        ipc.request = route
+        type(self).n += 1
+        # In the sandboxed runtime dir (tests/_sandbox.py), never the user's.
+        self.sock = config.RUNTIME_DIR / f"overlay-test-{self.n}.sock"
+        self.assertTrue(str(self.sock).startswith(os.environ["MOMENTO_TEST_SANDBOX"]))
+        bar, server = overlay.start_resident(self.app, False, path=self.sock)
+        self.addCleanup(bar.dismiss)
+        self.addCleanup(self.app.removeEventFilter, bar)
+        self.addCleanup(server.close)
+        pump(self.app, 0.05)
+        return bar
+
+    def send(self, cmd, timeout=3):
+        box = []
+        t = threading.Thread(target=lambda: box.append(overlay.send_resident(cmd, timeout=timeout,
+                                                                            path=self.sock)))
+        t.start()
+        while t.is_alive():
+            pump(self.app, 0.005)
+        pump(self.app, 0.03)                                  # window activation lands
+        return box[0]
+
+    def assert_fresh(self, bar):
+        """What a bar that was just launched looks like."""
+        self.assertTrue(bar.isVisible())
+        self.assertEqual((bar.mode, bar.stack.currentIndex()), ("clip", 0))
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
+        self.assertTrue(bar.panel.isHidden())
+        self.assertEqual(bar.rows, [])
+        self.assertFalse(bar.saving or bar.done or bar.control_busy or bar.loading_settings)
+        self.assertIsNone(bar.apply_state)
+        self.assertEqual(bar.line.text(), "")
+        self.assertTrue(bar.focus_visible)
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)
+        self.assertTrue(bar.idle.isActive() and bar.poll.isActive())
+        want = overlay._last_choice()
+        self.assertTrue(next(o for o in bar.options if o.seconds == want).hasFocus())
+
+    def test_toggle_show_hide(self):
+        bar = self.make(FakeDaemon(True))
+        self.assertTrue(bar.resident)
+        self.assertFalse(bar.isVisible())                     # built, not mapped
+        self.assertEqual(oct(os.stat(self.sock).st_mode & 0o777), "0o600")
+        self.assertEqual(bar.time.text(), "12:34")            # status cached at startup
+        r = self.send("toggle")
+        self.assertEqual((r["ok"], r["visible"]), (True, True))
+        self.assert_fresh(bar)
+        self.assertEqual(self.send("toggle")["visible"], False)
+        self.assertFalse(bar.isVisible())
+        self.assertTrue(self.send("show")["visible"])
+        self.assertTrue(self.send("show")["visible"])         # show on a shown bar keeps it
+        self.assertTrue(bar.isVisible())
+        self.assertFalse(self.send("hide")["visible"])
+        self.assertFalse(self.send("hide")["visible"])
+        self.assertEqual(self.send("ping")["visible"], False)
+        self.assertFalse(self.send("bogus")["ok"])
+
+    def test_show_latency(self):
+        bar = self.make(FakeDaemon(True))
+        painted = []
+
+        def spy(obj, ev, _orig=bar.eventFilter):
+            if obj is bar and ev.type() == QEvent.Paint and not painted:
+                painted.append(time.perf_counter())
+            return _orig(obj, ev)
+        bar.eventFilter = spy
+        t0 = time.perf_counter()
+        self.send("show")
+        self.wait_for(lambda: painted)
+        took = painted[0] - t0
+        sys.stderr.write(f"\n  resident bar: show -> first paint {took * 1000:.1f} ms\n")
+        self.assertLess(took, 0.25)
+
+    def test_state_reset_between_opens(self):
+        overlay.LAST_FILE.unlink(missing_ok=True)             # default length: 1m
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.send("show")
+        self.key(Qt.Key_S)                                    # settings open...
+        self.wait_for(lambda: bar.mode == "settings")
+        self.assertGreater(bar.height(), overlay.BAR_HEIGHT + 2)
+        self.send("hide")                                     # ...and the bar is hidden
+        self.assertEqual(bar.rows, [])                        # settings rows are let go
+        self.send("show")
+        self.assert_fresh(bar)                                # back on the clip lengths
+        bar.ask_stop()                                        # the stop question
+        self.assertEqual(bar.mode, "confirm")
+        self.send("toggle")
+        self.send("toggle")
+        self.assert_fresh(bar)
+        QTest.mouseClick(bar.gear, Qt.LeftButton)             # the mouse hides the focus ring
+        self.assertFalse(bar.focus_visible)
+        self.wait_for(lambda: bar.mode == "settings")
+        self.send("toggle")
+        self.send("toggle")
+        self.assert_fresh(bar)                                # opened by the hotkey: ring shown
+        self.key(Qt.Key_Right)
+        self.key(Qt.Key_Return)                               # save 3m
+        self.wait_for(lambda: bar.done)
+        self.assertIn("Saved", bar.line.text())
+        # "Saved" hides the bar (a one-shot bar quits here); the process stays
+        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.assertTrue(self.send("ping")["ok"])
+        self.assertEqual(overlay._last_choice(), 180)
+        self.send("show")
+        self.assert_fresh(bar)                                # no stale "Saved"
+        self.assertTrue(bar.options[3].hasFocus())            # the last choice
+
+    def test_stale_reply_is_dropped(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.send("show")
+        self.key(Qt.Key_1)                                    # save in flight (0.2 s)
+        self.assertTrue(bar.saving)
+        self.send("hide")
+        self.send("show")
+        pump(self.app, 0.5)
+        self.assertEqual(daemon.saves, [15])
+        self.assert_fresh(bar)                                # the old "Saved" never lands
+
+    def test_esc_and_idle_hide(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.send("show")
+        self.key(Qt.Key_Escape)
+        self.assertFalse(bar.isVisible())
+        self.assertTrue(self.send("ping")["ok"])              # hidden, not quit
+        self.send("show")
+        bar.on_idle()                                         # the idle timeout
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(bar.idle.isActive() or bar.poll.isActive())
+
+    def test_hidden_bar_holds_no_focus(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        self.send("show")
+        self.assertIs(self.app.activeWindow(), bar)
+        self.assertTrue(bar.isAncestorOf(self.app.focusWidget()))
+        self.send("hide")
+        pump(self.app, 0.05)
+        self.assertIsNone(self.app.activeWindow())
+        self.assertIsNone(self.app.focusWidget())
+        # keys that still reach it (they should not) do nothing
+        for k in (Qt.Key_P, Qt.Key_1, Qt.Key_S):
+            self.app.sendEvent(bar, QKeyEvent(QEvent.KeyPress, k, Qt.NoModifier))
+        pump(self.app, 0.2)
+        self.assertEqual((daemon.controls, daemon.saves, bar.mode), ([], [], "clip"))
+        self.assertFalse(bar.idle.isActive() or bar.poll.isActive())
+
+    def test_cached_status_first_then_fresh(self):
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.status_at -= 5                                    # hidden for 5 s while recording
+        daemon.extra = {"buffered": 900.0}
+        bar.present()                                         # what "show" runs, before any reply
+        self.assertTrue(bar.isVisible())
+        self.assertEqual(bar.time.text(), "12:39")            # cached, grown by 5 s: no IPC wait
+        self.wait_for(lambda: bar.time.text() == "15:00")     # then the daemon's own number
+
+    def test_repeated_open_does_not_leak(self):
+        bar = self.make(FakeDaemon(True))
+
+        def cycle():
+            self.send("show")
+            self.key(Qt.Key_S)
+            self.wait_for(lambda: bar.mode == "settings")
+            self.send("hide")
+            pump(self.app, 0.05)
+
+        cycle()
+        n = len(bar.findChildren(QWidget))
+        for _ in range(10):
+            cycle()
+        sys.stderr.write(f"\n  widgets after 1 open: {n}, after 11: {len(bar.findChildren(QWidget))}\n")
+        self.assertEqual(len(bar.findChildren(QWidget)), n)
+
+    def test_second_resident_refused(self):
+        bar = self.make(FakeDaemon(True))
+        with self.assertRaises(RuntimeError):
+            overlay.ControlServer(self.sock, lambda m: {"ok": True}).start()
+        self.assertTrue(self.send("ping")["ok"])              # the first one keeps its socket
+        self.assertFalse(bar.isVisible())
+
+    def test_fallback_without_resident(self):
+        from momento import cli
+
+        missing = config.RUNTIME_DIR / "no-such-overlay.sock"
+        orig_sock, orig_main, orig_pid = overlay.CONTROL_SOCKET, overlay.main, overlay.PIDFILE
+        self.addCleanup(setattr, overlay, "CONTROL_SOCKET", orig_sock)
+        self.addCleanup(setattr, overlay, "main", orig_main)
+        self.addCleanup(setattr, overlay, "PIDFILE", orig_pid)
+        overlay.PIDFILE = config.RUNTIME_DIR / "no-such-overlay.pid"
+        ipc.request = REAL_REQUEST
+        overlay.CONTROL_SOCKET = missing
+        self.assertIsNone(overlay.send_resident("toggle"))
+        self.assertFalse(overlay.toggle())
+        launched = []
+        overlay.main = lambda argv=None: launched.append(list(argv or [])) or 0
+        self.assertEqual(cli.main(["overlay"]), 0)
+        self.assertEqual(launched, [[]])                      # the one-shot bar, as before
+        self.assertEqual(cli.main(["overlay", "--resident"]), 0)
+        self.assertEqual(launched, [[], ["--resident"]])
+        # with a resident bar listening, `momento overlay` toggles it instead
+        bar = self.make(FakeDaemon(True))
+        overlay.CONTROL_SOCKET = self.sock
+        box = []
+        t = threading.Thread(target=lambda: box.append(cli.main(["overlay"])))
+        t.start()
+        while t.is_alive():
+            pump(self.app, 0.005)
+        self.assertEqual(box, [0])
+        self.assertEqual(launched, [[], ["--resident"]])
+        self.assertTrue(bar.isVisible())
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,7 +1,16 @@
 """The replay picker: a slim bar at the bottom of the screen.
 
-Launched by the hotkey (or ``momento overlay``). Running it while another
-bar is open closes the open one instead, so the same key toggles it.
+Two ways to run it:
+
+* resident (``momento overlay --resident``, started and supervised by the
+  daemon when ``[ui] keep_bar_loaded`` is on): the bar is built once and kept
+  hidden; a small control socket (``$XDG_RUNTIME_DIR/overlay.sock``, the
+  daemon's JSON-lines framing) takes ``toggle`` / ``show`` / ``hide`` /
+  ``quit``, so the hotkey shows it within a frame. Every show starts from the
+  same state a fresh bar would; closing hides it instead of quitting.
+* one-shot (``momento overlay`` with no resident bar listening): a new
+  process per open. Running it while another one-shot bar is open closes the
+  open one instead, so the same key toggles it.
 
 Besides the clip lengths the bar has three painted glyph buttons: settings
 (gear, key S), pause/resume (key P) and stop (asks inline first). Settings
@@ -20,22 +29,25 @@ from __future__ import annotations
 
 import ctypes
 import html
+import json
 import logging
 import math
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-from .config import RUNTIME_DIR
+from .config import OVERLAY_SOCKET, RUNTIME_DIR
 from .durations import PRESETS, label as dur_label
 
 log = logging.getLogger(__name__)
 
 PIDFILE = RUNTIME_DIR / "overlay.pid"
+CONTROL_SOCKET = OVERLAY_SOCKET   # the resident bar's control socket
 LAST_FILE = RUNTIME_DIR / "overlay.last"
 LAYER_SHELL_PLUGIN = "wayland-shell-integration/liblayer-shell.so"
 LAYER_SHELL_LIB = "libLayerShellQtInterface.so.6"
@@ -196,6 +208,30 @@ def _remove_pidfile():
         pass
 
 
+def send_resident(cmd: str, timeout: float = 2.0, path=None) -> dict | None:
+    """Send ``cmd`` to the resident bar; None when no resident bar answers."""
+    from . import ipc
+
+    try:
+        return ipc.request({"cmd": cmd}, timeout=timeout, path=path or CONTROL_SOCKET)
+    except ipc.DaemonNotRunning:
+        return None
+    except (ipc.IPCError, OSError, ValueError) as e:
+        log.warning("the resident clip bar did not answer: %s", e)
+        return None
+
+
+def toggle() -> bool:
+    """Close an open one-shot bar, or toggle the resident one.
+
+    False when neither exists: the caller then starts a one-shot bar.
+    """
+    if _toggle_existing():
+        return True
+    r = send_resident("toggle")
+    return bool(r and r.get("ok"))
+
+
 def _last_choice() -> int:
     try:
         secs = int(LAST_FILE.read_text().strip())
@@ -256,6 +292,46 @@ def _layer_shell_available() -> bool:
     return True
 
 
+KEYBOARD_SYM = "_ZN12LayerShellQt6Window24setKeyboardInteractivityENS0_21KeyboardInteractivityE"
+
+
+def _layer_window(widget):
+    """(library, LayerShellQt::Window*) for ``widget``'s QWindow, or None."""
+    import shiboken6
+
+    lib = ctypes.CDLL(LAYER_SHELL_LIB)
+    handle = widget.windowHandle()
+    if handle is None:
+        return None
+    # QWindow inherits QObject and QSurface -> one pointer per base; QObject first.
+    qwindow_ptr = shiboken6.getCppPointer(handle)[0]
+    get = lib._ZN12LayerShellQt6Window3getEP7QWindow
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_void_p]
+    lsw = get(ctypes.c_void_p(qwindow_ptr))
+    return (lib, lsw) if lsw else None
+
+
+def _set_keyboard_interactivity(widget, exclusive: bool) -> None:
+    """Exclusive while the resident bar is shown, None while it is hidden.
+
+    Hiding the QWindow already destroys the layer surface (so a hidden bar
+    cannot hold the keyboard); this keeps the stored setting in step anyway,
+    for compositors / LayerShellQt versions that only unmap it.
+    """
+    try:
+        found = _layer_window(widget)
+        if found is None:
+            return
+        lib, lsw = found
+        fn = getattr(lib, KEYBOARD_SYM)
+        fn.restype = None
+        fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        fn(ctypes.c_void_p(lsw), 1 if exclusive else 0)
+    except Exception as e:  # noqa: BLE001
+        log.debug("keyboard interactivity not changed: %s", e)
+
+
 def _apply_layer_shell(widget) -> bool:
     """Make ``widget``'s window a bottom-anchored Overlay-layer surface.
 
@@ -265,19 +341,10 @@ def _apply_layer_shell(widget) -> bool:
     """
     import shiboken6
 
-    lib = ctypes.CDLL(LAYER_SHELL_LIB)
-    handle = widget.windowHandle()
-    if handle is None:
+    found = _layer_window(widget)
+    if found is None:
         return False
-    # QWindow inherits QObject and QSurface -> one pointer per base; QObject first.
-    qwindow_ptr = shiboken6.getCppPointer(handle)[0]
-
-    get = lib._ZN12LayerShellQt6Window3getEP7QWindow
-    get.restype = ctypes.c_void_p
-    get.argtypes = [ctypes.c_void_p]
-    lsw = get(ctypes.c_void_p(qwindow_ptr))
-    if not lsw:
-        return False
+    lib, lsw = found
     this = ctypes.c_void_p(lsw)
 
     def call(sym, value, argtype=ctypes.c_int):
@@ -288,7 +355,7 @@ def _apply_layer_shell(widget) -> bool:
 
     call("_ZN12LayerShellQt6Window8setLayerENS0_5LayerE", 3)                        # Overlay
     call("_ZN12LayerShellQt6Window10setAnchorsE6QFlagsINS0_6AnchorEE", 2)           # Bottom only
-    call("_ZN12LayerShellQt6Window24setKeyboardInteractivityENS0_21KeyboardInteractivityE", 1)  # Exclusive
+    call(KEYBOARD_SYM, 1)                                                           # Exclusive
     try:
         # setMargins(const QMargins&); QMargins is {int left, top, right, bottom}.
         margins = (ctypes.c_int * 4)(0, 0, 0, BOTTOM_MARGIN)
@@ -420,19 +487,21 @@ GLYPH_GAP = 10
 def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QRectF, Qt, QTimer,
                                 QVariantAnimation, Signal)
-    from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+    from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPen
     from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                                    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
     from . import config, ipc, quality, settings
 
     class Bridge(QObject):
-        status = Signal(object)
-        saved = Signal(object)
-        settings = Signal(object)
-        configured = Signal(object)
-        control = Signal(str, object)
-        started = Signal(object)
+        # Every result carries the open it belongs to (Bar.gen): a resident bar
+        # drops replies that arrive after it was hidden and shown again.
+        status = Signal(int, object)
+        saved = Signal(int, object)
+        settings = Signal(int, object)
+        configured = Signal(int, object)
+        control = Signal(int, str, object)
+        started = Signal(int, object)
 
     def fetch_status(timeout=2.0):
         try:
@@ -935,13 +1004,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.sdata = None
             self.rows = []
             self.layered = False
+            self.resident = False     # kept loaded: hide instead of quitting
+            self.gen = 0              # bumped on every show / hide of a resident bar
+            self.status_at = 0.0      # when last_status was current (monotonic)
             self.bridge = Bridge()
-            self.bridge.status.connect(self.on_status)
-            self.bridge.saved.connect(self.on_saved)
-            self.bridge.settings.connect(self.on_settings)
-            self.bridge.configured.connect(self.on_configured)
-            self.bridge.control.connect(self.on_control)
-            self.bridge.started.connect(self.on_started)
+            self.bridge.status.connect(self._sig_status)
+            self.bridge.saved.connect(self._sig_saved)
+            self.bridge.settings.connect(self._sig_settings)
+            self.bridge.configured.connect(self._sig_configured)
+            self.bridge.control.connect(self._sig_control)
+            self.bridge.started.connect(self._sig_started)
             QApplication.instance().focusChanged.connect(self.on_focus_changed)
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setAutoFillBackground(False)
@@ -1109,6 +1181,36 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.poll.setInterval(1000)
             self.poll.timeout.connect(self.refresh_async)
 
+        # Results from worker threads, dropped when they belong to an earlier open.
+        def _sig_status(self, gen, st):
+            if gen == self.gen:
+                self.on_status(st)
+
+        def _sig_saved(self, gen, r):
+            if gen == self.gen:
+                self.on_saved(r)
+
+        def _sig_settings(self, gen, data):
+            if gen == self.gen:
+                self.on_settings(data)
+
+        def _sig_configured(self, gen, r):
+            if gen == self.gen:
+                self.on_configured(r)
+
+        def _sig_control(self, gen, cmd, r):
+            if gen == self.gen:
+                self.on_control(cmd, r)
+
+        def _sig_started(self, gen, st):
+            if gen == self.gen:
+                self.on_started(st)
+
+        def after(self, ms, fn):
+            """Run ``fn`` in ``ms`` unless the bar was hidden or reopened meanwhile."""
+            gen = self.gen
+            QTimer.singleShot(ms, lambda: fn() if gen == self.gen else None)
+
         def _controls(self, lay):
             gear, pause, stop = IconButton("gear"), IconButton("pause"), IconButton("stop")
             gear.clicked.connect(self.open_settings)
@@ -1224,9 +1326,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.status_inflight or self.saving or self.done:
                 return
             self.status_inflight = True
+            gen = self.gen
 
             def work():
-                self.bridge.status.emit(fetch_status())
+                self.bridge.status.emit(gen, fetch_status())
             threading.Thread(target=work, daemon=True).start()
 
         def on_status(self, st):
@@ -1235,6 +1338,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def apply_status(self, st):
             self.last_status = st
+            self.status_at = time.monotonic()
             if self.saving or self.done or self.mode != "clip" or self.control_busy:
                 return
             if self.stopping:
@@ -1328,13 +1432,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.show_line(f"Saving last {dur_label(shown)}…")
             self.relayout()
             secs = opt.seconds
+            gen = self.gen
 
             def work():
                 try:
                     r = ipc.request({"cmd": "save", "seconds": secs}, timeout=120)
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
-                self.bridge.saved.emit(r)
+                self.bridge.saved.emit(gen, r)
             threading.Thread(target=work, daemon=True).start()
 
         def on_saved(self, r):
@@ -1350,7 +1455,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             else:
                 err = fm.elidedText(str(r.get("error") or "Save failed"), Qt.ElideRight, room)
                 self.show_line(f"<span style='color:{RED}'>{_esc(err)}</span>")
-            QTimer.singleShot(RESULT_CLOSE_MS, QApplication.instance().quit)
+            self.after(RESULT_CLOSE_MS, self.close_bar)
 
         # ---------------- pause / resume / stop / start
         def show_storage_warning(self, text=None):
@@ -1371,13 +1476,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             cmd = "resume" if self.paused or self.stopped else "pause"
             self.control_busy = True
+            gen = self.gen
 
             def work():
                 try:
                     r = ipc.request({"cmd": cmd}, timeout=30)
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
-                self.bridge.control.emit(cmd, r)
+                self.bridge.control.emit(gen, cmd, r)
             threading.Thread(target=work, daemon=True).start()
 
         def ask_stop(self):
@@ -1403,6 +1509,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.warn = None
             self.show_line("Stopping…")
             self.relayout()
+            gen = self.gen
 
             def work():
                 # Stop ends recording and clears the history; the service stays up so the
@@ -1417,7 +1524,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     cmd, r = "quit", {"ok": True}
                 except Exception as e:  # noqa: BLE001
                     r = {"ok": False, "error": str(e) or e.__class__.__name__}
-                self.bridge.control.emit(cmd, r)
+                self.bridge.control.emit(gen, cmd, r)
             threading.Thread(target=work, daemon=True).start()
 
         def on_control(self, cmd, r):
@@ -1457,12 +1564,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.set_time("0:00", MUTED)
             self.relayout()
             self.setFocus(Qt.OtherFocusReason)
+            gen = self.gen
 
             def work():
                 try:
                     start_daemon()
                 except Exception as e:  # noqa: BLE001
-                    self.bridge.started.emit({"ok": False, "not_running": False,
+                    self.bridge.started.emit(gen, {"ok": False, "not_running": False,
                                               "error": f"cannot start Momento: {e}"})
                     return
                 deadline = time.monotonic() + START_TIMEOUT_S
@@ -1476,7 +1584,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if not st or not st.get("ok"):
                     st = {"ok": False, "not_running": False,
                           "error": "Momento did not start — see: journalctl --user -u momento"}
-                self.bridge.started.emit(st)
+                self.bridge.started.emit(gen, st)
             threading.Thread(target=work, daemon=True).start()
 
         def on_started(self, st):
@@ -1501,9 +1609,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode != "clip" or self.saving or self.done or self.loading_settings or self.control_busy:
                 return
             self.loading_settings = True
+            gen = self.gen
 
             def work():
-                self.bridge.settings.emit(fetch_settings())
+                self.bridge.settings.emit(gen, fetch_settings())
             threading.Thread(target=work, daemon=True).start()
 
         def on_settings(self, data):
@@ -1524,12 +1633,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.idle.setInterval(SETTINGS_IDLE_MS)
             self.idle.start()
 
-        def build_rows(self):
+        def clear_rows(self):
+            """Delete the settings rows (rebuilt on every open of the settings)."""
+            self.rows = []
             old = self.panel_lay.takeAt(0)
             while old is not None:
                 if old.widget() is not None:
+                    old.widget().hide()
                     old.widget().deleteLater()
                 old = self.panel_lay.takeAt(0)
+
+        def build_rows(self):
+            self.clear_rows()
             data = self.sdata
             vals = data["values"]
             dev = data.get("devices") or {}
@@ -1687,6 +1802,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.idle.stop()
             self.foot.setText("Applying…")
             online, path = bool(self.sdata.get("online")), self.sdata.get("config")
+            gen = self.gen
 
             def local():
                 try:
@@ -1706,7 +1822,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                         r = {"ok": False, "error": str(e) or e.__class__.__name__}
                 else:
                     r = local()
-                self.bridge.configured.emit(r)
+                self.bridge.configured.emit(gen, r)
             threading.Thread(target=work, daemon=True).start()
 
         def on_configured(self, r):
@@ -1729,7 +1845,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.foot.setText(f"<span style='color:{RED}'>{_esc(msg)}</span>")
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "no_storage",
                                     "recording": False, "error": r.get("warning")}
-                QTimer.singleShot(RESULT_CLOSE_MS, self.after_apply)
+                self.after(RESULT_CLOSE_MS, self.after_apply)
                 return
             if not r.get("online"):
                 tail = "takes effect when Momento starts"
@@ -1742,7 +1858,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
                                     "recording": False}
-            QTimer.singleShot(RESULT_CLOSE_MS, self.after_apply)
+            self.after(RESULT_CLOSE_MS, self.after_apply)
 
         def after_apply(self):
             if self.mode == "settings" and self.apply_state == "done":
@@ -1811,7 +1927,109 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def request_close(self):
             if self.saving:
                 return  # let the save finish so the result is visible
-            QApplication.instance().quit()
+            self.close_bar()
+
+        def close_bar(self):
+            """Esc, the idle timeout, after "Saved": hide a resident bar, quit a one-shot one."""
+            if self.resident:
+                self.dismiss()
+            else:
+                QApplication.instance().quit()
+
+        # ---------------- resident: show / hide
+        def cached_status(self):
+            """The last status, with the buffer grown by the time since, if it was recording.
+
+            A resident bar paints this at once; the real status follows a moment later.
+            """
+            st = self.last_status
+            if not st:
+                return {"ok": False, "not_running": True}
+            if st.get("ok") and st.get("recording") and self.status_at:
+                grown = max(0.0, time.monotonic() - self.status_at)
+                cap = float(st.get("max_seconds") or 3600)
+                st = {**st, "buffered": min(cap, float(st.get("buffered") or 0.0) + grown)}
+            return st
+
+        def reset(self):
+            """Put the bar back in the state a freshly started one opens in."""
+            self.gen += 1                       # replies to the previous open are dropped
+            self.idle.stop()
+            self.poll.stop()
+            self.saving = self.done = False
+            self.control_busy = self.stopping = self.loading_settings = False
+            self.status_inflight = False
+            self.apply_state = None
+            self.mode = "clip"
+            self.sdata = None
+            self.clear_rows()
+            self.online = None
+            self.running = self.paused = self.stopped = False
+            self.buffered = 0.0
+            self.warn = None
+            self.line.setText("")
+            self.storage_hint.set_storage(None)
+            for o in self.options:
+                o.set_long(False)
+            self.stack.setCurrentIndex(0)
+            self.set_view("off", False)
+            self.set_time("0:00")
+            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.focus_visible = True           # opened by the hotkey: keyboard / controller first
+            self.apply_status(self.cached_status())
+            self.relayout()
+            for b in self.pills():
+                b.hovered = False
+                b.sync(animate=False)
+
+        def place(self):
+            """Bottom centre of the primary screen (the plain-window fallback only)."""
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                g = screen.availableGeometry()  # stays clear of a bottom taskbar
+                self.move(g.x() + (g.width() - self.width()) // 2,
+                          g.y() + g.height() - self.height() - BOTTOM_MARGIN)
+
+        def present(self):
+            """Show the resident bar, starting over as a fresh bar would."""
+            if self.isVisible():
+                self.raise_()
+                self.activateWindow()
+                return
+            self.reset()
+            if self.layered:
+                _set_keyboard_interactivity(self, True)
+            else:
+                self.place()
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            handle = self.windowHandle()
+            if (QApplication.activeWindow() is not self and handle is not None
+                    and QGuiApplication.focusWindow() is handle):
+                # Qt still counts the window as focused from before it was hidden, so
+                # showing it again activates nothing (seen with the offscreen platform;
+                # a compositor sends a keyboard leave when the surface goes away).
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    QApplication.setActiveWindow(self)
+            self.focus_default()
+            self.idle.start()
+            self.poll.start()
+            self.refresh_async()                # the cached status painted first; this corrects it
+
+        def dismiss(self):
+            """Hide the resident bar. It lets go of the keyboard and stops polling."""
+            self.gen += 1
+            self.idle.stop()
+            self.poll.stop()
+            if self.isVisible():
+                self.hide()
+            if self.layered:
+                _set_keyboard_interactivity(self, False)
+            self.clear_rows()                   # rebuilt on the next open of the settings
 
         def focusables(self):
             page = self.stack.currentIndex()
@@ -1887,7 +2105,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def eventFilter(self, obj, ev):
             t = ev.type()
-            if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.TouchBegin):
+            if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
                 if not self.saving and not self.done:
                     self.idle.start()  # restart the idle auto-close
             if t in (QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
@@ -1900,18 +2118,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     return Bar, fetch_status
 
 
-def main(argv=None) -> int:
-    argv = list(argv or [])
-    logging.basicConfig(level=logging.INFO, format="momento overlay: %(message)s")
-
-    if _toggle_existing():
-        return 0
-
+def _init_app(argv):
+    """QApplication for the bar (layer-shell picked before it exists)."""
     use_layer_shell = _layer_shell_available()
     if use_layer_shell:
         os.environ["QT_WAYLAND_SHELL_INTEGRATION"] = "layer-shell"
 
-    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
 
     # Our own palette and stylesheet draw everything. Use Qt's neutral Fusion
@@ -1919,24 +2131,20 @@ def main(argv=None) -> int:
     # shell integration for *all* windows, Breeze's tooltip/animation handling
     # crashed the bar (null call in Breeze::Style::eventFilter on a timer).
     os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
-    app = QApplication.instance() or QApplication(["momento-overlay"] + argv)
+    app = QApplication.instance() or QApplication(["momento-overlay"] + list(argv))
     app.setStyle("Fusion")
     app.setApplicationName("Momento")
     app.setDesktopFileName("io.github.mehulchachada.Momento")
+    return app, use_layer_shell
 
-    _write_pidfile()
-    try:
-        signal.signal(signal.SIGTERM, lambda *_: app.quit())
-        signal.signal(signal.SIGINT, lambda *_: app.quit())
-    except ValueError:
-        pass  # not the main thread
-    # Let the Python interpreter run signal handlers while Qt's loop spins.
-    tick = QTimer()
-    tick.timeout.connect(lambda: None)
-    tick.start(200)
 
-    Bar, fetch_status = _build(argv)
+def _create_bar(app, use_layer_shell: bool, resident: bool = False):
+    """Build the bar (not shown yet) and turn it into a layer surface or a plain topmost window."""
+    from PySide6.QtCore import Qt
+
+    Bar, fetch_status = _build()
     bar = Bar()
+    bar.resident = resident
     bar.layered = use_layer_shell
     app.installEventFilter(bar)
     bar.apply_status(fetch_status(timeout=1.0))
@@ -1951,10 +2159,38 @@ def main(argv=None) -> int:
     if not layered:
         bar.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         bar.setAttribute(Qt.WA_TranslucentBackground)
-        screen = app.primaryScreen()
-        if screen is not None:
-            g = screen.availableGeometry()  # stays clear of a bottom taskbar
-            bar.move(g.x() + (g.width() - bar.width()) // 2, g.y() + g.height() - bar.height() - BOTTOM_MARGIN)
+    bar.layered = layered
+    return bar
+
+
+def main(argv=None) -> int:
+    argv = list(argv or [])
+    logging.basicConfig(level=logging.INFO, format="momento overlay: %(message)s")
+    if "--resident" in argv:
+        return run_resident([a for a in argv if a != "--resident"])
+
+    if _toggle_existing():
+        return 0
+
+    from PySide6.QtCore import QTimer
+
+    app, use_layer_shell = _init_app(argv)
+
+    _write_pidfile()
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: app.quit())
+        signal.signal(signal.SIGINT, lambda *_: app.quit())
+    except ValueError:
+        pass  # not the main thread
+    # Let the Python interpreter run signal handlers while Qt's loop spins.
+    tick = QTimer()
+    tick.timeout.connect(lambda: None)
+    tick.start(200)
+
+    bar = _create_bar(app, use_layer_shell)
+    layered = bar.layered
+    if not layered:
+        bar.place()
     bar.show()
     bar.activateWindow()
     bar.raise_()
@@ -1969,13 +2205,236 @@ def main(argv=None) -> int:
         except ValueError:
             pass
 
-    bar.layered = layered
     main.window = bar  # for tests / debugging
     main.layered = layered
     try:
         return app.exec()
     finally:
         _remove_pidfile()
+
+
+# --------------------------------------------------------------------------
+# resident bar
+# --------------------------------------------------------------------------
+
+class ControlServer:
+    """The resident bar's control socket, run on Qt's event loop.
+
+    Same framing as the daemon's socket (one JSON object per line, one reply
+    per line), so ``ipc.request(..., path=CONTROL_SOCKET)`` talks to it.
+    ``handler(msg) -> dict`` runs on the GUI thread.
+    """
+
+    MAX_LINE = 1 << 16
+
+    def __init__(self, path, handler):
+        self.path = str(path)
+        self.handler = handler
+        self._sock = None
+        self._inode = None
+        self._notifier = None
+        self._holder = None
+        self._conns = {}  # socket -> [notifier, buffered bytes]
+
+    def start(self) -> None:
+        from PySide6.QtCore import QObject, QSocketNotifier
+
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.path.exists(self.path):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(self.path)
+            except OSError:
+                os.unlink(self.path)  # stale, from a bar that crashed
+            else:
+                raise RuntimeError(f"another clip bar is already listening on {self.path}")
+            finally:
+                probe.close()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        old = os.umask(0o177)
+        try:
+            sock.bind(self.path)
+        finally:
+            os.umask(old)
+        os.chmod(self.path, 0o600)
+        self._inode = os.stat(self.path).st_ino
+        sock.listen(8)
+        sock.setblocking(False)
+        self._sock = sock
+        # Notifiers get a C++ parent so they can be deleted from inside their own slot.
+        self._holder = QObject()
+        self._notifier = QSocketNotifier(sock.fileno(), QSocketNotifier.Read, self._holder)
+        self._notifier.activated.connect(self._accept)
+
+    def _accept(self, *_):
+        from PySide6.QtCore import QSocketNotifier
+
+        while self._sock is not None:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:  # BlockingIOError: nothing left to accept
+                return
+            conn.setblocking(False)
+            n = QSocketNotifier(conn.fileno(), QSocketNotifier.Read, self._holder)
+            n.activated.connect(lambda *_, c=conn: self._read(c))
+            self._conns[conn] = [n, b""]
+
+    def _read(self, conn) -> None:
+        entry = self._conns.get(conn)
+        if entry is None:
+            return
+        try:
+            data = conn.recv(4096)
+        except BlockingIOError:
+            return
+        except OSError:
+            data = b""
+        if not data:
+            self._drop(conn)
+            return
+        buf = entry[1] + data
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                msg = json.loads(line)
+                if not isinstance(msg, dict):
+                    raise ValueError("request must be a JSON object")
+            except ValueError as e:
+                reply = {"ok": False, "error": f"bad request: {e}"}
+            else:
+                try:
+                    reply = self.handler(msg)
+                except Exception as e:  # noqa: BLE001
+                    log.exception("control request failed")
+                    reply = {"ok": False, "error": str(e) or e.__class__.__name__}
+            try:
+                conn.settimeout(1.0)
+                conn.sendall(json.dumps(reply).encode() + b"\n")
+                conn.setblocking(False)
+            except OSError:
+                self._drop(conn)
+                return
+        if len(buf) > self.MAX_LINE:
+            self._drop(conn)
+            return
+        entry[1] = buf
+
+    def _drop(self, conn) -> None:
+        entry = self._conns.pop(conn, None)
+        if entry is not None:
+            entry[0].setEnabled(False)
+            entry[0].deleteLater()
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        for conn in list(self._conns):
+            self._drop(conn)
+        if self._notifier is not None:
+            self._notifier.setEnabled(False)
+            self._notifier = None
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+        # Only remove the socket file if it is still the one we bound.
+        try:
+            if self._inode is not None and os.stat(self.path).st_ino == self._inode:
+                os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        self._inode = None
+
+
+def start_resident(app, use_layer_shell: bool = False, path=None):
+    """Build the hidden bar and start listening for toggle / show / hide / quit.
+
+    Returns (bar, server). The caller runs the event loop and closes the server.
+    """
+    bar = _create_bar(app, use_layer_shell, resident=True)
+    bar.grab()  # paint once offscreen: polish, fonts and glyph caches are warm for the first show
+
+    def handle(msg: dict) -> dict:
+        cmd = msg.get("cmd")
+        if cmd == "toggle":
+            if bar.isVisible():
+                bar.dismiss()
+            else:
+                bar.present()
+        elif cmd == "show":
+            bar.present()
+        elif cmd == "hide":
+            bar.dismiss()
+        elif cmd == "quit":
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, app.quit)
+        elif cmd not in ("ping", "status"):
+            return {"ok": False, "error": f"unknown command {cmd!r}"}
+        return {"ok": True, "visible": bar.isVisible(), "pid": os.getpid()}
+
+    server = ControlServer(path or CONTROL_SOCKET, handle)
+    server.start()
+    return bar, server
+
+
+def _wake_on_signals(app):
+    """Run Python signal handlers promptly without a polling timer (the bar idles for hours)."""
+    from PySide6.QtCore import QSocketNotifier
+
+    rsock, wsock = socket.socketpair()
+    rsock.setblocking(False)
+    wsock.setblocking(False)
+    signal.set_wakeup_fd(wsock.fileno())
+
+    def drain(*_):
+        try:
+            while rsock.recv(64):
+                pass
+        except OSError:
+            pass
+    notifier = QSocketNotifier(rsock.fileno(), QSocketNotifier.Read, app)
+    notifier.activated.connect(drain)
+    return rsock, wsock, notifier  # keep alive
+
+
+def _exit_with_parent() -> None:
+    """Get SIGTERM when the process that started us (the daemon) dies, even by SIGKILL.
+
+    Under systemd the service's cgroup is cleaned up anyway; this covers a daemon
+    run by hand. Linux only; elsewhere the bar simply outlives it.
+    """
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+def run_resident(argv=None) -> int:
+    """``momento overlay --resident``: the hidden bar the daemon keeps loaded."""
+    if send_resident("ping", timeout=1.0) is not None:
+        log.info("a resident clip bar is already running")
+        return 0
+    _exit_with_parent()
+    app, use_layer_shell = _init_app(argv or [])
+    app.setQuitOnLastWindowClosed(False)  # hiding the bar must not end the process
+    try:
+        bar, server = start_resident(app, use_layer_shell)
+    except (OSError, RuntimeError) as e:
+        log.error("cannot start the resident clip bar: %s", e)
+        return 1
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    keep = _wake_on_signals(app)  # noqa: F841
+    main.window = bar
+    main.layered = bar.layered
+    log.info("clip bar loaded (%s)", "layer-shell" if bar.layered else "window")
+    try:
+        return app.exec()
+    finally:
+        server.close()
 
 
 if __name__ == "__main__":

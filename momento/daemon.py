@@ -17,6 +17,11 @@ from . import config, durations, quality, settings, storage
 log = logging.getLogger(__name__)
 
 STORAGE_CHECK_SECONDS = 30
+# The resident clip bar is restarted after 1, 2, 4 ... 60 s; a bar that ran this
+# long before exiting counts as healthy and starts the backoff over.
+BAR_BACKOFF_MIN = 1.0
+BAR_BACKOFF_MAX = 60.0
+BAR_STABLE_SECONDS = 30.0
 
 
 def notify(bus, summary: str, body: str = "", icon: str = config.APP_ID) -> None:
@@ -54,6 +59,16 @@ def spawn_overlay() -> None:
         log.error("cannot launch overlay: %s", e)
 
 
+def _popen_bar():
+    """The resident clip bar: built once, hidden, shown by the hotkey (see overlay.py)."""
+    return subprocess.Popen(
+        [sys.executable, "-m", "momento", "overlay", "--resident"],
+        # stderr stays attached so the bar's messages land in the daemon's journal.
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        start_new_session=True, close_fds=True,
+    )
+
+
 class Daemon:
     def __init__(self, cfg: dict, loop, bus=None):
         from .ringbuffer import RingBuffer
@@ -78,6 +93,12 @@ class Daemon:
         self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
         self._storage_notified = False
         self._storage_timer = 0
+        # Resident clip bar ([ui] keep_bar_loaded).
+        self.bar_proc = None
+        self._bar_started = 0.0
+        self._bar_backoff = BAR_BACKOFF_MIN
+        self._bar_timer = 0
+        self._bar_managed = False  # set by start(): only a started daemon runs the bar
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -106,11 +127,13 @@ class Daemon:
 
                 self.shortcut = GlobalShortcut(
                     self.bus, config.APP_ID, "save-replay", "Open Momento",
-                    self.cfg["hotkey"].get("trigger", "LOGO+SHIFT+g"), spawn_overlay,
+                    self.cfg["hotkey"].get("trigger", "LOGO+SHIFT+g"), self.open_bar,
                 )
                 self.shortcut.start()
             except Exception as e:  # noqa: BLE001
                 log.warning("global shortcut unavailable: %s", e)
+        self._bar_managed = True
+        self.start_bar()
 
     def stop(self, clear_buffer: bool = False) -> None:
         """Shut down. The buffer is kept (SIGTERM, service restart, reboot) unless
@@ -134,6 +157,7 @@ class Daemon:
                 self.shortcut.close()
             except Exception:  # noqa: BLE001
                 pass
+        self.stop_bar()
         if self.server is not None:
             self.server.close()
         if clear_buffer:
@@ -141,6 +165,104 @@ class Daemon:
             _clean_dir(self.buffer_dir)
         if self.loop is not None:
             self.loop.quit()
+
+    # --- the clip bar ---------------------------------------------------------------
+
+    def keep_bar_loaded(self) -> bool:
+        return bool(self.cfg.get("ui", {}).get("keep_bar_loaded", True))
+
+    def open_bar(self) -> None:
+        """Hotkey: toggle the resident bar; without one, start a one-shot bar as before.
+
+        The toggle runs off the main loop so a slow or hung bar never stalls the recorder.
+        """
+        if not self.keep_bar_loaded():
+            spawn_overlay()
+            return
+        threading.Thread(target=self._toggle_bar, name="bar-toggle", daemon=True).start()
+
+    def _toggle_bar(self) -> None:
+        from . import overlay
+
+        try:
+            if overlay.toggle():
+                return
+        except Exception:  # noqa: BLE001
+            log.exception("cannot reach the clip bar")
+        log.info("resident clip bar not reachable; starting a one-shot bar")
+        spawn_overlay()
+
+    def start_bar(self) -> None:
+        """Start the resident bar once; _bar_exited restarts it if it dies."""
+        if (not self._bar_managed or self._stopping or not self.keep_bar_loaded()
+                or self.bar_proc is not None):
+            return
+        try:
+            proc = _popen_bar()
+        except OSError as e:
+            log.error("cannot start the clip bar: %s", e)
+            self._schedule_bar_restart()
+            return
+        self.bar_proc = proc
+        self._bar_started = time.monotonic()
+        threading.Thread(target=self._wait_bar, args=(proc,), name="bar-wait", daemon=True).start()
+
+    def _wait_bar(self, proc) -> None:
+        code = proc.wait()
+        from gi.repository import GLib
+
+        GLib.idle_add(self._bar_exited, proc, code)
+
+    def _bar_exited(self, proc, code) -> bool:
+        if proc is not self.bar_proc:
+            return False  # a bar we stopped on purpose
+        self.bar_proc = None
+        if self._stopping or not self.keep_bar_loaded():
+            return False
+        if time.monotonic() - self._bar_started >= BAR_STABLE_SECONDS:
+            self._bar_backoff = BAR_BACKOFF_MIN
+        log.warning("clip bar exited (code %s); restarting it in %gs", code, self._bar_backoff)
+        self._schedule_bar_restart()
+        return False
+
+    def _schedule_bar_restart(self) -> None:
+        from gi.repository import GLib
+
+        if self._bar_timer or self._stopping:
+            return
+        delay = self._bar_backoff
+        self._bar_backoff = min(BAR_BACKOFF_MAX, delay * 2)
+        self._bar_timer = GLib.timeout_add(int(delay * 1000), self._restart_bar)
+
+    def _restart_bar(self) -> bool:
+        self._bar_timer = 0
+        self.start_bar()
+        return False
+
+    def stop_bar(self) -> None:
+        if self._bar_timer:
+            from gi.repository import GLib
+
+            GLib.source_remove(self._bar_timer)
+            self._bar_timer = 0
+        proc, self.bar_proc = self.bar_proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def _sync_bar(self) -> None:
+        """After a reload: start or stop the resident bar to match [ui] keep_bar_loaded."""
+        if not self._bar_managed:
+            return
+        if self.keep_bar_loaded():
+            self._bar_backoff = BAR_BACKOFF_MIN
+            self.start_bar()
+        else:
+            self.stop_bar()
 
     def _on_state(self, state: str, detail: str | None) -> None:
         log.info("recorder state: %s%s", state, f" ({detail})" if detail else "")
@@ -262,6 +384,7 @@ class Daemon:
         if self.recorder is not None:
             self.recorder.stop()
         self.cfg = cfg
+        self._sync_bar()
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
         started = False
         if not self.paused:

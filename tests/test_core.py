@@ -1236,5 +1236,166 @@ class DaemonBufferTest(unittest.TestCase):
         self.assertFalse(buf.exists())
 
 
+class FakeBarProc:
+    """Stands in for the resident bar's Popen: wait() blocks until exit()."""
+
+    def __init__(self):
+        self._done = threading.Event()
+        self.returncode = None
+        self.terminated = 0
+
+    def exit(self, code=1):
+        self.returncode = code
+        self._done.set()
+
+    def wait(self, timeout=None):
+        if not self._done.wait(timeout):
+            raise subprocess.TimeoutExpired("bar", timeout)
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated += 1
+        self.exit(-15)
+
+    def kill(self):
+        self.exit(-9)
+
+
+@unittest.skipUnless(_gi_available(), "PyGObject not available")
+class DaemonBarTest(unittest.TestCase):
+    """The daemon keeps the clip bar loaded, restarts it with backoff, and falls back."""
+
+    setUp_control = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def setUp(self):
+        from unittest import mock
+
+        from gi.repository import GLib
+
+        from momento import daemon
+
+        self.setUp_control()
+        self.procs = []
+        self.timers = []   # (ms, fn) restarts scheduled on the main loop
+        self.spawned = []  # one-shot bars
+
+        def popen():
+            self.procs.append(FakeBarProc())
+            return self.procs[-1]
+        for target, attr, new in ((daemon, "_popen_bar", popen),
+                                  (daemon, "spawn_overlay", lambda: self.spawned.append(1)),
+                                  (GLib, "idle_add", lambda fn, *a: fn(*a)),
+                                  (GLib, "timeout_add", lambda ms, fn: self.timers.append((ms, fn)) or len(self.timers)),
+                                  (GLib, "source_remove", lambda tag: None)):
+            p = mock.patch.object(target, attr, new)
+            p.start()
+            self.addCleanup(p.stop)
+        self.d._bar_managed = True  # what Daemon.start() sets
+
+    def wait_until(self, cond, timeout=3):
+        deadline = time.monotonic() + timeout
+        while not cond() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(cond())
+
+    def test_default_on(self):
+        from momento import config
+
+        self.assertIs(config.DEFAULTS["ui"]["keep_bar_loaded"], True)
+        self.assertTrue(self.d.keep_bar_loaded())
+
+    def test_unmanaged_daemon_never_starts_a_bar(self):
+        self.d._bar_managed = False
+        self.d.start_bar()
+        self.call({"cmd": "reload"})
+        self.assertEqual(self.procs, [])
+
+    def test_restart_with_backoff(self):
+        from momento import daemon
+
+        self.d.start_bar()
+        self.d.start_bar()                          # only ever one
+        self.assertEqual(len(self.procs), 1)
+        delays = []
+        logs = self.assertLogs("momento.daemon", "WARNING")
+        logs.__enter__()
+        self.addCleanup(logs.__exit__, None, None, None)
+        for i in range(8):
+            self.procs[-1].exit(1)                  # the bar crashed
+            self.wait_until(lambda: len(self.timers) == i + 1)
+            self.assertIsNone(self.d.bar_proc)
+            ms, fn = self.timers[-1]
+            delays.append(ms)
+            fn()                                    # the timer fires: a new bar
+            self.assertEqual(len(self.procs), i + 2)
+        self.assertEqual(delays, [1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000])
+        # a bar that ran long enough counts as healthy: the backoff starts over
+        self.d._bar_started -= daemon.BAR_STABLE_SECONDS
+        self.procs[-1].exit(1)
+        self.wait_until(lambda: len(self.timers) == 9)
+        self.assertEqual(self.timers[-1][0], 1000)
+
+    def test_not_restarted_while_stopping(self):
+        self.d.start_bar()
+        bar = self.procs[0]
+        self.d.stop()                               # SIGTERM / service stop
+        self.assertEqual(bar.terminated, 1)
+        time.sleep(0.1)
+        self.assertEqual(self.timers, [])
+        self.d.start_bar()
+        self.assertEqual(len(self.procs), 1)        # nothing new while stopping
+
+    def test_reload_follows_the_setting(self):
+        self.d.start_bar()
+        bar = self.procs[0]
+        self.path.write_text(self.path.read_text() + "\n[ui]\nkeep_bar_loaded = false\n")
+        self.assertTrue(self.call({"cmd": "reload"})["ok"])
+        self.assertFalse(self.d.keep_bar_loaded())
+        self.assertEqual(bar.terminated, 1)
+        self.assertIsNone(self.d.bar_proc)
+        time.sleep(0.1)
+        self.assertEqual(self.timers, [])           # stopped on purpose: not restarted
+        self.path.write_text(self.path.read_text().replace("keep_bar_loaded = false", "keep_bar_loaded = true"))
+        self.call({"cmd": "reload"})
+        self.assertEqual(len(self.procs), 2)
+
+    def test_hotkey_toggles_resident_or_falls_back(self):
+        from unittest import mock
+
+        from momento import overlay
+
+        with mock.patch.object(overlay, "toggle", return_value=True) as tog:
+            self.d.open_bar()
+            self.wait_until(lambda: tog.call_count == 1)
+        time.sleep(0.05)
+        self.assertEqual(self.spawned, [])          # the resident bar handled it
+        with mock.patch.object(overlay, "toggle", return_value=False):
+            self.d.open_bar()                       # no resident bar reachable
+            self.wait_until(lambda: self.spawned == [1])
+
+    def test_keep_bar_loaded_false_is_the_old_path(self):
+        from unittest import mock
+
+        from momento import overlay
+
+        self.d.cfg["ui"]["keep_bar_loaded"] = False
+        self.d.start_bar()
+        self.assertEqual(self.procs, [])            # nothing kept loaded
+        with mock.patch.object(overlay, "toggle", side_effect=AssertionError("must not be used")):
+            self.d.open_bar()                       # spawned right away, as before
+        self.assertEqual(self.spawned, [1])
+
+    def test_cli_overlay_resident_flag(self):
+        from momento import cli
+
+        self.assertTrue(cli.build_parser().parse_args(["overlay", "--resident"]).resident)
+        self.assertFalse(cli.build_parser().parse_args(["overlay"]).resident)
+
+
 if __name__ == "__main__":
     unittest.main()

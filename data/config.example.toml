@@ -102,3 +102,11 @@ enabled = true
 # LOGO (the Super/Windows key) joined with "+", then a key name.
 # Examples: "LOGO+SHIFT+g", "ALT+z", "CTRL+ALT+r", "F9"
 trigger = "LOGO+SHIFT+g"
+
+[ui]
+# Keep the clip bar loaded in the background, hidden, so the shortcut shows it
+# instantly (within a frame). The trade-off: the hidden bar keeps roughly
+# 80-120 MB of RAM in use while Momento runs. Set to false to start a fresh bar
+# on every press instead: no memory used between presses, but the bar takes
+# about 0.3-0.5 s to appear.
+keep_bar_loaded = true

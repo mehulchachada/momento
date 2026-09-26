@@ -17,6 +17,8 @@ CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "momento"
 STATE_DIR = _xdg("XDG_STATE_HOME", ".local/state") / "momento"
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/momento-{os.getuid()}")
 SOCKET_PATH = RUNTIME_DIR / "momento.sock"
+# The resident clip bar's control socket (toggle / show / hide / quit), see overlay.py.
+OVERLAY_SOCKET = RUNTIME_DIR / "overlay.sock"
 
 
 def _videos_dir() -> Path:
@@ -68,6 +70,12 @@ DEFAULTS = {
         # Registered through the xdg-desktop-portal GlobalShortcuts interface.
         "enabled": True,
         "trigger": "LOGO+SHIFT+g",
+    },
+    "ui": {
+        # Keep the clip bar loaded (hidden) in the background so the hotkey shows it
+        # instantly. Costs ~80-120 MB of RAM; false = start a new bar on every press
+        # (about 0.3-0.5 s until it appears).
+        "keep_bar_loaded": True,
     },
 }
 
