@@ -21,7 +21,7 @@ and one key saves what just happened, from the last 15 seconds up to the full ho
 
 ## What is it?
 
-Momento is the Linux version of the PS5's Create button. It records in the background all the time, so you never have to remember to start. When something worth keeping happens, press **Super + Shift + G**, pick how far back to go, and the clip is saved to `~/Videos/Momento`.
+Momento is the Linux version of the PS5's Create button. Press play once, pick your game, and it records in the background from then on. When something worth keeping happens, press **Super + Shift + G**, pick how far back to go, and the clip is saved to `~/Videos/Momento`.
 
 <p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento clip bar: logo, record dot, 12:34 recorded, 742 GB free, the lengths 15s to 60m with 5m highlighted, and settings, pause and stop buttons"></p>
 
@@ -33,8 +33,10 @@ Momento is the Linux version of the PS5's Create button. It records in the backg
 - **One shortcut.** Super + Shift + G opens a slim bar at the bottom of the screen.
 - **Settings in the bar.** Resolution, 60 or 120 fps, quality, sound and mic.
 - **Works with a controller.** Hold View + Menu to open the bar, then pick with the D-pad and A.
+- **Your game window or the full screen.** Record just the game (the default, so nothing else ends up in your clips) or everything on screen. The bar shows what it's recording, like *Recording Elden Ring*.
 - **Pause and stop** from the bar whenever you want.
-- **Keeps your history** through restarts and reboots.
+- **Keep history if you want it.** Turn it on and your replay survives stopping and closing the game, and every full hour is saved as a video too.
+- **A heads-up before the hour.** A notification 10, 5 or 3 minutes before the start of your session starts being replaced.
 - **Protects your game.** Uses little memory and never fills your disk.
 - **Light on performance.** Your graphics card does the heavy lifting.
 - **Local only.** Nothing is uploaded. No account.
@@ -117,11 +119,13 @@ GPU encoding: AMD `Mesa-libva`, Intel `intel-media-driver`, plus [Packman](https
 
 ## First launch
 
-The first time Momento starts, your desktop asks what to share, like when you share your screen on Discord.
+Start your game, press **Super + Shift + G** and press play. Your desktop asks what to share, like when you share your screen on Discord.
 
-1. Pick **your monitor**, not a single window.
-2. Tick **Remember** or **Allow restoring** if you see it, so it doesn't ask again.
+1. Pick **your game's window**. (If you set Record to **Full screen**, pick your monitor instead.)
+2. Tick **Remember** or **Allow restoring** if you see it.
 3. Click **Share**. If your desktop asks you to confirm the shortcut, accept it or pick another key.
+
+Pause and resume keep the same window. After you stop, or the game closes, play asks for a window again.
 
 ## Using it
 
@@ -132,7 +136,7 @@ The first time Momento starts, your desktop asks what to share, like when you sh
 | **Left/Right + Enter**, or **1** to **8** | Picks a length with the keyboard |
 | **P**, or the pause button | Pauses or resumes recording. Your history is kept |
 | **S**, or the gear button | Opens settings in the bar |
-| The stop button | Stops recording and clears the history (the bar asks first). The bar then shows **Start** |
+| The stop button | Stops recording (the bar asks first). The replay is cleared unless **Keep history** is on |
 | **Esc** | Closes the bar without saving |
 
 The **Super** key is the Windows / start-menu key. Momento uses Super + Shift + G because KDE already uses Super + G.
@@ -144,7 +148,7 @@ momento settings        # current settings and your sound devices
 momento set fps 120     # change a setting
 momento pause           # pause (what you have can still be saved)
 momento resume          # resume
-momento stop            # stop recording and clear the history
+momento stop            # stop recording (clears the replay unless Keep history is on)
 ```
 
 ## Using a controller
@@ -224,7 +228,9 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 
 | Setting | Key | Default |
 |---|---|---|
-| Record | `[capture] target` | `screen` (full screen). `window` records only the game window you pick |
+| Record | `[capture] target` | `window`: only the window you pick. `screen` records the full screen |
+| Keep history | `[buffer] keep_history` | `false`: stopping, or the game closing, clears the replay. `true` keeps it and saves every full hour as a video |
+| Hour warning | `[buffer] warn_minutes` | `10` minutes before the hour (3 to 10) |
 | Resolution | `[capture] resolution` | `1080p` (also `720p`, `1440p`, `2160p`, `native`) |
 | Frame rate | `[capture] fps` | `60` (or `120`) |
 | Quality | `[capture] quality` | `high` (also `standard`, `ultra`) |
@@ -240,7 +246,7 @@ Change settings with the **gear** in the bar, or with `momento set …` in a ter
 
 <details><summary><b>My clip is black or shows the wrong screen</b></summary>
 
-The wrong thing was picked in the share dialog. Reset it and pick your monitor again:
+The wrong thing was picked in the share dialog. In Window mode, stop and press play to pick again. In Full screen mode, reset it and pick your monitor:
 
 ```bash
 rm ~/.local/state/momento/portal_token
@@ -249,7 +255,11 @@ systemctl --user restart momento.service
 </details>
 <details><summary><b>Keep the Momento bar out of my clips</b></summary>
 
-On KDE Plasma 6.6 or newer this is automatic: the bar never shows up in your clips. Elsewhere, open settings and set **Record** to **Game window**, so Momento records only your game (no bar, no notifications). You pick the game window once. When the game closes, open the bar and press play to pick it again.
+Set **Record** to **Window** (the default). Momento then records only your game: no bar, no notifications. In **Full screen** mode everything on screen is recorded, the bar included while it's open.
+</details>
+<details><summary><b>What happens when my game closes?</b></summary>
+
+Recording stops and you get a notification. With **Keep history** off (the default) the replay is cleared, so save your moment before you quit. With it on, open the bar and save the last moments even after the game is gone.
 </details>
 <details><summary><b>My clip has no sound</b></summary>
 
