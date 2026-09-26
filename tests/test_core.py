@@ -117,6 +117,24 @@ class RingBufferTest(unittest.TestCase):
         self.assertFalse(paths[0].exists() or paths[1].exists())
         self.assertTrue(more[-1].exists())
 
+    def test_shorter_replay_length_keeps_the_newest(self):
+        ring = RingBuffer(max_seconds=3600, margin=0, directory=self.tmp)
+        paths = _fill(ring, self.tmp, 120)   # 20 minutes, [1000, 2200)
+        sel = ring.select(1000.0, 1015.0)    # an export still reading the oldest two
+        ring.set_max_seconds(300)
+        self.assertEqual(ring.max_seconds, 300)
+        # the newest 5 min (the segment straddling the limit stays) + the pinned ones
+        self.assertEqual([p for p in paths if p.exists()], paths[:2] + paths[89:])
+        ring.release(sel)
+        self.assertEqual([p for p in paths if p.exists()], paths[89:])
+        self.assertAlmostEqual(ring.buffered_seconds(), 300.0)
+        self.assertAlmostEqual(ring.select_last(3600).start, 1890.0)
+        self.assertEqual([e["file"] for e in _index_lines(self.tmp)], [p.name for p in paths[89:]])
+        # longer again: nothing comes back, the ring grows from here
+        ring.set_max_seconds(3600)
+        _fill_from(ring, self.tmp, 120, 60, base=1000.0)
+        self.assertAlmostEqual(ring.buffered_seconds(), 910.0)
+
 
 def _fill_from(ring, d, start_index, count, length=10.0, base=1000.0):
     paths = []
@@ -3658,11 +3676,14 @@ class HistorySettingsTest(unittest.TestCase):
         self.assertEqual((cfg["buffer"]["keep_history"], cfg["buffer"]["warn_minutes"]), (False, 10))
         cur = self.settings.current(cfg)
         self.assertEqual((cur["keep_history"], cur["hour_warning"], cur["instant_bar"]), ("off", 10, "on"))
+        self.assertEqual(cur["replay_length"], 15)
         d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["choices"]["replay_length"], [15, 30, 60])
+        self.assertEqual(d["max_seconds"], 900)
         self.assertEqual(d["choices"]["keep_history"], ["off", "on"])
         self.assertEqual(d["choices"]["hour_warning"], [10, 5, 3])
         self.assertEqual(d["choices"]["instant_bar"], ["on", "off"])
-        self.assertEqual(d["tabs"], [["General", ["record", "keep_history"]],
+        self.assertEqual(d["tabs"], [["General", ["record", "replay_length", "keep_history"]],
                                      ["Video", ["resolution", "fps", "quality"]],
                                      ["Audio", ["audio_source", "mic", "mic_device"]],
                                      ["Controller", ["controller", "controller_exclusive", "controller_open"]],
@@ -3705,6 +3726,58 @@ class HistorySettingsTest(unittest.TestCase):
         self.path.write_text("[buffer]\nmax_seconds = 7200\n")
         self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 3600)
 
+    def test_replay_length_values(self):
+        v = self.settings.validate
+        for given, minutes in (("15m", 15), (30, 30), ("60 min", 60), ("1h", 60), ("30", 30),
+                               (1800, 30), ("900s", 15), (" 15 minutes ", 15)):
+            self.assertEqual(v({"replay_length": given}), {"replay_length": minutes}, given)
+        for bad in (45, "2h", "90s", "10m", True, "soon", "", 0):
+            with self.assertRaises(ValueError, msg=bad) as cm:
+                v({"replay_length": bad})
+            self.assertEqual(str(cm.exception), "replay_length: choose 15m, 30m, 60m")
+
+    def test_replay_length_writes_max_seconds(self):
+        for minutes, seconds in ((30, 1800), (60, 3600), (15, 900)):
+            self.assertEqual(self.settings.apply({"replay_length": minutes}, self.path), {"replay_length": minutes})
+            self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], seconds)
+            self.assertEqual(self.settings.current(self.config.load(self.path))["replay_length"], minutes)
+        self.assertIn("# mine", self.path.read_text())
+        self.assertEqual(self.settings.apply({"replay_length": "15m"}, self.path), {})
+        # a hand-edited length reads as its whole minutes; choosing that again keeps it
+        self.path.write_text("[buffer]\nmax_seconds = 910\n")
+        self.assertEqual(self.settings.current(self.config.load(self.path))["replay_length"], 15)
+        self.assertEqual(self.settings.apply({"replay_length": 15}, self.path), {})
+        self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 910)
+
+    def test_cli_sets_replay_length(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                mock.patch.object(self.settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "replay_length", "30m"]), 0)
+            self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
+        self.assertIn("replay_length = 30m", out.getvalue())
+        self.assertIn("replay: keeps the last 30 min", out.getvalue())
+        self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 1800)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            cli.main(["--config", str(self.path), "set", "nope", "15m"])
+        self.assertEqual(cli.main(["--config", str(self.path), "set", "replay_length", "45m"]), 1)
+        # with the daemon running it goes through configure and applies right away
+        out = io.StringIO()
+        reply = {"ok": True, "changed": {"replay_length": 15}, "restarted": False, "paused": False}
+        with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "replay_length", "15m"]), 0)
+        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"replay_length": 15}})
+        self.assertIn("replay_length = 15m", out.getvalue())
+        self.assertIn("applies right away", out.getvalue())
+
     def test_hand_edited_warning_falls_back(self):
         self.path.write_text("[buffer]\nwarn_minutes = 45\n")
         with self.assertLogs("momento.config", "WARNING"):
@@ -3713,8 +3786,8 @@ class HistorySettingsTest(unittest.TestCase):
 
     def test_live_keys(self):
         self.assertEqual(set(self.settings.LIVE_KEYS),
-                         {"controller", "controller_exclusive", "controller_open", "keep_history",
-                          "hour_warning", "instant_bar"})
+                         {"controller", "controller_exclusive", "controller_open", "replay_length",
+                          "keep_history", "hour_warning", "instant_bar"})
 
     def test_example_config_documents_them(self):
         import tomllib
@@ -3888,6 +3961,24 @@ class HourMarksTest(unittest.TestCase):
         self.assertEqual(self.feed(10, 1, keep=False), [("mark", 10.0)])   # 60:00, at the end of this piece
         self.assertEqual(self.feed(10, 360, keep=False), [("mark", 10.0)])  # no warning before later marks
 
+    def test_shorter_length_mid_session(self):
+        self.assertEqual(self.feed(60, 40, keep=True), [])               # 40 min of a 60-min replay
+        self.h.relength(3600, 900)
+        self.assertEqual(self.feed(60, 1, keep=True, length=900), [("warn", 240.0)])   # next mark at 45:00
+        self.assertEqual(self.feed(60, 4, keep=True, length=900), [("mark", 60.0)])
+        self.assertEqual(self.feed(60, 15, keep=True, length=900), [("warn", 600.0), ("mark", 60.0)])
+
+    def test_longer_length_counts_from_the_last_mark(self):
+        self.assertEqual(self.feed(60, 30, keep=True, length=900)[-1], ("mark", 60.0))   # marks at 15, 30
+        self.h.relength(900, 3600)
+        self.assertEqual(self.feed(60, 50, keep=True), [("warn", 600.0)])   # 80:00; the next mark is at 90:00
+        self.assertEqual(self.feed(60, 10, keep=True), [("mark", 60.0)])
+
+    def test_no_session_start_warning_once_it_is_gone(self):
+        self.feed(60, 40, keep=False, length=900)                        # the start was replaced at 15:00
+        self.h.relength(900, 3600)
+        self.assertEqual(self.feed(60, 120, keep=False), [("mark", 60.0), ("mark", 60.0)])
+
     def test_every_hour_with_history(self):
         events = self.feed(60, 120, keep=True, warn=300)                 # two hours in 1-minute pieces
         self.assertEqual(events, [("warn", 300.0), ("mark", 60.0), ("warn", 300.0), ("mark", 60.0)])
@@ -4019,6 +4110,31 @@ class DaemonHourTest(unittest.TestCase):
         self.assertTrue(all(s.pins == 0 for s in self.d.ring._segments))
         self.assertEqual(self.d.recorder.stopped, 0)
         self.assertEqual(self.d.status()["state"], "recording")
+
+    def test_replay_length_applies_without_restarting(self):
+        rec = self.d.recorder
+        self.record(40)
+        self.assertAlmostEqual(self.d.status()["buffered"], 2400.0)
+        r = self.call({"cmd": "configure", "changes": {"replay_length": "15m"}})
+        self.assertEqual((r["ok"], r["restarted"], r["changed"]), (True, False, {"replay_length": 15}))
+        self.assertEqual((rec.stopped, self.d.recorder is rec), (0, True))   # recording never restarted
+        st = self.d.status()
+        self.assertEqual(st["max_seconds"], 900)
+        self.assertAlmostEqual(st["buffered"], 900.0)
+        kept = sorted(p.name for p in self.buf.glob("*.ts"))
+        self.assertEqual(kept[-1], "seg00000039.ts")                   # the newest is kept
+        self.assertLessEqual(len(kept), 17)                            # 15 min + the 30 s margin, in 1-min pieces
+        self.assertEqual((self.sent, self.exports), ([], []))           # nothing fired for footage already there
+        self.assertEqual(self.d.cfg["buffer"]["max_seconds"], 900)
+        r = self.call({"cmd": "configure", "changes": {"replay_length": 60}})
+        self.assertEqual((r["restarted"], self.d.status()["max_seconds"]), (False, 3600))
+
+    def test_reload_takes_a_hand_edited_length(self):
+        self.record(20)
+        self.path.write_text(self.path.read_text().replace("max_seconds = 3600", "max_seconds = 600"))
+        self.call({"cmd": "reload"})
+        self.assertEqual(self.d.status()["max_seconds"], 600)
+        self.assertAlmostEqual(self.d.status()["buffered"], 600.0)
 
     def test_pauses_continue_the_session_and_stop_starts_a_new_one(self):
         self.record(30)

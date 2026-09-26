@@ -128,6 +128,11 @@ def capped_note(resolution, source, target: str | None) -> str | None:
     return f"{what}, so this records at {size}; a bigger size would only waste space."
 
 
+def _shown(key: str, value) -> str:
+    """A setting's value as `momento set` prints it: replay_length 15 -> "15m"."""
+    return f"{value}m" if key == "replay_length" else str(value)
+
+
 def _status_quietly() -> dict | None:
     """The daemon's status, or None (not running, or anything else): for extra detail only."""
     from . import ipc
@@ -292,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
             record += " (only the window you pick, when you press play; the bar and notifications stay out)"
         rows = [
             ("record", record),
+            ("replay", f"keeps the last {storage.span(cfg['buffer']['max_seconds'])}"),
             ("resolution", resolution),
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
@@ -344,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"momento: {r.get('error', 'not saved')}", file=sys.stderr)
                 return 1
             changed = r.get("changed") or {}
-            print(f"{args.key} = {changed.get(args.key, clean[args.key])}")
+            print(f"{args.key} = {_shown(args.key, changed.get(args.key, clean[args.key]))}")
             if set(clean) <= set(settings.CONTROLLER_KEYS):
                 line = controller_line(config.load(args.config))
                 print(f"Saved. {line[:1].upper()}{line[1:]}." if changed else "Saved (nothing changed).")
@@ -377,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"momento: {e}", file=sys.stderr)
             return 1
-        print(f"{args.key} = {clean[args.key]}  (saved to {args.config})")
+        print(f"{args.key} = {_shown(args.key, clean[args.key])}  (saved to {args.config})")
         if not chk["ok"]:
             print(f"momento: warning: {storage.label(cfg)} needs {storage.human(chk['required'])} free, "
                   f"{storage.human(chk['free'] + chk['reclaimable'])} available; "

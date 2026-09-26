@@ -88,6 +88,7 @@ bitrate_kbps = 160
 # Replay length: how much history to keep, in seconds. 900 = 15 min (default),
 # 1800 = 30 min, 3600 = 60 min (the maximum; any value up to it works).
 # Longer needs more disk space; you can't save a clip longer than this.
+# Change it with:  momento set replay_length 30m   (or Settings -> General)
 max_seconds = 900
 
 # Length of each on-disk chunk, in seconds. Clips are cut on chunk/keyframe

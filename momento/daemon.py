@@ -82,25 +82,40 @@ class HourMarks:
 
     def reset(self) -> None:
         self.footage = 0.0
-        self.marks = 0    # marks crossed so far
+        self.base = 0.0   # session footage the marks count from (moves when the length changes)
+        self.marks = 0    # marks crossed since base
         self.warned = 0   # the highest mark warned about
 
     def add(self, seconds: float, length: float, warn: float, keep_history: bool) -> list[tuple]:
         events = []
         if length <= 0 or seconds <= 0:
             return events
-        before = self.footage
+        before = self.footage - self.base
         self.footage += seconds
-        while self.footage >= (self.marks + 1) * length:
+        counted = self.footage - self.base
+        while counted >= (self.marks + 1) * length:
             self.marks += 1
             events.append(("mark", self.marks * length - before))
         nxt = (self.marks + 1) * length
         warn_at = nxt - warn
-        if (self.warned <= self.marks and warn_at > self.marks * length and self.footage >= warn_at
-                and (keep_history or self.marks == 0)):
+        if (self.warned <= self.marks and warn_at > self.marks * length and counted >= warn_at
+                and (keep_history or (self.marks == 0 and self.base == 0))):
             self.warned = self.marks + 1
-            events.append(("warn", nxt - self.footage))
+            events.append(("warn", nxt - counted))
         return events
+
+    def relength(self, old: float, new: float) -> None:
+        """The replay length changed from ``old`` to ``new`` during the session.
+
+        Marks of the new length count from the last mark crossed, so nothing
+        already saved is saved again, and footage already recorded fires no mark
+        at once. Shorter: the next mark is the next multiple of ``new`` after the
+        footage so far. Longer: it is a full ``new`` after the last mark.
+        """
+        if old > 0:
+            self.base += self.marks * old
+        self.marks = int((self.footage - self.base) // new) if new > 0 else 0
+        self.warned = self.marks
 
 
 def span_label(seconds: float) -> str:
@@ -583,6 +598,16 @@ class Daemon:
             elif keep:
                 self._save_hour(until=seg.start + event[1])
 
+    def _set_replay_length(self, seconds: float) -> None:
+        """Replay length changed (settings, or a reload of a hand-edited config): the ring
+        trims to it at once, keeping the newest footage, and the marks follow."""
+        old = self.ring.max_seconds
+        if seconds == old:
+            return
+        log.info("replay length: %s -> %s", span_label(old), span_label(seconds))
+        self.hours.relength(float(old), float(seconds))
+        self.ring.set_max_seconds(seconds)
+
     def _warn_mark(self, seconds_left: float, keep: bool) -> None:
         length = self.ring.max_seconds
         minutes = max(1, math.ceil(seconds_left / 60 - 0.01))
@@ -814,6 +839,7 @@ class Daemon:
         if config.capture_target(cfg["capture"]) != config.capture_target(self.cfg["capture"]):
             self._forget_target_name()
         self.cfg = cfg
+        self._set_replay_length(cfg["buffer"]["max_seconds"])
         self._sync_bar()
         self._sync_controller()
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
@@ -869,8 +895,11 @@ class Daemon:
         # raise the requirement (a smaller size, another mic) always goes through.
         if (not chk["ok"] and not msg.get("force")
                 and storage.required_bytes(new, source) > storage.required_bytes(saved, source)):
+            what = storage.label(new)
+            if new["buffer"]["max_seconds"] != saved["buffer"]["max_seconds"]:
+                what = f"{storage.span(new['buffer']['max_seconds'])} at {what}"   # "60 min at 1080p High"
             reply({"ok": False, "code": "no_storage", "storage": chk,
-                   "error": f"{storage.label(new)} needs {storage.human(chk['required'])} free, "
+                   "error": f"{what} needs {storage.human(chk['required'])} free, "
                             f"{storage.human(chk['free'] + chk['reclaimable'])} available"})
             return
         try:
@@ -883,7 +912,7 @@ class Daemon:
             # the recording.
             if changed:
                 self._apply_live(changed)
-                self._check_low()  # keep_history adds (or drops) a saved hour
+                self._check_low()  # keep_history / replay_length change what a full span needs
             reply({"ok": True, "changed": changed, "restarted": False, "paused": self.paused,
                    "state": self._idle_state(), "storage": self._storage_status()})
             return
@@ -903,6 +932,10 @@ class Daemon:
             self._sync_controller()
         for key in ("keep_history", "warn_minutes"):
             self.cfg["buffer"][key] = saved["buffer"].get(key, config.DEFAULTS["buffer"][key])
+        if "replay_length" in changed:
+            # the recorder never reads it: only the ring and the hour marks change
+            self.cfg["buffer"]["max_seconds"] = saved["buffer"]["max_seconds"]
+            self._set_replay_length(saved["buffer"]["max_seconds"])
         if "instant_bar" in changed:
             self.cfg.setdefault("ui", {})["keep_bar_loaded"] = saved["ui"].get("keep_bar_loaded", True)
             self._sync_bar()

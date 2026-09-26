@@ -21,6 +21,8 @@ DEFAULT_SOURCE = "@DEFAULT_SOURCE@"
 # key -> one-line help (also the order `momento set` lists them in)
 KEYS = {
     "record": "window (only the window you pick; the default), screen (the whole screen)",
+    "replay_length": "15m, 30m, 60m (how much of your game the replay keeps; 15m is the default, "
+                     "longer needs more disk space)",
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
@@ -43,12 +45,12 @@ KEYS = {
 # Settings that only concern the controller: changing them never restarts recording.
 CONTROLLER_KEYS = ("controller", "controller_exclusive", "controller_open")
 # Every setting that takes effect without restarting the recording.
-LIVE_KEYS = CONTROLLER_KEYS + ("keep_history", "hour_warning", "instant_bar")
+LIVE_KEYS = CONTROLLER_KEYS + ("replay_length", "keep_history", "hour_warning", "instant_bar")
 
 # How a settings UI groups the keys: (tab name, keys in display order). "bitrate"
 # is left out on purpose (terminal only: `momento set bitrate`).
 TABS = (
-    ("General", ("record", "keep_history")),
+    ("General", ("record", "replay_length", "keep_history")),
     ("Video", ("resolution", "fps", "quality")),
     ("Audio", ("audio_source", "mic", "mic_device")),
     ("Controller", ("controller", "controller_exclusive", "controller_open")),
@@ -117,6 +119,38 @@ def _warn_minutes(value) -> int:
     return v
 
 
+def _replay_minutes(value) -> int:
+    """15 / "30m" / "60 min" / "1h" / 900 (seconds) -> minutes, one of config.REPLAY_MINUTES."""
+    choices = config.REPLAY_MINUTES
+    why = "choose " + ", ".join(f"{m}m" for m in choices)
+    if isinstance(value, bool):
+        raise ValueError(why)
+    text = str(value).strip().lower()
+    scale = None
+    for units, factor in ((("hours", "hour", "hrs", "hr", "h"), 60),
+                          (("minutes", "minute", "mins", "min", "m"), 1),
+                          (("seconds", "second", "secs", "sec", "s"), 1 / 60)):
+        unit = next((u for u in units if text.endswith(u)), None)
+        if unit:
+            text, scale = text[: -len(unit)].strip(), factor
+            break
+    try:
+        n = int(text)
+    except ValueError:
+        raise ValueError(why) from None
+    if scale is None:  # a bare number: minutes, or the seconds of one of the choices
+        scale = 1 / 60 if n in [m * 60 for m in choices] else 1
+    minutes = n * scale
+    if minutes not in choices:
+        raise ValueError(why)
+    return int(minutes)
+
+
+def replay_minutes(cfg: dict) -> int:
+    """The replay length of a loaded config in whole minutes (a hand-edited 1234 s reads as 21)."""
+    return max(1, round(int(cfg["buffer"]["max_seconds"]) / 60))
+
+
 def normalize(key: str, value):
     """Return the canonical user-facing value for ``key`` or raise ValueError."""
     if key == "record":
@@ -166,6 +200,8 @@ def normalize(key: str, value):
         return _on_off(value)
     if key == "hour_warning":
         return _warn_minutes(value)
+    if key == "replay_length":
+        return _replay_minutes(value)
     if key == "mic_device":
         v = str(value).strip()
         if v.lower() in ("default", DEFAULT_SOURCE.lower()):
@@ -284,6 +320,8 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
         return [("buffer", "keep_history", value == "on")]
     if key == "hour_warning":
         return [("buffer", "warn_minutes", int(value))]
+    if key == "replay_length":
+        return [("buffer", "max_seconds", int(value) * 60)]
     if key == "instant_bar":
         return [("ui", "keep_bar_loaded", value == "on")]
     raise ValueError(f"unknown setting {key!r}")
@@ -297,6 +335,7 @@ def current(cfg: dict) -> dict:
     ctl = config.controller(cfg)
     return {
         "record": config.capture_target(cap),
+        "replay_length": replay_minutes(cfg),
         # an older config's 1440p/2160p reads as what it records at (1080p)
         "resolution": quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
@@ -316,9 +355,10 @@ def current(cfg: dict) -> dict:
 
 
 # Settings that several config values read as (controller_open "hold" is any
-# hold_ms above 0): choosing the value they already have writes nothing, so a
-# hand-edited value behind it survives.
-_KEEP_IF_SAME = ("controller_open",)
+# hold_ms above 0; replay_length 15 is a hand-edited max_seconds = 910 too):
+# choosing the value they already have writes nothing, so a hand-edited value
+# behind it survives.
+_KEEP_IF_SAME = ("controller_open", "replay_length")
 
 
 def apply(changes: dict, path: Path | str | None = None) -> dict:
@@ -371,7 +411,8 @@ def describe(cfg: dict, devices: dict | None = None, source=None) -> dict:
         "source_size": list(source) if source else None,
         "resolution_allowed": quality.allowed_resolutions(source),
         "resolution_effective": quality.effective_resolution(values["resolution"], source),
-        "choices": {"record": list(config.CAPTURE_TARGETS), "resolution": list(quality.RESOLUTIONS),
+        "choices": {"record": list(config.CAPTURE_TARGETS), "replay_length": list(config.REPLAY_MINUTES),
+                    "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
                     "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS],
                     "controller_open": list(CONTROLLER_OPEN_LABELS),

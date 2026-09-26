@@ -175,9 +175,11 @@ holds that controller (EVIOCGRAB) while the chord's other button is down, when
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` /
-    ``controller_exclusive`` / ``controller_open`` / ``keep_history`` /
-    ``hour_warning`` / ``instant_bar`` apply without a reload
-    (``restarted: false``);
+    ``controller_exclusive`` / ``controller_open`` / ``replay_length`` /
+    ``keep_history`` / ``hour_warning`` / ``instant_bar`` apply without a
+    reload (``restarted: false``). A shorter ``replay_length`` drops the
+    oldest footage beyond it at once (the newest is kept); a longer one fills
+    up from what is there;
     ``changed`` holds the value read back (``"on"`` -> the shortcut it enables). Refused with ``code: no_storage`` (nothing written) only
     when the new settings do not fit AND raise the requirement over the saved
     ones AND ``force`` is not true; so shrinking always works. With ``force``
@@ -330,6 +332,9 @@ STORAGE_REQUIREMENTS = {
 
 SETTING_VALUES = {
     "record": (("string",), True),         # "screen" | "window"
+    # minutes of replay kept ([buffer] max_seconds / 60): 15 (default) | 30 | 60; a hand-edited
+    # max_seconds reads as its whole minutes
+    "replay_length": (("integer",), False),
     "resolution": (("string",), True),     # one of choices.resolution ("720p" | "1080p" | "native")
     "quality": (("string",), True),
     "fps": (("integer",), True),
@@ -351,6 +356,7 @@ SETTING_VALUES = {
 
 SETTING_CHOICES = {
     "record": (("array",), True),
+    "replay_length": (("array",), False),  # [15, 30, 60]
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),
