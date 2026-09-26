@@ -2921,6 +2921,127 @@ class RecorderWindowTest(unittest.TestCase):
         self.assertEqual(rec._retry_id, 0)                           # no 3 s error retry, no new portal session
         self.assertIsNotNone(rec._pw_fd)
 
+
+@unittest.skipUnless(_have_gst(), "GStreamer (PyGObject) not available")
+class PortalSizeHintTest(unittest.TestCase):
+    """The portal's stream size is only a hint (KDE announces a scaled monitor's logical size),
+    and the MOMENTO_DEBUG_CAPTURE_ONLY debug pipeline."""
+
+    def setUp(self):
+        import copy
+
+        from momento import config, pipeline
+
+        self.pipeline = pipeline
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cfg = copy.deepcopy(config.DEFAULTS)
+        self.cfg["capture"].update(source="portal", target="screen", resolution="1080p")
+        self.cfg["buffer"]["dir"] = str(Path(self._tmp.name) / "buffer")
+        self.states = []
+
+    def recorder(self, **capture):
+        self.cfg["capture"].update(capture)
+        rec = self.pipeline.Recorder(self.cfg, RingBuffer(3600), lambda s, m: self.states.append((s, m)))
+        rec._plan_variants = lambda: [self.pipeline._Variant("vah264enc", True)]
+        rec._start_portal = mock.Mock()          # never the real portal
+        rec._build_and_play = mock.Mock()
+        self.addCleanup(rec._cancel_retry)
+        self.addCleanup(rec._close_portal)
+        return rec
+
+    def ready(self, rec, announced, displays):
+        rec.start(interactive=True)
+        rec._portal = mock.Mock(stream_size=announced)
+        with mock.patch.object(self.pipeline, "native_display_sizes", return_value=displays):
+            rec._on_portal_ready(os.open(os.devnull, os.O_RDONLY), 77)
+        rec._build_and_play.assert_called_once()
+        return rec._known_size
+
+    def test_scaled_monitor_logical_size_is_ignored(self):
+        """1600x900 on a 1920x1080 screen at 120 %: never planned (it would pin 1600x900)."""
+        rec = self.recorder()
+        self.assertIsNone(self.ready(rec, (1600, 900), {(1920, 1080), (1080, 1920)}))
+        rec._prepare_size()
+        rec._video_chain(self.pipeline._Variant("vah264enc", True))
+        self.assertIsNone(rec._locked_size)                       # the preset's 1920x1080, not pinned smaller
+        self.assertEqual(rec._output_caps(), "video/x-raw(memory:VAMemory),format=NV12,width=1920,height=1080")
+        # The first caps (the real 1920x1080) then change nothing: no renegotiation.
+        Gst = self.pipeline.Gst
+        capsfilter = Gst.ElementFactory.make("capsfilter", None)
+        capsfilter.set_property("caps", Gst.Caps.from_string(rec._output_caps()))
+        changed = []
+        capsfilter.connect("notify::caps", lambda *_a: changed.append(True))
+        info = mock.Mock()
+        info.get_event.return_value = Gst.Event.new_caps(Gst.Caps.from_string("video/x-raw,width=1920,height=1080"))
+        rec._pin_size(None, info, (capsfilter, None, "vah264enc"))
+        self.assertEqual(changed, [])
+        self.assertEqual(rec.source_size, (1920, 1080))
+
+    def test_monitor_size_matching_a_display_is_used(self):
+        self.assertEqual(self.ready(self.recorder(), (1920, 1080), {(1920, 1080), (1080, 1920)}), (1920, 1080))
+        # A 1280x800 screen really is smaller than 1080p: planned (capped) before the stream runs.
+        rec = self.recorder()
+        self.assertEqual(self.ready(rec, (1280, 800), {(1280, 800), (800, 1280)}), (1280, 800))
+        rec._prepare_size()
+        self.assertEqual(rec._locked_size, (1280, 800))
+
+    def test_monitor_size_without_readable_displays_is_ignored(self):
+        self.assertIsNone(self.ready(self.recorder(), (1920, 1080), set()))
+        self.assertIsNone(self.ready(self.recorder(), None, {(1920, 1080)}))
+
+    def test_window_size_is_used_as_announced(self):
+        token = self.pipeline.config.portal_token_path("window")
+        token.parent.mkdir(parents=True, exist_ok=True)
+        token.write_text("tok")
+        self.addCleanup(token.unlink, missing_ok=True)
+        rec = self.recorder(target="window")
+        self.assertEqual(self.ready(rec, (1280, 720), set()), (1280, 720))
+
+    def test_native_display_sizes_reads_connected_preferred_modes(self):
+        root = Path(self._tmp.name) / "drm"
+        for name, status, modes in (("card1-eDP-1", "connected", "1920x1080\n1920x1080\n1680x1050\n"),
+                                    ("card1-DP-1", "disconnected", ""),
+                                    ("card1-DP-2", "connected", "2560x1440\n1920x1080\n"),
+                                    ("card1-Writeback-1", "unknown", "")):
+            (root / name).mkdir(parents=True)
+            (root / name / "status").write_text(status + "\n")
+            (root / name / "modes").write_text(modes)
+        self.assertEqual(self.pipeline.native_display_sizes(root),
+                         {(1920, 1080), (1080, 1920), (2560, 1440), (1440, 2560)})
+        self.assertEqual(self.pipeline.native_display_sizes(root / "missing"), set())
+
+    def test_capture_only_switch(self):
+        env = self.pipeline.CAPTURE_ONLY_ENV
+        for value, on in (("1", True), ("yes", True), ("", False), ("0", False), ("false", False)):
+            with mock.patch.dict(os.environ, {env: value}):
+                self.assertEqual(self.pipeline.capture_only(), on, value)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(env, None)
+            self.assertFalse(self.pipeline.capture_only())
+
+    def test_capture_only_pipeline_is_source_into_fakesink(self):
+        Gst = self.pipeline.Gst
+        rec = self.recorder(source="test")
+        rec.source_name = "test"
+        for variant, memory in ((self.pipeline._Variant("vah264enc", True), None),
+                                (self.pipeline._Variant("x264enc", False), "video/x-raw")):
+            if variant.zero_copy and not self.pipeline._have("vapostproc"):
+                continue
+            with mock.patch.dict(os.environ, {self.pipeline.CAPTURE_ONLY_ENV: "1"}), \
+                    self.assertLogs("momento.pipeline", "WARNING") as logs:
+                pl = rec._build(variant)
+            self.assertIn("capture only", "\n".join(logs.output))
+            names = {el.get_factory().get_name() for el in pl.children}
+            self.assertEqual(names, {"videotestsrc", "capsfilter", "fakesink"})   # no scaler, encoder, mux, audio
+            caps = pl.get_by_name("capture_caps").get_property("caps")
+            if memory is None:   # offered what vapostproc takes (DMA-BUF / VA memory), as when recording
+                self.assertTrue(any(caps.get_features(i).contains("memory:DMABuf") for i in range(caps.get_size())))
+            else:
+                self.assertEqual(caps.to_string(), memory)
+            pl.set_state(Gst.State.NULL)
+
+
 class _FakeMatch:
     def __init__(self, bus, key):
         self.bus, self.key = bus, key

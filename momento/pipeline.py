@@ -87,6 +87,40 @@ WINDOW_CLOSED = "The game window closed \u2014 pick a window to keep recording"
 WINDOW_NOT_PICKED = "No game window picked \u2014 press play to pick one"
 WINDOW_STOPPED = "Window capture stopped \u2014 press play to try again"
 
+# Debug A/B: with this set to 1 the video source feeds a fakesink directly (no
+# scaling, encoding, muxing or audio; nothing is recorded), so the cost of the
+# compositor's screencast alone can be told apart from Momento's encoding.
+CAPTURE_ONLY_ENV = "MOMENTO_DEBUG_CAPTURE_ONLY"
+
+
+def capture_only() -> bool:
+    return os.environ.get(CAPTURE_ONLY_ENV, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def native_display_sizes(root: str | Path = "/sys/class/drm") -> set[tuple[int, int]]:
+    """The native (preferred) mode of every connected display, both orientations.
+
+    Read from /sys/class/drm (the first line of a connector's ``modes``); empty
+    when nothing can be read.
+    """
+    sizes: set[tuple[int, int]] = set()
+    try:
+        connectors = sorted(Path(root).glob("card*-*"))
+    except OSError:
+        return sizes
+    for conn in connectors:
+        try:
+            if (conn / "status").read_text().strip() != "connected":
+                continue
+            first = (conn / "modes").read_text().split("\n", 1)[0].strip()
+        except OSError:
+            continue
+        m = re.fullmatch(r"(\d+)x(\d+)\S*", first)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            sizes.update({(w, h), (h, w)})
+    return sizes
+
 
 @dataclass(frozen=True)
 class Frame:
@@ -284,6 +318,9 @@ class Recorder:
         if enc is not None:
             enc.send_event(GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
         mux = self._pipeline.get_by_name("mux")
+        if mux is None:  # capture-only debug pipeline: nothing is written
+            self._fire_flush_waiters()
+            return
         mux.emit("split-now")
 
     def grab_frame(self, callback: Callable[[Frame | None], None], timeout: float = 3.0) -> None:
@@ -404,8 +441,30 @@ class Recorder:
             return
         self._pw_fd, self._pw_node = fd, node_id
         # How big the stream is, so the pipeline is built at its final output size.
-        self._known_size = quality.source_size(getattr(self._portal, "stream_size", None))
+        self._known_size = self._portal_size_hint(getattr(self._portal, "stream_size", None))
         self._build_and_play()
+
+    def _portal_size_hint(self, size) -> tuple[int, int] | None:
+        """The portal's stream size, when it can be planned with; None: the first caps decide.
+
+        It is only a hint. KDE announces a monitor's *logical* size (1600x900 for a
+        1920x1080 screen at 120 % scaling) while the stream carries every pixel, so
+        planning with it would pin the output below the real picture. A monitor's
+        size is used only when it is the native mode of a connected display; any
+        other (a scaled monitor, a mode that can't be read) is ignored and the
+        first caps decide, as for a portal that says nothing. A window's size can't
+        be checked this way and is used as announced (KDE doesn't send one); a
+        wrong one is still caught by the first caps (``_pin_size``) and the
+        renegotiation restart.
+        """
+        size = quality.source_size(size)
+        if size is None or self.window_mode:
+            return size
+        if size in native_display_sizes():
+            return size
+        log.info("portal says the screen is %dx%d, not a connected display's own size (scaled?): "
+                 "the stream's first frame decides the size", *size)
+        return None
 
     def _on_portal_error(self, message: str) -> None:
         if self._stop_requested:
@@ -622,6 +681,8 @@ class Recorder:
         # The output size is decided before the chain is described, so the "size"
         # capsfilter starts at its final caps when the source's size is known.
         self._prepare_size()
+        if capture_only():
+            return self._build_capture_only(v)
         parts = [
             "splitmuxsink name=mux muxer=mpegtsmux send-keyframe-requests=true max-files=0 max-size-bytes=0",
             f"{self._video_source()} ! {self._video_chain(v)}",
@@ -643,6 +704,21 @@ class Recorder:
         mux.set_property("location", str(self.buffer_dir / "seg%08d.ts"))
         mux.set_property("start-index", self._next_index)
 
+        self._setup_source(pipeline, v)
+
+        enc = pipeline.get_by_name("enc")
+        self._encoder_settings(enc, v.encoder, self._kbps)
+
+        aenc = pipeline.get_by_name("aenc")
+        if aenc is not None:
+            _set(aenc, bitrate=int(self.cfg["audio"].get("bitrate_kbps", 160)) * 1000)
+
+        # Pin the monotonic system clock so running-time -> wall-clock stays a
+        # fixed offset (audio devices would otherwise provide a drifting clock).
+        pipeline.use_clock(Gst.SystemClock.obtain())
+        return pipeline
+
+    def _setup_source(self, pipeline: Gst.Pipeline, v: _Variant) -> None:
         src = pipeline.get_by_name("src")
         if src.get_factory().get_name() == "pipewiresrc":
             # Resend the last frame on a static screen so the encoder (and
@@ -654,15 +730,34 @@ class Recorder:
                                             (pipeline.get_by_name("size"), pipeline.get_by_name("enc"),
                                              v.encoder))
 
-        enc = pipeline.get_by_name("enc")
-        self._encoder_settings(enc, v.encoder, self._kbps)
+    def _build_capture_only(self, v: _Variant) -> Gst.Pipeline:
+        """``MOMENTO_DEBUG_CAPTURE_ONLY=1``: the video source straight into a fakesink.
 
-        aenc = pipeline.get_by_name("aenc")
-        if aenc is not None:
-            _set(aenc, bitrate=int(self.cfg["audio"].get("bitrate_kbps", 160)) * 1000)
-
-        # Pin the monotonic system clock so running-time -> wall-clock stays a
-        # fixed offset (audio devices would otherwise provide a drifting clock).
+        No scaling, encoding, muxing or audio, and nothing is written. The source
+        is offered the same formats the real chain's first element takes
+        (vapostproc's, or system memory before videoconvert), so the compositor
+        negotiates the same kind of buffers (DMA-BUF) as when recording.
+        """
+        log.warning("%s is set: capture only, a debug A/B. The %s source feeds a fakesink: "
+                    "no scaling, encoding, audio or recording, and saves find no new footage",
+                    CAPTURE_ONLY_ENV, self.source_name)
+        desc = (f"{self._video_source()} ! capsfilter name=capture_caps ! "
+                "fakesink name=sink sync=false async=false enable-last-sample=false")
+        log.debug("pipeline: %s", desc)
+        pipeline = Gst.parse_launch(desc)
+        if not isinstance(pipeline, Gst.Pipeline):
+            raise RuntimeError("parse_launch did not return a pipeline")
+        caps = None
+        if v.zero_copy:
+            factory = Gst.ElementFactory.find("vapostproc")
+            for tmpl in factory.get_static_pad_templates() if factory else []:
+                if tmpl.direction == Gst.PadDirection.SINK:
+                    caps = tmpl.get_caps()
+        else:
+            caps = Gst.Caps.from_string("video/x-raw")
+        if caps is not None:
+            pipeline.get_by_name("capture_caps").set_property("caps", caps)
+        self._setup_source(pipeline, v)
         pipeline.use_clock(Gst.SystemClock.obtain())
         return pipeline
 
@@ -772,6 +867,10 @@ class Recorder:
                 _old, new, _pending = msg.parse_state_changed()
                 if new == Gst.State.PLAYING and self._start_wall is None:
                     self._compute_start_wall()
+                if new == Gst.State.PLAYING and not self.recording and self._pipeline.get_by_name("mux") is None:
+                    # Capture only: no segments will ever open; report it as running.
+                    self.recording = True
+                    self._set_state("recording")
         elif t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
             name = msg.src.get_name() if msg.src else "?"
