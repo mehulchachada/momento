@@ -109,7 +109,9 @@ Commands (fields are in ``COMMANDS``)
     ``requested``; ``reason`` explains a known cause (older footage with other
     width/height/fps/codec/audio is never mixed in). Works in any state while
     footage exists. Errors: ``bad duration: ...``; ``nothing recorded yet``;
-    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB.
+    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB;
+    ``code: too_long`` when ``seconds`` is more than ``max_seconds`` (the
+    replay length; clients should not offer longer lengths).
 ``screenshot``
     Save one frame of the recording as a PNG in ``<output dir>/Images``
     (``Momento_<date>_<time>.png``, ``_2``, ``_3``... on collision; never
@@ -288,6 +290,7 @@ ERROR_CODES = {
     "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip "
                   "(save, screenshot)",
     "not_recording": "screenshot: capture isn't running (paused, stopped, starting or failed)",
+    "too_long": "save: longer than the replay keeps (status max_seconds, the Replay length setting)",
 }
 
 

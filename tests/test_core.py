@@ -1256,6 +1256,35 @@ class DaemonControlTest(unittest.TestCase):
         self.assertEqual(self.d.ring._segments[0].pins, 0)  # released
         self.assertEqual(len(self.notes), 1)
 
+    def test_save_longer_than_the_replay_is_refused(self):
+        self.assertEqual(self.d.status()["max_seconds"], 900)              # the default: 15 minutes
+        self.d.recorder.recording = False  # no flush round trip
+        r = self.call({"cmd": "save", "seconds": "30m"})
+        self.assertEqual(r, {"ok": False, "code": "too_long",
+                             "error": "Can't save 30m: the replay only keeps the last 15 minutes. "
+                                      "Save 15m or less, or choose a longer Replay length in settings."})
+        self.assertEqual(self.notes, [])                                   # an answer, not a notification
+        r = self.call({"cmd": "save", "seconds": 900})                     # the whole replay is fine
+        self.assertNotEqual(r.get("code"), "too_long")
+        self.call({"cmd": "configure", "changes": {"replay_length": 30}})
+        self.assertNotEqual(self.call({"cmd": "save", "seconds": "30m"}).get("code"), "too_long")
+
+    def test_cli_save_longer_than_the_replay(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, daemon, ipc
+
+        reply = {"ok": False, "code": "too_long", "error": daemon.too_long_message(1800, 900)}
+        err = io.StringIO()
+        with mock.patch.object(ipc, "request", return_value=reply), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["save", "30m"]), 1)
+        self.assertEqual(err.getvalue(),
+                         "momento: Can't save 30m: the replay only keeps the last 15 minutes. Save 15m or less, "
+                         "or choose a longer Replay length in settings.\n"
+                         "To keep more: momento set replay_length 30m\n")
+
     def test_configure_refuses_what_does_not_fit(self):
         from momento import config, storage
 

@@ -1478,6 +1478,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.live = (0.0, 0.0)
             self.live_ticking = False
             self.max_seconds = 3600.0
+            # The replay length (status max_seconds): longer clip lengths are disabled.
+            self.max_clip = 3600.0
             self.tab_btns = []        # settings: the tab row
             self.tab_names = []
             self.tabstack = None      # settings: one page of rows per tab
@@ -1872,7 +1874,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 for b in c.values():
                     b.show()
             for o in self.options:
-                o.setEnabled(opts_on)
+                # a length longer than the replay can never be saved: greyed and skipped
+                o.setEnabled(opts_on and o.seconds <= self.max_clip + 0.5)
             self.online = opts_on
 
         def on_focus_changed(self, _old, _new):
@@ -1966,6 +1969,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.running = True
                 state = st.get("state")
                 self.target = "window" if st.get("target") == "window" else "screen"
+                self.max_clip = float(st.get("max_seconds") or 3600)
                 self.target_name = _clean_title(st.get("target_name"))
                 # "no_window" (an older daemon: the picked window closed) is shown as stopped
                 self.stopped = state in ("stopped", "no_window")
@@ -2021,7 +2025,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             if self.online:
                 want = _last_choice()
-                target = next((o for o in self.options if o.seconds == want), self.options[0])
+                usable = [o for o in self.options if o.isEnabled()] or self.options
+                # the last length, else the longest the replay holds (30m on a 15-minute replay: 15m)
+                target = next((o for o in usable if o.seconds == want), None)
+                if target is None:
+                    target = ([o for o in usable if o.seconds <= want] or usable)[-1]
                 target.setFocus(Qt.OtherFocusReason)
                 return
             c = self.controls[0]

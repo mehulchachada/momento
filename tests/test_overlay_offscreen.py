@@ -371,6 +371,30 @@ class OverlayOffscreen(unittest.TestCase):
         self.wait_for(lambda: bar.mode == "settings")
         pump(self.app, 0.05)
 
+    def test_lengths_past_the_replay_are_disabled(self):
+        """A 15-minute replay: 30m and 60m are greyed like any disabled pill and never saved."""
+        daemon = FakeDaemon(True, extra={"max_seconds": 900})
+        self.addCleanup(overlay._store_choice, overlay._last_choice())
+        overlay._store_choice(1800)                               # last time: 30m
+        bar = self.make(daemon)
+        self.assertEqual([o.text() for o in bar.options if not o.isEnabled()], ["30m", "60m"])
+        self.assertEqual(bar.options[6].visual_state, "disabled")
+        self.assertTrue(bar.options[5].hasFocus())                # 15m: the longest the replay holds
+        self.key(Qt.Key_7)                                        # 30m by its number: nothing
+        QTest.mouseClick(bar.options[7], Qt.LeftButton)           # 60m by a click: nothing
+        pump(self.app, 0.1)
+        self.assertEqual((daemon.saves, bar.saving), ([], False))
+        bar.options[5].setFocus()
+        self.key(Qt.Key_Right)                                    # past 15m: straight to the buttons
+        self.assertTrue(bar.controls[0]["pause"].hasFocus())
+        self.shot(bar, "replay-15m", "v8")
+        daemon.extra["max_seconds"] = 1800                        # a longer replay: 30m comes back
+        bar.apply_status(daemon.request({"cmd": "status"}))
+        self.assertEqual([o.text() for o in bar.options if not o.isEnabled()], ["60m"])
+        daemon.extra["max_seconds"] = 3600
+        bar.apply_status(daemon.request({"cmd": "status"}))
+        self.assertTrue(all(o.isEnabled() for o in bar.options))
+
     def test_gear_reachable_past_60m(self):
         bar = self.make(FakeDaemon(True))
         bar.options[-1].setFocus()

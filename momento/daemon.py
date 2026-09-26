@@ -127,6 +127,12 @@ def span_label(seconds: float) -> str:
     return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
+def too_long_message(seconds: float, max_seconds: float) -> str:
+    """A save longer than the replay: "Can't save 30m: the replay only keeps the last 15 minutes. ..."."""
+    return (f"Can't save {durations.label(seconds)}: the replay only keeps the last {span_label(max_seconds)}. "
+            f"Save {durations.label(max_seconds)} or less, or choose a longer Replay length in settings.")
+
+
 def _private_bus():
     """A session-bus connection of our own, with no main loop (for blocking calls in a thread)."""
     try:
@@ -1057,6 +1063,9 @@ class Daemon:
                 raise ValueError(f"duration must be between 1s and {durations.MAX_SECONDS}s")
         except (TypeError, ValueError) as e:
             reply({"ok": False, "error": f"bad duration: {e}"})
+            return
+        if seconds > self.ring.max_seconds:
+            reply({"ok": False, "code": "too_long", "error": too_long_message(seconds, self.ring.max_seconds)})
             return
         t_req = time.time()
         until = msg.get("until")

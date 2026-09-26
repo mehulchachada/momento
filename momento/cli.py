@@ -210,6 +210,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if not r.get("ok"):
             print(f"momento: {r.get('error', 'save failed')}", file=sys.stderr)
+            if r.get("code") == "too_long":
+                longer = next((m for m in config.REPLAY_MINUTES if m * 60 >= args.duration), None)
+                if longer:
+                    print(f"To keep more: momento set replay_length {longer}m", file=sys.stderr)
             return 1
         if r.get("partial"):
             print(f"momento: only {durations.label(r['seconds'])} was buffered "
