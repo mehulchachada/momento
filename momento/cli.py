@@ -137,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = [
             ("resolution", cur["resolution"]),
             ("quality", cur["quality"]),
-            ("frame rate", f"{quality.FPS} fps"),
+            ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
             ("disk use", f"about {quality.buffer_gb(kbps, cfg['buffer']['max_seconds']):.1f} GB for the full buffer"),
             ("sound", sound),

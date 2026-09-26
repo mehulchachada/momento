@@ -22,6 +22,7 @@ DEFAULT_SOURCE = "@DEFAULT_SOURCE@"
 KEYS = {
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
+    "fps": ", ".join(map(str, quality.FPS_CHOICES)),
     "bitrate": "video kbps; 0 = automatic",
     "audio_source": "default, off, or an output's monitor source name",
     "mic": "on, off",
@@ -54,6 +55,14 @@ def normalize(key: str, value):
         v = str(value).strip().lower()
         if v not in quality.QUALITIES:
             raise ValueError(f"choose one of: {', '.join(quality.QUALITIES)}")
+        return v
+    if key == "fps":
+        try:
+            v = int(str(value).strip().lower().removesuffix("fps").strip())
+        except ValueError:
+            v = None
+        if v not in quality.FPS_CHOICES:
+            raise ValueError(f"choose one of: {', '.join(map(str, quality.FPS_CHOICES))}")
         return v
     if key == "bitrate":
         if isinstance(value, bool):
@@ -108,6 +117,8 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
         return [("capture", "resolution", value)]
     if key == "quality":
         return [("capture", "quality", value)]
+    if key == "fps":
+        return [("capture", "fps", value)]
     if key == "bitrate":
         return [("capture", "bitrate_kbps", value)]
     if key == "audio_source":
@@ -130,6 +141,7 @@ def current(cfg: dict) -> dict:
     return {
         "resolution": str(cap.get("resolution", quality.DEFAULT_RESOLUTION)).lower(),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
+        "fps": int(cap.get("fps") or quality.FPS),
         "bitrate": int(cap.get("bitrate_kbps") or 0),
         "audio_source": "off" if not a.get("desktop") else "default" if dev == DEFAULT_MONITOR else dev,
         "mic": "on" if a.get("microphone") else "off",
@@ -157,9 +169,10 @@ def describe(cfg: dict, devices: dict | None = None) -> dict:
     return {
         "ok": True,
         "values": current(cfg),
-        "choices": {"resolution": list(quality.RESOLUTIONS), "quality": list(quality.QUALITIES)},
+        "choices": {"resolution": list(quality.RESOLUTIONS), "quality": list(quality.QUALITIES),
+                    "fps": list(quality.FPS_CHOICES)},
         "devices": list_audio_devices() if devices is None else devices,
-        "fps": quality.FPS,
+        "fps": quality.fps(cfg["capture"]),
         "max_seconds": int(cfg["buffer"]["max_seconds"]),
         "config": cfg.get("_path") or str(config.default_path()),
     }

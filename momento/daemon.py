@@ -238,7 +238,7 @@ class Daemon:
             "resolution": self.cfg["capture"]["resolution"],
             "quality": self.cfg["capture"]["quality"],
             "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"]),
-            "fps": quality.FPS,
+            "fps": quality.fps(self.cfg["capture"]),
         }
         if self.error:
             result["error"] = self.error

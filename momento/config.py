@@ -34,7 +34,9 @@ DEFAULTS = {
     "capture": {
         # auto | portal | gamescope | x11 | test
         "source": "auto",
-        # Always 60 fps. 720p | 1080p | 1440p | 2160p | native (screen size).
+        # 60 | 120 frames per second (120 needs a 120 Hz display to be useful).
+        "fps": 60,
+        # 720p | 1080p | 1440p | 2160p | native (screen size).
         # Other shapes are fitted with black bars, never stretched.
         "resolution": "1080p",
         # standard | high | ultra

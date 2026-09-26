@@ -1,6 +1,7 @@
-"""Video quality presets. Recording is always 60 fps."""
+"""Video quality presets: resolution, quality level and frame rate (60 or 120 fps)."""
 
-FPS = 60
+FPS = 60  # default
+FPS_CHOICES = (60, 120)
 
 # name -> output size; None = keep the screen's own size.
 RESOLUTIONS: dict[str, tuple[int, int] | None] = {
@@ -33,8 +34,15 @@ def resolution(capture: dict) -> tuple[int, int] | None:
     return RESOLUTIONS[name]
 
 
+def fps(capture: dict) -> int:
+    value = int(capture.get("fps") or FPS)
+    if value not in FPS_CHOICES:
+        raise ValueError(f"unsupported frame rate {value} (choose: {', '.join(map(str, FPS_CHOICES))})")
+    return value
+
+
 def bitrate_kbps(capture: dict) -> int:
-    """Explicit bitrate_kbps wins; 0/absent means pick from resolution + quality."""
+    """Explicit bitrate_kbps wins; 0/absent means pick from resolution + quality (+ fps)."""
     explicit = int(capture.get("bitrate_kbps") or 0)
     if explicit > 0:
         return explicit
@@ -42,7 +50,12 @@ def bitrate_kbps(capture: dict) -> int:
     q = str(capture.get("quality", DEFAULT_QUALITY)).lower()
     if q not in QUALITIES:
         raise ValueError(f"unknown quality {q!r} (choose: {', '.join(QUALITIES)})")
-    return _MBPS.get(res, _MBPS["native"])[QUALITIES.index(q)] * 1000
+    mbps = _MBPS.get(res, _MBPS["native"])[QUALITIES.index(q)]
+    # Twice the frames needs ~1.5x the bits for the same look (motion between
+    # frames is smaller, so each frame costs less).
+    if fps(capture) == 120:
+        mbps = round(mbps * 1.5)
+    return mbps * 1000
 
 
 def buffer_gb(kbps: int, seconds: int = 3600) -> float:

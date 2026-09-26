@@ -252,6 +252,8 @@ class OverlayOffscreen(unittest.TestCase):
                          ["720p", "1080p", "1440p", "4K", "Native"])
         self.key(Qt.Key_Right)                   # 1440p
         self.assertIn("11 GB", bar.foot.text().replace("10.8", "11"))
+        self.key(Qt.Key_Down)                    # frame rate row (stays 60 fps)
+        self.assertTrue(bar.row("fps").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Right)                   # ultra
         self.key(Qt.Key_Down)
@@ -322,6 +324,7 @@ class OverlayOffscreen(unittest.TestCase):
         row = bar.row("audio_source")
         self.assertTrue(row.cycle)
         self.assertEqual(row.cur.text(), "Default output")
+        self.key(Qt.Key_Down)
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Down)
         self.assertTrue(row.cur.hasFocus())

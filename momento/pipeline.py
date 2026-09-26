@@ -112,7 +112,7 @@ class Recorder:
         self.source_name = ""
         self.encoder_name = ""
         self.buffer_dir = Path(cfg["buffer"]["dir"])
-        self.fps = quality.FPS
+        self.fps = quality.fps(cfg["capture"])
         self.size = quality.resolution(cfg["capture"])
 
         self._pipeline: Gst.Pipeline | None = None
@@ -358,6 +358,9 @@ class Recorder:
         if not isinstance(pipeline, Gst.Pipeline):
             raise RuntimeError("parse_launch did not return a pipeline")
 
+        # Recreate the folder if something removed it while we were running
+        # (a cache cleaner, or a manual rm); otherwise every retry fails.
+        self.buffer_dir.mkdir(parents=True, exist_ok=True)
         mux = pipeline.get_by_name("mux")
         mux.set_property("max-size-time", seg_ns)
         mux.set_property("location", str(self.buffer_dir / "seg%08d.ts"))

@@ -1053,6 +1053,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 micdev.append((vals["mic_device"], vals["mic_device"], True))
             self.rows = [
                 SettingRow(self, "resolution", "Resolution", res, vals["resolution"], avail),
+                SettingRow(self, "fps", "Frame rate",
+                           [(f, f"{f} fps") for f in data["choices"].get("fps", [60])],
+                           vals.get("fps", quality.FPS), avail),
                 SettingRow(self, "quality", "Quality", qual, vals["quality"], avail),
                 SettingRow(self, "audio_source", "Sound", sound, vals["audio_source"], avail,
                            cycle=len(sound) - 2 > CYCLE_OVER),
@@ -1079,11 +1082,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def estimate(self):
             v = self.pending()
-            cap = {"resolution": v["resolution"], "quality": v["quality"],
+            cap = {"resolution": v["resolution"], "quality": v["quality"], "fps": v.get("fps", quality.FPS),
                    "bitrate_kbps": self.sdata["values"].get("bitrate", 0)}
             secs = int(self.sdata.get("max_seconds") or 3600)
             gb = quality.buffer_gb(quality.bitrate_kbps(cap), secs)
-            return f"{self.sdata.get('fps', quality.FPS)} fps · ~{gb:.1f} GB for {secs // 60} min"
+            return f"{cap['fps']} fps · ~{gb:.1f} GB for {secs // 60} min"
 
         def update_foot(self):
             if self.apply_state is None:
@@ -1097,13 +1100,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.apply_state = None
             self.update_foot()
 
-        def close_settings(self):
+        def close_settings(self, focus_key="gear"):
             if self.mode != "settings" or self.apply_state == "busy":
                 return
             self.apply_state = None
             self.idle.setInterval(IDLE_CLOSE_MS)
             self.idle.start()
-            self.back_to_clip("gear")
+            self.back_to_clip(focus_key)
+            if focus_key is None:
+                self.focus_default()  # after Apply: back on a clip length, not the gear
             self.refresh_async()
 
         def apply_settings(self):
@@ -1167,7 +1172,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def after_apply(self):
             if self.mode == "settings" and self.apply_state == "done":
                 self.apply_state = None
-                self.close_settings()
+                self.close_settings(focus_key=None)
 
         def settings_row_index(self):
             w = QApplication.focusWidget()
