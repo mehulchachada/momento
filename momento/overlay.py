@@ -2839,7 +2839,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             factory = PAD_FACTORY or gamepad.Gamepads
             hub = factory(navigate=True, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
                           on_action=self.on_pad_action, on_chord=self.on_pad_chord,
-                          on_button=self.on_pad_button)
+                          on_button=self.on_pad_button, on_devices=self.on_pads_changed)
             try:
                 ok = hub.start()
             except Exception:  # noqa: BLE001
@@ -2852,6 +2852,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.pads_handle = hub.attach_qt(self)
             if ctl["exclusive"]:
                 hub.grab()
+            self.on_pads_changed()
 
         def pads_close(self):
             hub, self.pads = self.pads, None
@@ -2881,6 +2882,20 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 k = Qt.Key_P          # X / Square: pause / resume (play when off)
             if k is not None:
                 self.handle_key(_PadKey(k))
+
+        def pad_connected(self):
+            """A controller drives the bar now (its hub has one open): the gallery's hints
+            show its buttons; without one (or with controllers off) they show the keys."""
+            devices = getattr(self.pads, "devices", None)
+            try:
+                return bool(devices()) if devices is not None else False
+            except Exception:  # noqa: BLE001 - only decides which hints show
+                return False
+
+        def on_pads_changed(self):
+            """A controller came or went (or the hub opened): the hints follow."""
+            if self.gallery is not None and self.mode == "gallery":
+                self.gallery.sync_hints()
 
         def on_pad_button(self, name, pressed):
             """Any controller button (a trigger in the clip view too) counts as use."""

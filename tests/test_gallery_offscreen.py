@@ -499,7 +499,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIn("Clip", g.footer.meta.text())
         self.assertIn("1:00", g.footer.meta.text())
         self.assertIn("Today", g.footer.meta.text())
-        self.assertEqual(g.footer.hint, self.gallery_mod.CLIP_HINT)
+        self.assertEqual(g.footer.hint, self.gallery_mod.CLIP_KEYS)   # no controller: the keys
         self.player.advance(12_000)
         self.assertEqual(g.panel.w["now"].text(), "0:12")
         self.assertAlmostEqual(g.panel.w["scrub"].value, 0.2, places=3)
@@ -534,7 +534,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(g.panel.clipbox.isHidden() and not g.panel.shotbox.isHidden())
         self.assertIn("1920×1080", g.panel.w["dims"].text())
         self.assertIn("PNG", g.panel.w["dims"].text())
-        self.assertEqual(g.footer.hint, self.gallery_mod.SHOT_HINT)
+        self.assertEqual(g.footer.hint, self.gallery_mod.SHOT_KEYS)
         bar.on_pad_action("next_section")                             # RB: clip1
         bar.on_pad_action("next_section")                             # RB: shot1
         bar.on_pad_action("prev_section")                             # LB: clip1 (fast: one load)
@@ -618,8 +618,8 @@ class GalleryOffscreen(unittest.TestCase):
         QTest.mouseClick(s, Qt.LeftButton, pos=QPoint(6 + (s.width() - 12) // 4, s.height() // 2))
         self.assertAlmostEqual(self.player.calls[-1][1] / 1000, 15.0, delta=0.2)
 
-    def test_triggers_from_a_controller(self):
-        """LT / RT on a (fake) pad reach the gallery as -10 / +10 s."""
+    def pad_bar(self):
+        """A bar with one (fake) Xbox-layout pad connected; returns (bar, [devices])."""
         made = []
 
         def factory(**kw):
@@ -636,6 +636,11 @@ class GalleryOffscreen(unittest.TestCase):
         bar = self.bar()
         self.addCleanup(lambda: [d.close() for d in made])
         self.wait_for(lambda: bar.pads is not None)
+        return bar, made
+
+    def test_triggers_from_a_controller(self):
+        """LT / RT on a (fake) pad reach the gallery as -10 / +10 s."""
+        bar, made = self.pad_bar()
         g = self.open(bar)
 
         def press(code):
@@ -655,6 +660,57 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIsNone(g.full)
         press(gamepad.BTN_EAST)                                       # B: back to the clip view
         self.assertEqual(bar.mode, "clip")
+
+    def test_hints_follow_the_controller(self):
+        """A connected controller: its buttons in the hints; unplugged: the keys."""
+        gm = self.gallery_mod
+        self.screen_size()
+        bar, made = self.pad_bar()
+        self.assertTrue(bar.pad_connected())
+        g = self.open(bar)
+        self.assertEqual(g.footer.hint, gm.CLIP_HINT)
+        self.assertIn((["↑", "↓"], "filter"), gm.CLIP_HINT)          # the stick / D-pad: filters
+        self.key(Qt.Key_M)                                            # sound on: the speaker shows it
+        self.player.advance(21_000)
+        g.panel.w["play"].setFocus()
+        pump(self.app, 0.05)
+        self.shot(bar, "14-above-clip-controller")
+        self.key(Qt.Key_F)
+        chips = g.full.findChildren(g.W.Chips)
+        self.assertEqual([c.tokens for c in chips], [gm.BACK_HINT, gm.BACK_HINT])
+        self.key(Qt.Key_F)
+        bar.pads.remove_device(made[-1].path)                         # unplugged: the keys, at once
+        self.assertFalse(bar.pad_connected())
+        self.assertEqual(g.footer.hint, gm.CLIP_KEYS)
+        self.key(Qt.Key_Right)                                        # a screenshot
+        self.settle_items(g)
+        self.assertEqual(g.footer.hint, gm.SHOT_KEYS)
+        self.key(Qt.Key_F)
+        self.assertEqual([c.tokens for c in g.full.findChildren(g.W.Chips)], [gm.BACK_KEYS, gm.BACK_KEYS])
+
+    def test_keyboard_hints_without_a_controller(self):
+        """No controller (the sandbox opens none): the keys, for a clip and a screenshot."""
+        gm = self.gallery_mod
+        self.screen_size()
+        bar = self.bar()
+        self.assertFalse(bar.pad_connected())
+        g = self.open(bar)
+        self.assertEqual(g.footer.hint, gm.CLIP_KEYS)
+        self.assertIn((["M"], "sound"), gm.CLIP_KEYS)
+        self.player.advance(21_000)
+        pump(self.app, 0.05)
+        self.shot(bar, "15-above-clip-keyboard")
+        self.key(Qt.Key_Right)                                        # a screenshot, selected
+        self.settle_items(g)
+        self.assertEqual(g.footer.hint, gm.SHOT_KEYS)
+        pump(self.app, 0.05)
+        self.shot(bar, "13-above-screenshot-keyboard")
+        self.key(Qt.Key_Down)                                         # ↓: the next filter
+        self.assertEqual(g.filter, "clip")
+        self.key(Qt.Key_F)
+        self.assertEqual([c.tokens for c in g.full.findChildren(g.W.Chips)], [gm.BACK_KEYS, gm.BACK_KEYS])
+        widths = [gm.chip_run(None, 0, 0, t) for t in (gm.CLIP_HINT, gm.CLIP_KEYS)]
+        self.assertLess(max(widths), g.footer.width() - 2 * 240)       # clear of the meta and Back
 
     def test_mute_attaches_audio_only_when_on(self):
         bar = self.bar()

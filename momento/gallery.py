@@ -12,7 +12,8 @@ bar paints the two apart). Top to bottom: the filters (All · Clips ·
 Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9 stage, the transport row
 (−10, play/pause, +10, sound, time, scrubber, length, full screen; a
 screenshot shows its size and format instead) and a footer (what it is and
-when, the controller hints, Back).
+when, the hints, Back). The hints show a controller's buttons while the bar has
+one connected (they follow a hotplug), else the keys.
 
 Clips play muted. The speaker button, M or X / Square (the west button) turns
 the sound on; that sticks while the gallery is open (the next clip too, full
@@ -83,11 +84,16 @@ FILTERS = (("all", "All"), ("clip", "Clips"), ("shot", "Screenshots"))
 EMPTY_FILTER = {"all": "Nothing saved yet", "clip": "No clips yet", "shot": "No screenshots yet"}
 KIND_NAMES = {"clip": "Clip", "shot": "Screenshot"}
 
-# The controller hints in the footer: [([buttons], word), ...]
-CLIP_HINT = [(["LB", "RB"], "browse"), (["A"], "play"), (["LT", "RT"], "10 s"), (["X"], "sound"),
-             (["Y"], "full screen")]
-SHOT_HINT = [(["LB", "RB"], "browse"), (["Y"], "full screen")]
+# The hints in the footer and the full screen strip: [([buttons or keys], word), ...].
+# A controller's buttons while the bar has one (Bar.pad_connected), else the keys.
+CLIP_HINT = [(["LB", "RB"], "browse"), (["↑", "↓"], "filter"), (["A"], "play"), (["LT", "RT"], "10 s"),
+             (["X"], "sound"), (["Y"], "full screen")]
+SHOT_HINT = [(["LB", "RB"], "browse"), (["↑", "↓"], "filter"), (["Y"], "full screen")]
 BACK_HINT = [(["B"], "Back")]
+CLIP_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["Space"], "play"), (["J", "L"], "10 s"),
+             (["M"], "sound"), (["F"], "full screen")]
+SHOT_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["F"], "full screen")]
+BACK_KEYS = [(["Esc"], "Back")]
 
 
 # --------------------------------------------------------------------------
@@ -623,15 +629,22 @@ def _widgets(kit):
                 self.seek.emit(max(0.0, min(1.0, self._frac(ev))))
 
     class Chips(QWidget):
-        """Controller hints on their own (full screen: [B] Back); a click does what they say."""
+        """Hints on their own (full screen: [B] / [Esc] Back); a click does what they say."""
 
         clicked = Signal()
 
         def __init__(self, tokens, height=ov.BAR_HEIGHT):
             super().__init__()
-            self.tokens = tokens
-            self.setFixedSize(int(chip_run(None, 0, 0, tokens)) + 10, height)
+            self.tokens = None
+            self.setFixedHeight(height)
+            self.set_tokens(tokens)
             self.setCursor(Qt.PointingHandCursor)
+
+        def set_tokens(self, tokens):
+            if tokens is not self.tokens:
+                self.tokens = tokens
+                self.setFixedWidth(int(chip_run(None, 0, 0, tokens)) + 10)
+                self.update()
 
         def paintEvent(self, ev):
             p = QPainter(self)
@@ -644,11 +657,11 @@ def _widgets(kit):
                 self.clicked.emit()
 
     class Footer(QWidget):
-        """The panel's last row: what and when · controller hints (centred) · Back."""
+        """The panel's last row: what and when · controller or key hints (centred) · Back."""
 
         def __init__(self):
             super().__init__()
-            self.hint = CLIP_HINT
+            self.hint = CLIP_KEYS
             self.setFixedHeight(ov.BAR_HEIGHT)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(18, 0, 0, 0)
@@ -1027,7 +1040,7 @@ class Gallery(QObject):
         lay.addSpacing(10)
         lay.addWidget(divider())
         lay.addSpacing(16)
-        back = W.Chips(BACK_HINT)
+        back = W.Chips(BACK_HINT if self.bar.pad_connected() else BACK_KEYS)
         back.clicked.connect(self.back)
         lay.addWidget(back)
         strip.setFixedHeight(ov.BAR_HEIGHT + 2)
@@ -1722,14 +1735,12 @@ class Gallery(QObject):
             if clip:
                 dur = self.duration or self.durations.get((str(item.path), item.mtime))
                 meta = meta_html(KIND_NAMES["clip"], [ov._mmss(dur) if dur else None, when(item.mtime)])
-                hint = CLIP_HINT
             else:
                 meta = meta_html(KIND_NAMES["shot"], [when(item.mtime)])
-                hint = SHOT_HINT
             dims = dims_html(self.dims.get(str(item.path)), item.size, item.path.suffix) if shot else ""
         else:
-            meta, dims, hint = "", "", []
-        self.footer.set_hint(hint)
+            meta, dims = "", ""
+        self.sync_hints()
         for c in self._views():
             w = c.w
             if "counter" in w:
@@ -1758,6 +1769,23 @@ class Gallery(QObject):
         self.sync_time()
         self._repaint()
         self._fix_focus()
+
+    def sync_hints(self):
+        """The footer's hints and the full screen Back chip: a controller's buttons while
+        the bar has one connected, else the keys (also called on a hotplug)."""
+        pad = self.bar.pad_connected()
+        item = self.current()
+        if item is None:
+            hint = []
+        elif item.kind == "clip":
+            hint = CLIP_HINT if pad else CLIP_KEYS
+        else:
+            hint = SHOT_HINT if pad else SHOT_KEYS
+        self.footer.set_hint(hint)
+        if self.full is not None:
+            for chips in self.full.findChildren(self.W.Chips):
+                chips.set_tokens(BACK_HINT if pad else BACK_KEYS)
+            self.full.place()
 
     # ------------------------------------------------------------------ focus
     def _widget(self, name):
