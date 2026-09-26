@@ -1094,7 +1094,7 @@ class DaemonControlTest(unittest.TestCase):
         self.free = need - (1 << 30)                  # a restart wouldn't fit; capture keeps going
         self.d._storage_tick()
         self.assertEqual(self.notes, ["Momento: low storage"])
-        self.assertEqual(self.bodies, [(f"60 min at 1080p High needs {storage.human(need)}, "
+        self.assertEqual(self.bodies, [(f"15 min at 1080p High needs {storage.human(need)}, "
                                         f"{storage.human(need - (1 << 30))} free. Free up space.", "dialog-warning")])
         st = self.d.status()
         self.assertEqual((st["state"], st["storage"]["low"], st["storage"]["ok"]), ("recording", True, False))
@@ -1452,6 +1452,7 @@ class StorageTest(unittest.TestCase):
 
         cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
         cfg["capture"].update(capture)
+        cfg["buffer"]["max_seconds"] = 3600   # the numbers below are for a 60-minute replay
         return cfg
 
     def test_buffer_math(self):
@@ -3695,6 +3696,15 @@ class HistorySettingsTest(unittest.TestCase):
         self.assertIs(cfg["ui"]["keep_bar_loaded"], False)
         self.assertEqual(self.settings.apply({"hour_warning": "3"}, self.path), {})
 
+    def test_replay_length_defaults_to_15_minutes(self):
+        self.assertEqual(self.config.DEFAULTS["buffer"]["max_seconds"], 900)
+        self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 900)
+        # a hand-edited length up to 60 minutes is taken as it is; longer is capped
+        self.path.write_text("[buffer]\nmax_seconds = 1234\n")
+        self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 1234)
+        self.path.write_text("[buffer]\nmax_seconds = 7200\n")
+        self.assertEqual(self.config.load(self.path)["buffer"]["max_seconds"], 3600)
+
     def test_hand_edited_warning_falls_back(self):
         self.path.write_text("[buffer]\nwarn_minutes = 45\n")
         with self.assertLogs("momento.config", "WARNING"):
@@ -3733,7 +3743,7 @@ class HistorySettingsTest(unittest.TestCase):
             self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
         text = out.getvalue()
         self.assertIn("history: kept when recording stops", text)
-        self.assertIn("hour mark: warn 5 min before the 60m mark", text)
+        self.assertIn("hour mark: warn 5 min before the 15m mark", text)
         self.assertIn("clip bar: kept loaded", text)
         # daemon running: a live setting says so instead of "restarted"/"paused"
         out = io.StringIO()
@@ -3818,7 +3828,7 @@ class CLIStatusTest(unittest.TestCase):
                 _code, text = self.run_cli(["--config", str(path), "settings"], [self.ST])
                 self.assertIn("resolution: 1080p, records at 720p (your screen's size)", text)
                 self.assertIn("bitrate: 10 Mbps (automatic)", text)
-                self.assertIn("disk use: about 4.8 GB for the full buffer", text)
+                self.assertIn("disk use: about 1.2 GB for the full buffer", text)
                 _code, text = self.run_cli(["--config", str(path), "settings"], [OSError("not running")])
                 self.assertIn("resolution: 1080p\n", text)
                 self.assertIn("bitrate: 15 Mbps (automatic)", text)
@@ -3921,6 +3931,10 @@ class DaemonHourTest(unittest.TestCase):
         from momento import daemon, exporter
 
         DaemonControlTest.setUp(self)
+        # These tests are about a 60-minute replay (the longest); 15 minutes has its own.
+        self.path.write_text(self.path.read_text() + "max_seconds = 3600\n")   # [buffer] is last
+        self.d.cfg["buffer"]["max_seconds"] = 3600
+        self.d.ring.max_seconds = 3600
         self.sent = []      # (summary, body)
         self.exports = []   # (duration, pins while exporting, out path)
         self.buf = Path(self.d.cfg["buffer"]["dir"])

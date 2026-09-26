@@ -71,14 +71,17 @@ DEFAULTS = {
         "bitrate_kbps": 160,
     },
     "buffer": {
-        "max_seconds": 3600,
+        # How much replay to keep, in seconds: 900 (15 min, the default), 1800 or
+        # 3600 (Settings -> General -> Replay length). Any value up to 3600 works
+        # when set by hand.
+        "max_seconds": 900,
         "segment_seconds": 10,
         "dir": str(CACHE_DIR / "buffer"),
         # Keep the replay when recording stops (Stop, or the recorded window closing);
-        # with this on, every full buffer length ("hour") is also saved to the clips
-        # folder. Off: stopping clears it.
+        # with this on, every full replay length is also saved to the clips folder.
+        # Off: stopping clears it.
         "keep_history": False,
-        # Minutes before the hour mark to warn (3-10; the bar offers 10, 5, 3).
+        # Minutes before the replay is full to warn (3-10; the bar offers 10, 5, 3).
         "warn_minutes": 10,
     },
     "output": {
@@ -141,12 +144,17 @@ def forget_portal_token(target: str) -> bool:
         return False
 
 
+# Replay length ([buffer] max_seconds): what the settings offer, in minutes. A
+# hand-edited max_seconds up to MAX_REPLAY_SECONDS is accepted as it is.
+REPLAY_MINUTES = (15, 30, 60)
+MAX_REPLAY_SECONDS = 3600
+
 WARN_MINUTES = (10, 5, 3)  # what the settings UI offers; any whole number 3-10 is valid
 WARN_RANGE = (3, 10)
 
 
 def keep_history(cfg: dict) -> bool:
-    """[buffer] keep_history: keep the replay when recording stops (and save each full hour)."""
+    """[buffer] keep_history: keep the replay when recording stops (and save each full replay length)."""
     return bool((cfg.get("buffer") or {}).get("keep_history", DEFAULTS["buffer"]["keep_history"]))
 
 
@@ -233,7 +241,7 @@ def load(path: Path | None = None) -> dict:
         with open(path, "rb") as f:
             _merge(cfg, tomllib.load(f))
     cfg["_path"] = str(path)
-    cfg["buffer"]["max_seconds"] = min(int(cfg["buffer"]["max_seconds"]), 3600)
+    cfg["buffer"]["max_seconds"] = min(int(cfg["buffer"]["max_seconds"]), MAX_REPLAY_SECONDS)
     if not cfg["output"]["dir"]:
         cfg["output"]["dir"] = str(_videos_dir() / "Momento")
     cfg["buffer"]["dir"] = os.path.expanduser(cfg["buffer"]["dir"])
