@@ -74,7 +74,9 @@ PILL_H = 32              # every button is a pill (or a circle) this tall, centr
 PILL_INSET = 4           # each side: the gap between pills, with room for the focus ring
 PILL_PAD = 10            # text padding inside a clip-length pill (every length then fits OPTION_MIN_WIDTH)
 OPTION_MIN_WIDTH = 60
-IDLE_CLOSE_MS = 10_000   # no interaction: hide after this long
+# Hiding on its own (every view: clip lengths, settings, the stop question, the gallery):
+IDLE_HIDE_MS = 3_000     # no key, controller or mouse input on the bar for this long
+LEAVE_HIDE_MS = 500      # the pointer left the bar (coming back cancels it)
 # After an interaction the result is shown briefly, then the bar hides:
 RESULT_CLOSE_MS = 1_200  # "Saved <file>" or a save error
 STOP_CLOSE_MS = 800      # the Off state after a confirmed Stop
@@ -101,8 +103,7 @@ SEG_PAD = 12
 SEG_SPACING = 0          # pills carry their own gap (PILL_INSET)
 ARROW_W = PILL_H + 2 * PILL_INSET
 CYCLE_OVER = 4           # more devices than this -> ‹ current › instead of a row of names
-SETTINGS_IDLE_MS = 30_000
-GALLERY_IDLE_MS = 60_000   # the gallery hides after this long without input (never while a clip plays)
+GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: people watch)
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
@@ -1674,8 +1675,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
             self.idle = QTimer(self)
             self.idle.setSingleShot(True)
-            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.idle.timeout.connect(self.on_idle)
+            self.leave = QTimer(self)           # the pointer left the bar
+            self.leave.setSingleShot(True)
+            self.leave.setInterval(LEAVE_HIDE_MS)
+            self.leave.timeout.connect(self.on_leave)
+            self.setMouseTracking(True)         # moving the pointer over the bar counts as use
+            self.track_mouse(self)
             self.poll = QTimer(self)
             self.poll.setInterval(1000)
             self.poll.timeout.connect(self.refresh_async)
@@ -2149,7 +2156,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             self.mode = "clip"
             self.back_to_clip("stop")
-            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.idle.start()                   # back to the normal auto-hide
 
         def confirm_stop(self):
@@ -2294,7 +2301,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.update_foot()
             self.relayout()
             self.focus_line(1)                  # the open tab's first row
-            self.idle.setInterval(SETTINGS_IDLE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.idle.start()
 
         def clear_rows(self):
@@ -2435,6 +2442,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 micdev.setHidden(mic.value != "on")
             self.show_tab(self.tab_names.index(self.last_tab) if self.last_tab in self.tab_names else 0)
             self.update_fit()
+            self.track_mouse(self.panel)
             self.update_res_note()
 
         # ---- the resolution cap
@@ -2598,7 +2606,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode != "settings" or self.apply_state == "busy":
                 return
             self.apply_state = None
-            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.idle.start()
             self.back_to_clip(focus_key)
             if focus_key is None:
@@ -2791,7 +2799,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             factory = PAD_FACTORY or gamepad.Gamepads
             hub = factory(navigate=True, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
-                          on_action=self.on_pad_action, on_chord=self.on_pad_chord)
+                          on_action=self.on_pad_action, on_chord=self.on_pad_chord,
+                          on_button=self.on_pad_button)
             try:
                 ok = hub.start()
             except Exception:  # noqa: BLE001
@@ -2833,6 +2842,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 k = Qt.Key_P          # X / Square: pause / resume (play when off)
             if k is not None:
                 self.handle_key(_PadKey(k))
+
+        def on_pad_button(self, name, pressed):
+            """Any controller button (a trigger in the clip view too) counts as use."""
+            if self.isVisible():
+                self.touch_idle()
 
         def pad_section(self, d):
             """Bumpers: jump between groups (clip lengths / buttons) or settings tabs."""
@@ -2887,6 +2901,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     ui_font=ui_font, draw_line_glyph=_draw_line_glyph, divider=divider,
                     layer_full=_apply_layer_shell_full, set_keyboard=_set_keyboard_interactivity)
                 self.gallery = gallery_mod.Gallery(self, kit)
+                self.track_mouse(self.gallery_host)
+                self.track_mouse(self.gallery_foot)
             self.gallery.open()
 
         def gallery_empty(self):
@@ -2915,7 +2931,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Back from the gallery to the clip view, on the gallery button."""
             self.pad_renew.stop()
             self.mode = "clip"
-            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.back_to_clip()
             if self.stack.currentIndex() == 0:
                 self.gallery_btn.setFocus(Qt.OtherFocusReason)
@@ -2929,20 +2945,39 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.gallery.close()
             if self.mode == "gallery":
                 self.mode = "clip"
-                self.idle.setInterval(IDLE_CLOSE_MS)
+                self.idle.setInterval(IDLE_HIDE_MS)
 
         def renew_pads(self):
             if self.pads is not None and self.mode == "gallery":
                 self.pads.renew()
 
         def touch_idle(self):
-            """Input: restart the auto-hide. Never while a gallery clip plays."""
+            """Input: restart the auto-hide (3 s; 10 s in the gallery). Never while a gallery
+            clip plays, and not while a save / apply / stop runs (its result closes the bar)."""
             if self.saving or self.done or not self.isVisible():
                 return
             if self.mode == "gallery" and self.gallery is not None and self.gallery.playing():
                 self.idle.stop()
                 return
+            self.idle.setInterval(GALLERY_IDLE_MS if self.mode == "gallery" else IDLE_HIDE_MS)
             self.idle.start()
+
+        def track_mouse(self, root):
+            """Pointer moves over ``root`` and everything in it reach eventFilter (as use)."""
+            for w in [root] + root.findChildren(QWidget):
+                w.setMouseTracking(True)
+
+        def leave_exempt(self):
+            """Watching a clip with the pointer parked elsewhere is normal; full screen too."""
+            g = self.gallery
+            return self.mode == "gallery" and g is not None and (g.playing() or g.full is not None)
+
+        def on_leave(self):
+            if not self.isVisible() or self.leave_exempt():
+                return
+            if self.saving or self.done or self.control_busy or self.apply_state == "busy":
+                return                          # its result closes the bar (RESULT_CLOSE_MS ...)
+            self.request_close()
 
         # ---------------- input
         def on_idle(self):
@@ -2986,6 +3021,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.close_gallery()
             self.gallery_hint = None
             self.idle.stop()
+            self.leave.stop()
             self.poll.stop()
             self.ticker.stop()
             self.live_ticking = False
@@ -3009,7 +3045,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.stack.setCurrentIndex(0)
             self.set_view("off", False)
             self.set_time("0:00")
-            self.idle.setInterval(IDLE_CLOSE_MS)
+            self.idle.setInterval(IDLE_HIDE_MS)
             self.focus_visible = True           # opened by the hotkey: keyboard / controller first
             self.apply_status(self.cached_status())
             self.relayout()
@@ -3060,6 +3096,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.gen += 1
             self.close_gallery()                # before the hide: nothing plays once it is gone
             self.idle.stop()
+            self.leave.stop()
             self.poll.stop()
             self.ticker.stop()
             if self.isVisible():
@@ -3161,8 +3198,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def eventFilter(self, obj, ev):
             t = ev.type()
-            if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
+            if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.TouchBegin, QEvent.Wheel,
+                     QEvent.MouseMove, QEvent.HoverMove) and self.isVisible():
                 self.touch_idle()      # restart the idle auto-close
+            if self.isVisible() and isinstance(obj, QWidget):
+                if t == QEvent.Leave and obj is self:
+                    if not self.leave_exempt():
+                        self.leave.start()      # the pointer left the bar
+                elif (t in (QEvent.Enter, QEvent.MouseMove, QEvent.HoverMove, QEvent.MouseButtonPress)
+                      and obj.window() is self):
+                    self.leave.stop()           # ...and came back
             if t in (QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
                 self.set_focus_visible(False)
             if t == QEvent.KeyPress and self.isVisible():

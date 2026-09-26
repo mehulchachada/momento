@@ -23,8 +23,8 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.pop("QT_WAYLAND_SHELL_INTEGRATION", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6.QtCore import QEvent, QPoint, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPixmap  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPixmap, QWheelEvent  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QWidget  # noqa: E402
 
@@ -491,13 +491,13 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(daemon)
         self.open_settings(bar)
         self.assertIn("your replay is kept", bar.note.text())
-        self.assertEqual(bar.idle.interval(), overlay.SETTINGS_IDLE_MS)
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
         bar.row("quality").buttons[0].click()   # touch / click
         self.assertEqual(bar.row("quality").value, "standard")
         self.assertEqual(bar.changes(), {"quality": "standard"})
         self.key(Qt.Key_Escape)                  # back to clips, nothing written
         self.assertEqual(bar.mode, "clip")
-        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
         self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)
         self.assertTrue(bar.gear.hasFocus())
         self.open_settings(bar)
@@ -1114,7 +1114,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertLessEqual(overlay.RESULT_CLOSE_MS, 1200)
         self.assertLessEqual(overlay.APPLY_CLOSE_MS, 1200)
         self.assertLessEqual(overlay.STOP_CLOSE_MS, 800)
-        self.assertEqual(overlay.IDLE_CLOSE_MS, 10_000)
+        self.assertEqual((overlay.IDLE_HIDE_MS, overlay.LEAVE_HIDE_MS, overlay.GALLERY_IDLE_MS),
+                         (3_000, 500, 10_000))
 
     def test_stop_hides_quickly_and_cancel_restarts_idle(self):
         daemon = FakeDaemon(True)
@@ -1126,7 +1127,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar.cancel_confirm()                      # back to the clip view, normal auto-hide again
         self.assertEqual(bar.mode, "clip")
         self.assertTrue(bar.idle.isActive())
-        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
         bar.ask_stop()
         pump(self.app, 0.05)
         self.shot(bar, "stop-confirm-icons", "v5")
@@ -1687,6 +1688,92 @@ class OverlayOffscreen(unittest.TestCase):
         self.check_screenshot_hides_first(bar, daemon, bar.controls[0]["shot"].click)
         self.wait_for(lambda: quits)
 
+class AutoHide(unittest.TestCase):
+    """The bar hides 3 s after the last input, and 0.5 s after the pointer leaves it."""
+
+    make = OverlayOffscreen.make
+    wait_for = OverlayOffscreen.wait_for
+    key = OverlayOffscreen.key
+
+    @classmethod
+    def setUpClass(cls):
+        OverlayOffscreen.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        OverlayOffscreen.tearDownClass.__func__(cls)
+
+    def resident(self, daemon=None):
+        bar = self.make(daemon or FakeDaemon(True))
+        bar.resident = True                      # hiding is observable (a one-shot bar would quit)
+        bar.idle.start()                         # as present() does
+        return bar
+
+    def leave(self, bar):
+        self.app.sendEvent(bar, QEvent(QEvent.Leave))
+
+    def test_untouched_hides_after_3_s_in_clip_and_settings(self):
+        bar = self.resident()
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
+        self.key(Qt.Key_S)
+        self.wait_for(lambda: bar.mode == "settings")
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)   # no longer 30 s in settings
+        self.assertTrue(bar.idle.isActive())
+        bar.idle.setInterval(300)                                     # (shortened for the test)
+        bar.idle.start()
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+
+    def test_any_input_restarts_the_3_s(self):
+        bar = self.resident()
+        for send in (lambda: self.key(Qt.Key_Right),
+                     lambda: bar.on_pad_button("tl2", True),              # a controller button
+                     lambda: self.app.sendEvent(bar.options[0], QMouseEvent(
+                         QEvent.MouseMove, QPointF(5, 5), QPointF(5, 5), Qt.NoButton, Qt.NoButton,
+                         Qt.NoModifier)),
+                     lambda: self.app.sendEvent(bar, QWheelEvent(
+                         QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120), Qt.NoButton,
+                         Qt.NoModifier, Qt.NoScrollPhase, False))):
+            bar.idle.stop()
+            send()
+            self.assertTrue(bar.idle.isActive())
+            self.assertGreater(bar.idle.remainingTime(), overlay.IDLE_HIDE_MS - 200)
+        self.assertTrue(bar.isVisible())
+
+    def test_pointer_leaving_hides_after_half_a_second(self):
+        bar = self.resident()
+        self.leave(bar)
+        self.assertTrue(bar.leave.isActive())
+        self.assertEqual(bar.leave.interval(), overlay.LEAVE_HIDE_MS)
+        pump(self.app, 0.2)
+        self.app.sendEvent(bar.options[0], QEvent(QEvent.Enter))      # back over the bar: stays
+        self.assertFalse(bar.leave.isActive())
+        pump(self.app, 0.5)
+        self.assertTrue(bar.isVisible())
+        self.leave(bar)
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+        self.assertLess(bar.leave.interval(), 1000)
+
+    def test_leaving_during_a_save_waits_for_the_result(self):
+        daemon = FakeDaemon(True)
+        bar = self.resident(daemon)
+        self.key(Qt.Key_Return)                                       # save (0.2 s at the fake daemon)
+        self.assertTrue(bar.saving)
+        self.leave(bar)
+        pump(self.app, overlay.LEAVE_HIDE_MS / 1000 + 0.1)
+        self.assertTrue(bar.isVisible())                              # the save goes on...
+        self.wait_for(lambda: bar.done)
+        self.assertIn("Saved", bar.line.text())                       # ...and its result shows
+        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+
+    def test_leave_while_hidden_or_shown_again(self):
+        bar = self.resident()
+        self.leave(bar)
+        bar.dismiss()
+        self.assertFalse(bar.leave.isActive())
+        bar.present()
+        self.assertFalse(bar.leave.isActive())                        # a new open starts clean
+
+
 class ResidentBar(unittest.TestCase):
     """The resident bar: built once, hidden, driven over its control socket."""
 
@@ -1747,7 +1834,7 @@ class ResidentBar(unittest.TestCase):
         self.assertIsNone(bar.apply_state)
         self.assertEqual(bar.line.text(), "")
         self.assertTrue(bar.focus_visible)
-        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
         self.assertTrue(bar.idle.isActive() and bar.poll.isActive())
         want = overlay._last_choice()
         self.assertTrue(next(o for o in bar.options if o.seconds == want).hasFocus())

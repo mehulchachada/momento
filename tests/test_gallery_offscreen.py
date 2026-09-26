@@ -656,7 +656,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(bar.idle.isActive())
         self.assertEqual(bar.idle.interval(), overlay.GALLERY_IDLE_MS)
         self.key(Qt.Key_Escape)
-        self.assertEqual(bar.idle.interval(), overlay.IDLE_CLOSE_MS)  # the clip view's own
+        self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)  # the clip view's own
         self.assertTrue(bar.idle.isActive())
 
     def test_pads_renewed_while_open(self):
@@ -702,8 +702,8 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(g.closing)
         self.assertIsNotNone(g.out_img)                               # a still of the stage while it folds
         self.assertIsNone(g.player)                                   # the player is already gone
-        self.wait_for(lambda: bar.height() == overlay.BAR_HEIGHT + 2, timeout=2)
-        self.assertTrue(bar.gallery_host.isHidden())
+        self.wait_for(lambda: bar.gallery_host.isHidden(), timeout=2)   # folded (the end of an
+        self.assertEqual(bar.height(), overlay.BAR_HEIGHT + 2)        # ease-out rounds to 0 early)
         self.assertFalse(g.closing)
         self.assertIsNone(g.out_img)                                  # ...and released
         self.assertEqual(gm.FADE_MS, overlay.ANIM_MS)
@@ -782,6 +782,29 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(bar.mode, "gallery")
         self.wait_for(lambda: g.leaving is None, timeout=2)
         self.assertFalse(view.isVisible())
+
+    def test_gallery_idle_and_leave_rules(self):
+        from PySide6.QtCore import QEvent
+
+        bar = self.bar()
+        bar.resident = True
+        bar.request_exit = lambda code: None
+        g = self.open(bar)
+        self.assertEqual(g.state, "playing")
+        self.app.sendEvent(bar, QEvent(QEvent.Leave))                 # watching, pointer parked away
+        self.assertFalse(bar.leave.isActive())
+        self.assertFalse(bar.idle.isActive())
+        self.key(Qt.Key_Space)                                        # paused: 10 s, not 3 s
+        self.assertEqual(bar.idle.interval(), overlay.GALLERY_IDLE_MS)
+        self.key(Qt.Key_F)                                            # full screen: exempt from leave
+        self.app.sendEvent(bar, QEvent(QEvent.Leave))
+        self.assertFalse(bar.leave.isActive())
+        self.key(Qt.Key_F)
+        pump(self.app, 0.1)                                           # (the bar, active again, gets an Enter)
+        self.app.sendEvent(bar, QEvent(QEvent.Leave))                 # paused, in the bar: 0.5 s
+        self.assertTrue(bar.leave.isActive())
+        self.wait_for(lambda: not bar.isVisible(), timeout=2)
+        self.assertIsNone(g.player)                                   # the normal teardown
 
     # ------------------------------------------------------------ full screen
     def test_full_screen_and_back_step_by_step(self):
