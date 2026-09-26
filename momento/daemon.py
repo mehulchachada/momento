@@ -75,6 +75,10 @@ class Daemon:
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
         self.server = ipc.Server(config.SOCKET_PATH, self.handle)
         self.server.start()
+        if self.bus is not None:
+            from .portal import register_app_id
+
+            register_app_id(self.bus, config.APP_ID)
         self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
         self.recorder.start()
         if self.cfg["hotkey"].get("enabled") and self.bus is not None:

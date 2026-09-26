@@ -32,6 +32,23 @@ PERSIST_PERSISTENT = 2
 _RESPONSE_TEXT = {1: "cancelled", 2: "failed"}
 
 
+def register_app_id(bus: dbus.Bus, app_id: str) -> None:
+    """Tell xdg-desktop-portal which app this connection is (host apps only).
+
+    Must happen before any portal session is created: registering later makes
+    the portal reject sessions opened under the old, empty app id
+    ("Invalid session"). Older portals lack the interface; that is fine.
+    """
+    try:
+        registry = dbus.Interface(
+            bus.get_object(BUS_NAME, OBJECT_PATH, follow_name_owner_changes=True),
+            "org.freedesktop.host.portal.Registry",
+        )
+        registry.Register(app_id, dbus.Dictionary({}, signature="sv"), timeout=3)
+    except dbus.DBusException as e:
+        log.debug("host portal Registry.Register: %s", e.get_dbus_message())
+
+
 class ScreenCastPortal:
     def __init__(self, bus: dbus.Bus, token_path: Path, cursor: bool):
         self.bus = bus
