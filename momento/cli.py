@@ -24,7 +24,7 @@ def _duration(text: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="momento", description="PS5-style replay buffer recorder.")
+    p = argparse.ArgumentParser(prog="momento", description="Instant replay and screenshots for Linux.")
     p.add_argument("--config", type=Path, metavar="PATH", help="config file (default: %(default)s)",
                    default=config.CONFIG_DIR / "config.toml")
     p.add_argument("-v", "--verbose", action="count", default=0, help="more logging (-vv for debug)")

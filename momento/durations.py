@@ -1,4 +1,4 @@
-"""Clip length presets, PS5-style."""
+"""Clip length presets."""
 
 import re
 
