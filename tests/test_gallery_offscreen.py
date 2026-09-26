@@ -266,6 +266,8 @@ class GalleryOffscreen(unittest.TestCase):
         self.addCleanup(setattr, gallery, "AUDIO_FACTORY", gallery.AUDIO_FACTORY)
         gallery.PLAYER_FACTORY = FakePlayer
         gallery.AUDIO_FACTORY = FakeAudio
+        self.addCleanup(setattr, gallery, "ANIMATE", gallery.ANIMATE)
+        gallery.ANIMATE = False       # end states at once; the motion tests turn it on
         # clip lengths without ffprobe: the fake files are not real MP4s
         self.addCleanup(setattr, gallery.media, "clip_duration", gallery.media.clip_duration)
         gallery.media.clip_duration = lambda path, timeout=3.0: {"Replay_a_1m.mp4": 60.0,
@@ -673,6 +675,114 @@ class GalleryOffscreen(unittest.TestCase):
         bar.renew_pads()                                              # not in the gallery: no renew
         self.assertEqual(hub.renewed, 1)
 
+    # ------------------------------------------------------------ motion
+    def motion(self):
+        self.gallery_mod.ANIMATE = True
+        return self.gallery_mod
+
+    def settle_motion(self, g, seconds=0.45):
+        pump(self.app, seconds)
+
+    def test_motion_panel_grows_and_folds(self):
+        gm = self.motion()
+        bar = self.bar()
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        full_h = overlay.BAR_HEIGHT + 2 + g.panel_height() + 1
+        self.assertLess(bar.height(), full_h)                         # growing, not a jump
+        self.assertIsNotNone(g.panel_w.graphicsEffect())              # the content fades in
+        self.wait_for(lambda: bar.height() == full_h, timeout=2)
+        self.settle_motion(g, 0.05)
+        self.assertIsNone(g.panel_w.graphicsEffect())                 # the effect goes with the motion
+        self.assertEqual(g.panel_w.geometry().bottom(), bar.gallery_host.height() - 1)
+        self.assertTrue(g.panel.w["play"].hasFocus())
+        self.key(Qt.Key_Escape)                                       # back: the clip view is live at once
+        self.assertEqual(bar.mode, "clip")
+        self.assertTrue(g.closing)
+        self.assertIsNotNone(g.out_img)                               # a still of the stage while it folds
+        self.assertIsNone(g.player)                                   # the player is already gone
+        self.wait_for(lambda: bar.height() == overlay.BAR_HEIGHT + 2, timeout=2)
+        self.assertTrue(bar.gallery_host.isHidden())
+        self.assertFalse(g.closing)
+        self.assertIsNone(g.out_img)                                  # ...and released
+        self.assertEqual(gm.FADE_MS, overlay.ANIM_MS)
+
+    def test_motion_crossfade_releases_the_outgoing_picture(self):
+        self.motion()
+        bar = self.bar()
+        g = self.open(bar)
+        self.settle_motion(g)
+        self.key(Qt.Key_Right)                                        # to a screenshot
+        self.assertIsNotNone(g.out_img)                               # the clip's last picture holds...
+        self.assertTrue(g.xf_waiting)
+        self.assertEqual(g.out_dir, 1)
+        self.assertEqual((g.out_img.width(), g.out_img.height()), (g.stage.width(), g.stage.height()))
+        self.wait_for(lambda: g.state == "shown", timeout=3)          # ...until the new one is read
+        self.assertFalse(g.xf_waiting)
+        self.wait_for(lambda: g.out_img is None, timeout=2)           # then fades out and is let go
+        self.assertEqual(g.xf, 1.0)
+        for _ in range(4):                                            # rapid browsing: never a queue
+            self.key(Qt.Key_Right)
+            pump(self.app, 0.03)
+            self.assertLessEqual(sum(x is not None for x in (g.out_img,)), 1)
+        self.assertEqual(g.current().path, self.clip2)
+        self.wait_for(lambda: g.state == "playing" and g.out_img is None, timeout=3)
+
+    def test_motion_icons_badge_highlight_and_knob(self):
+        self.motion()
+        bar = self.bar()
+        g = self.open(bar)
+        self.settle_motion(g)
+        mute = g.panel.w["mute"]
+        self.key(Qt.Key_M)                                            # sound on: the glyph crossfades
+        self.assertEqual((mute.kind, mute.prev_kind), ("sound", "muted"))
+        self.assertLess(g.badge_t, 1.0 + 1e-9)
+        self.settle_motion(g)
+        self.assertEqual((mute.prev_kind, mute.kt), (None, 1.0))
+        self.assertEqual(g.badge_t, 0.0)                              # the muted badge faded out
+        self.key(Qt.Key_M)
+        self.settle_motion(g)
+        self.assertEqual(g.badge_t, 1.0)
+        self.key(Qt.Key_Down)                                         # Clips: the highlight slides
+        header = g.header
+        self.assertIs(header.sel, g.tabs["clip"])
+        self.assertIsNotNone(header.r0)
+        self.settle_motion(g)
+        self.assertEqual(header.rect_now(), header.pill(g.tabs["clip"]))
+        scrub = g.panel.w["scrub"]
+        self.key(Qt.Key_L)                                            # +10 s: the knob glides there
+        self.settle_motion(g)
+        self.assertAlmostEqual(scrub.value, 10 / 60, delta=0.02)
+        self.key(Qt.Key_Space)                                        # pause / play: a glyph crossfade too
+        self.assertEqual(g.panel.w["play"].prev_kind, "pause")
+
+    def test_motion_full_screen_grows_and_the_strip_fades(self):
+        self.motion()
+        bar = self.bar()
+        g = self.open(bar)
+        self.settle_motion(g)
+        self.key(Qt.Key_F)
+        view = g.full
+        self.assertLess(g.full_t, 1.0)                                # growing out of the stage
+        self.assertFalse(view.strips["clip"].isVisible())
+        self.wait_for(lambda: g.full_t == 1.0 and g.chrome, timeout=2)
+        self.settle_motion(g)
+        self.assertTrue(view.strips["clip"].isVisible())
+        self.assertIsNone(view.strips["clip"].graphicsEffect())
+        self.assertTrue(g.fullc.w["play"].hasFocus())
+        g.chrome_timer.timeout.emit()                                 # 2.5 s untouched: it fades out
+        self.assertTrue(g.chrome)
+        self.settle_motion(g)
+        self.assertFalse(g.chrome)
+        self.assertFalse(view.strips["clip"].isVisible())
+        self.key(Qt.Key_Escape)                                       # back: shrinks into the stage
+        self.assertIsNone(g.full)
+        self.assertIs(g.leaving, view)
+        self.assertEqual(bar.mode, "gallery")
+        self.wait_for(lambda: g.leaving is None, timeout=2)
+        self.assertFalse(view.isVisible())
+
     # ------------------------------------------------------------ full screen
     def test_full_screen_and_back_step_by_step(self):
         bar = self.bar()
@@ -844,7 +954,8 @@ class GalleryOffscreen(unittest.TestCase):
         # What app.exec() does with their deleteLater(); only for these objects, because
         # flushing every pending deletion would also hit what earlier tests left behind.
         for o in objs.values():
-            self.app.sendPostedEvents(o, QEvent.DeferredDelete)
+            if shiboken6.isValid(o):                                  # (may be gone already)
+                self.app.sendPostedEvents(o, QEvent.DeferredDelete)
         self.assertEqual({k: shiboken6.isValid(o) for k, o in objs.items()}, dict.fromkeys(objs, False))
         refs = {k: weakref.ref(o) for k, o in objs.items()}
         del objs, o

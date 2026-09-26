@@ -1768,8 +1768,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 top += ph
             else:
                 self.panel.hide()
-            if self.mode == "gallery" and self.gallery is not None:
-                gh = self.gallery.panel_height()
+            g = self.gallery
+            if g is not None and (self.mode == "gallery" or g.closing):
+                gh = g.shown_height()                 # grows / folds with the gallery's motion
                 self.gallery_host.setFixedHeight(gh)
                 self.gallery_host.show()
                 top += gh

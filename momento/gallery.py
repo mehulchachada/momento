@@ -31,10 +31,12 @@ import logging
 import threading
 import time
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRectF, QSize,
+                            Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader, QPainter,
                            QPainterPath, QPen, QPolygonF)
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QApplication, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
 from . import config, media
 from . import overlay as ov
@@ -56,6 +58,17 @@ STAGE_RADIUS = 8
 META_PX = 13
 MIN_STAGE_H = 160
 CACHE_SIZE = 64          # clip lengths and screenshot sizes remembered (no thumbnails are kept)
+
+# Motion, in the bar's own language: short ease-outs, nothing that queues. ANIMATE False
+# (reduced motion; the tests) makes every transition land on its end state at once.
+ANIMATE = True
+FADE_MS = ov.ANIM_MS     # icons, the muted badge, the filter highlight, the panel, the strip
+XFADE_MS = 160           # the stage, from one item to the next
+SLIDE_PX = 10            # ...drifting this far in the direction of travel
+XFADE_WAIT_MS = 400      # the old picture waits at most this long for the new one
+SEEK_ANIM_MS = 120       # the scrubber's knob on a jump (±10 s, a click)
+FULL_MS = 180            # into and out of full screen, from / to the stage
+CLOCK_MS = 33            # while playing: the scrubber and time follow at ~30 Hz between updates
 TRIM_DELAY_MS = 1_000    # after closing: give the heap back once the player is deleted
 
 PLAY_ERROR = "Can't play this clip here"
@@ -229,6 +242,65 @@ def chip_run(p, x, y, tokens, word_color=ov.MUTED):
     return x - start
 
 
+class _Tween:
+    """A 0 -> 1 (or any start -> end) ease-out that restarts from where it is, never queues.
+    With ANIMATE off, ``run`` lands on the end value (and calls ``on_done``) at once."""
+
+    def __init__(self, parent, ms, on_value, on_done=None):
+        self.on_value, self.on_done = on_value, on_done
+        self.value = 1.0
+        self.end = 1.0
+        self.anim = QVariantAnimation(parent)
+        self.anim.setDuration(ms)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.valueChanged.connect(self._tick)
+        self.anim.finished.connect(self._done)
+
+    def running(self):
+        return self.anim.state() == QAbstractAnimation.Running
+
+    def run(self, start=0.0, end=1.0):
+        self.anim.stop()
+        self.end = float(end)
+        if not ANIMATE or start == end:
+            self._tick(end)
+            self._done()
+            return
+        self.anim.setStartValue(float(start))
+        self.anim.setEndValue(float(end))
+        self.value = float(start)
+        self.anim.start()
+
+    def stop(self):
+        self.anim.stop()
+
+    def finish(self):
+        """Jump to the end now (and call on_done) if it is running."""
+        if self.running():
+            self.anim.stop()
+            self._tick(self.end)
+            self._done()
+
+    def _tick(self, v):
+        self.value = float(v)
+        self.on_value(self.value)
+
+    def _done(self):
+        if self.on_done is not None:
+            self.on_done()
+
+
+def _alpha(color, f):
+    c = QColor(color)
+    c.setAlphaF(max(0.0, min(1.0, c.alphaF() * f)))
+    return c
+
+
+def _lerp_rect(a, b, t):
+    return QRectF(a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t,
+                  a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t)
+
+
 def _no_video_frame():
     from PySide6.QtMultimedia import QVideoFrame
 
@@ -285,11 +357,40 @@ def _widgets(kit):
         def __init__(self, kind, height=ov.BAR_HEIGHT):
             super().__init__(kind)
             self.setFixedSize(ov.ICON_W, height)
+            self.prev_kind = None         # the glyph fading out (play -> pause, muted -> sound)
+            self.kt = 1.0
+            self.ktween = _Tween(self, FADE_MS, self._kt, self._kdone)
+
+        def set_kind(self, kind):
+            if kind == self.kind:
+                return
+            old = self.kind
+            super().set_kind(kind)
+            if ANIMATE and self.isVisible():
+                self.prev_kind = old
+                self.ktween.run()
+            else:
+                self.ktween.stop()
+                self.prev_kind, self.kt = None, 1.0
+
+        def _kt(self, v):
+            self.kt = v
+            self.update()
+
+        def _kdone(self):
+            self.prev_kind, self.kt = None, 1.0
+            self.update()
 
         def paint_content(self, p, r, color):
+            if self.prev_kind is not None and self.kt < 1.0:
+                self.glyph(p, r, _alpha(color, 1.0 - self.kt), self.prev_kind)
+                self.glyph(p, r, _alpha(color, self.kt), self.kind)
+            else:
+                self.glyph(p, r, color, self.kind)
+
+        def glyph(self, p, r, color, k):
             c = r.center()
             x, y = c.x(), c.y()
-            k = self.kind
             if k in ("back10", "fwd10"):
                 p.setPen(color)
                 p.setFont(font(12, True, QFont.DemiBold))
@@ -301,12 +402,89 @@ def _widgets(kit):
             elif k == "replay":
                 draw_replay(p, x, y, color)
             else:
+                shown, self.kind = self.kind, k     # the bar's own glyphs (play, pause) paint self.kind
+                p.save()
                 super().paint_content(p, r, color)
+                p.restore()
+                self.kind = shown
 
     class FilterTab(TabButton):
+        """A filter pill. The chosen one paints only its text: the header paints its fill,
+        so the highlight can slide from one filter to the next."""
+
         def __init__(self, text):
-            super().__init__(text)
+            super().__init__(text)        # (target() sets self.hl: what the header paints under it)
             self.setAccessibleName(f"Show {text.lower()}")
+
+        def target(self):
+            state, style = super().target()
+            if self.selected() and state != "disabled":
+                self.hl = style
+                return state, (QColor(0, 0, 0, 0), style[1], 0.0)
+            self.hl = None
+            return state, style
+
+        def sync(self, animate=True):
+            super().sync(animate)
+            if self.parentWidget() is not None:
+                self.parentWidget().update()
+
+    class FilterHeader(QWidget):
+        """The filters' row; paints the chosen filter's pill and slides it on a change."""
+
+        def __init__(self):
+            super().__init__()
+            self.sel = None
+            self.r0 = None                # where the slide started (header coordinates)
+            self.t = 1.0
+            self.tween = _Tween(self, FADE_MS, self._tick)
+
+        def pill(self, tab):
+            return tab.pill_rect().translated(QPointF(tab.pos()))
+
+        def rect_now(self):
+            if self.sel is None:
+                return None
+            to = self.pill(self.sel)
+            return to if self.r0 is None or self.t >= 1.0 else _lerp_rect(self.r0, to, self.t)
+
+        def select(self, tab, animate=True):
+            if tab is self.sel:
+                return
+            start = self.rect_now()
+            self.sel = tab
+            if tab is None or start is None or not animate or not self.isVisible():
+                self.tween.stop()
+                self.r0, self.t = None, 1.0
+                self.update()
+                return
+            self.r0 = start
+            self.tween.run()
+
+        def _tick(self, v):
+            self.t = v
+            self.update()
+
+        def paintEvent(self, ev):
+            tab = self.sel
+            r = self.rect_now()
+            if tab is None or r is None or tab.hl is None:
+                return
+            fill, _text, ring = tab.hl
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            if ring > 0.01:
+                c = QColor(ov.RING)
+                c.setAlphaF(min(1.0, ring))
+                p.setPen(QPen(c, 1.5))
+                p.setBrush(Qt.NoBrush)
+                rr = r.adjusted(-2.75, -2.75, 2.75, 2.75)
+                p.drawRoundedRect(rr, rr.height() / 2, rr.height() / 2)
+            if fill.alpha():
+                p.setPen(Qt.NoPen)
+                p.setBrush(fill)
+                p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            p.end()
 
     class CounterPill(TabButton):
         """‹ 3 / 42 › as one tab-sized pill: the left half steps to newer, the right to older."""
@@ -385,16 +563,30 @@ def _widgets(kit):
         def __init__(self, height=ov.ROW_H):
             super().__init__()
             self.value = 0.0
+            self.v0 = self.v1 = 0.0
+            self.tween = _Tween(self, SEEK_ANIM_MS, self._glide)
             self.setFixedHeight(height)
             self.setCursor(Qt.PointingHandCursor)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self.setAccessibleName("Position")
 
-        def set_value(self, v):
+        def set_value(self, v, animate=False):
+            """``animate``: glide there (a seek). A glide under way keeps gliding, to the new value."""
             v = max(0.0, min(1.0, float(v)))
+            if self.tween.running():
+                self.v1 = v
+                return
+            if animate and ANIMATE and self.isVisible() and abs(v - self.value) > 1e-3:
+                self.v0, self.v1 = self.value, v
+                self.tween.run()
+                return
             if abs(v - self.value) > 1e-4:
                 self.value = v
                 self.update()
+
+        def _glide(self, t):
+            self.value = self.v0 + (self.v1 - self.v0) * t
+            self.update()
 
         def paintEvent(self, ev):
             p = QPainter(self)
@@ -498,6 +690,7 @@ def _widgets(kit):
             self.setAutoFillBackground(False)
             self.setStyleSheet(f"QWidget {{ color: {ov.TEXT}; background: transparent; }}"
                                "QPushButton { border: none; outline: none; }")
+            self.setAttribute(Qt.WA_TranslucentBackground)   # it fades in over the game
             self.strips = {"clip": g.build_strip(self, "clip"), "shot": g.build_strip(self, "shot")}
 
         @property
@@ -526,8 +719,14 @@ def _widgets(kit):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setRenderHint(QPainter.SmoothPixmapTransform)
-            p.fillRect(self.rect(), QColor("#000000"))
-            self.g.paint_picture(p, QRectF(self.rect()), 0, badge=False)
+            g = self.g
+            t = g.full_t
+            full = QRectF(self.rect())
+            p.fillRect(full, QColor(0, 0, 0, int(255 * t)))
+            if t < 1.0 and g.full_from is not None:   # growing out of (or back into) the stage
+                g.paint_picture(p, _lerp_rect(g.full_from, full, t), STAGE_RADIUS * (1.0 - t), badge=False)
+            else:
+                g.paint_picture(p, full, 0, badge=False)
             p.end()
 
         def mouseMoveEvent(self, ev):
@@ -546,7 +745,7 @@ def _widgets(kit):
                 self.g.toggle_full()
 
     ns = type("GalleryWidgets", (), {})()
-    for c in (MediaIcon, FilterTab, CounterPill, Stage, Scrubber, Chips, Footer, Surface, FullView):
+    for c in (MediaIcon, FilterTab, FilterHeader, CounterPill, Stage, Scrubber, Chips, Footer, Surface, FullView):
         setattr(ns, c.__name__, c)
     kit.gallery_widgets = ns
     return ns
@@ -599,6 +798,18 @@ class Gallery(QObject):
         self.chrome = True        # full screen: the strip is showing
         self.panel = _Controls()
         self.fullc = None         # _Controls of the full screen strip
+        # motion
+        self.reveal = 0.0         # the panel: 0 folded away .. 1 open (the bar grows with it)
+        self.closing = False      # folding away after Back (the clip view is already live)
+        self.out_img = None       # the outgoing picture during a crossfade (one, at the stage's size)
+        self.out_dir = 0          # -1 newer / +1 older: which way it drifts
+        self.xf = 1.0
+        self.xf_waiting = False   # the old picture holds until the new one is there
+        self.badge_t = 1.0        # the muted badge's opacity
+        self.full_t = 1.0         # full screen: 0 at the stage .. 1 edge to edge
+        self.full_from = None     # the stage's rect in the full screen view, for the grow
+        self.leaving = None       # a full screen view on its way out
+        self.pos_at = 0.0         # when self.position was last reported (the clock interpolates)
 
         self.step_timer = QTimer(self)
         self.step_timer.setSingleShot(True)
@@ -612,6 +823,18 @@ class Gallery(QObject):
         self.trim_timer.setSingleShot(True)
         self.trim_timer.setInterval(TRIM_DELAY_MS)
         self.trim_timer.timeout.connect(_trim_heap)
+        self.reveal_tween = _Tween(self, FADE_MS, self._reveal_tick, self._reveal_done)
+        self.xf_tween = _Tween(self, XFADE_MS, self._xf_tick, self._xf_done)
+        self.xf_wait = QTimer(self)
+        self.xf_wait.setSingleShot(True)
+        self.xf_wait.setInterval(XFADE_WAIT_MS)
+        self.xf_wait.timeout.connect(self._xf_go)
+        self.badge_tween = _Tween(self, FADE_MS, self._badge_tick)
+        self.full_tween = _Tween(self, FULL_MS, self._full_tick, self._full_done)
+        self.chrome_tween = _Tween(self, FADE_MS, self._chrome_tick, self._chrome_done)
+        self.clock = QTimer(self)             # only while a clip plays
+        self.clock.setInterval(CLOCK_MS)
+        self.clock.timeout.connect(self._tick_clock)
         self.scanned.connect(self._on_scanned)
         self.loaded.connect(self._on_loaded)
         self.probed.connect(self._on_probed)
@@ -636,6 +859,21 @@ class Gallery(QObject):
     def panel_height(self):
         return ov.PANEL_PAD_T + ov.TABS_H + 4 + self.stage.height() + ov.ROW_PITCH
 
+    def shown_height(self):
+        """What the bar gives the gallery right now (it grows / folds with ``reveal``)."""
+        return int(round(self.panel_height() * max(0.0, min(1.0, self.reveal))))
+
+    def eventFilter(self, obj, ev):
+        if obj is self.bar.gallery_host and ev.type() in (QEvent.Resize, QEvent.Show):
+            self._pin_panel()
+        return False
+
+    def _pin_panel(self):
+        host = self.bar.gallery_host
+        h = self.panel_height()
+        self.panel_w.setFixedHeight(h)
+        self.panel_w.setGeometry(0, host.height() - h, host.width(), h)
+
     def _build_panel(self):
         W = self.W
         c = self.panel
@@ -644,7 +882,7 @@ class Gallery(QObject):
         pl.setContentsMargins(0, ov.PANEL_PAD_T, 0, 0)
         pl.setSpacing(0)
 
-        header = QWidget()
+        header = self.header = W.FilterHeader()
         header.setFixedHeight(ov.TABS_H)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(12, 0, 12, 0)
@@ -696,7 +934,12 @@ class Gallery(QObject):
         c.w["full"].clicked.connect(lambda: self.toggle_full())
         rl.addWidget(c.w["full"])
         pl.addWidget(row)
-        self.bar.gallery_host.layout().addWidget(panel)
+        # Not in the host's layout: pinned to the host's bottom edge, so while the bar grows
+        # (or folds) the panel rises out of (or sinks into) the bar row instead of squeezing.
+        self.panel_w = panel
+        panel.setParent(self.bar.gallery_host)
+        panel.setFixedHeight(self.panel_height())
+        self.bar.gallery_host.installEventFilter(self)
 
         self.footer = W.Footer()
         c.w["meta"] = self.footer.meta
@@ -832,20 +1075,34 @@ class Gallery(QObject):
         self.view = list(self.items)
         self.index = 0
         self.muted = True           # every open starts muted
+        self.badge_tween.stop()
+        self.badge_t = 1.0
         self.chrome = True
         self.stage.setFixedSize(self.stage_size)   # the screen may have changed since
+        self.header.select(self.tabs[self.filter], animate=False)
+        self._xf_drop()
+        start = self.reveal if self.closing else 0.0   # reopened while folding: from there
+        self.closing = False
+        self.reveal_tween.stop()
+        self.reveal = start
         bar.enter_gallery()
         self._show(immediate=True)
         self.focus_default()
+        self._unfold(start, 1.0)
 
-    def close(self):
-        """Tear everything down: player, sink, audio, full screen; forget the listing."""
+    def close(self, fold=False):
+        """Tear everything down: player, sink, audio, full screen; forget the listing.
+        ``fold``: the panel folds away (Back), holding a still of the stage meanwhile;
+        otherwise (the bar hides) it is gone at once."""
         self.scanning = False
+        if not fold:
+            self._stop_motion()
         if not self.active and self.player is None and self.full is None:
             return
         self.active = False
         self.token += 1
         self.step_timer.stop()
+        self.clock.stop()
         self.exit_full(restore=False)
         played = self.player is not None
         self._release_frame()
@@ -867,8 +1124,115 @@ class Gallery(QObject):
         if self.full is not None:
             self.exit_full()
             return
-        self.close()
+        if ANIMATE:
+            still = self._snapshot(self.stage)   # what the stage shows, while the panel folds
+            self.close(fold=True)
+            self._xf_drop()
+            self.out_img, self.xf_waiting = still, still is not None
+            self.closing = True
+        else:
+            self.close()
         self.bar.leave_gallery()
+        self._unfold(self.reveal, 0.0)
+
+    # ------------------------------------------------------------------ motion
+    def _stop_motion(self):
+        """Every transition to its end, no animation left running (the bar hides)."""
+        for tw in (self.reveal_tween, self.xf_tween, self.badge_tween, self.chrome_tween, self.full_tween):
+            tw.stop()
+        self.xf_wait.stop()
+        self.closing = False
+        self.reveal = 0.0
+        self.panel_w.setGraphicsEffect(None)
+        self._xf_drop()
+        self._finish_leaving()
+
+    def _unfold(self, start, end):
+        """The panel grows up out of the bar row (end 1) or folds back into it (end 0),
+        its content fading with it."""
+        if ANIMATE and start != end:
+            effect = QGraphicsOpacityEffect(self.panel_w)
+            effect.setOpacity(start)
+            self.panel_w.setGraphicsEffect(effect)   # only while it moves (it costs a buffer)
+        self.reveal_tween.run(start, end)
+
+    def _reveal_tick(self, v):
+        self.reveal = v
+        effect = self.panel_w.graphicsEffect()
+        if effect is not None:
+            effect.setOpacity(v)
+        self.bar.relayout()
+
+    def _reveal_done(self):
+        self.panel_w.setGraphicsEffect(None)
+        if self.reveal <= 0.0:
+            self.closing = False
+            self._xf_drop()
+        self.bar.relayout()
+
+    def _snapshot(self, widget):
+        """What ``widget`` (the stage or the full screen view) shows now, as one image of its
+        size; None when it shows no picture."""
+        if widget is None or (self.frame is None and self.out_img is None) or widget.width() <= 0:
+            return None
+        dpr = widget.devicePixelRatioF() or 1.0
+        img = QImage(int(widget.width() * dpr), int(widget.height() * dpr), QImage.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(QColor("#000000"))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._paint_layers(p, QRectF(0, 0, widget.width(), widget.height()))
+        p.end()
+        return img
+
+    def _begin_switch(self, d):
+        """Another item: the stage's picture now becomes the outgoing one, held until the
+        new picture is there, then crossfaded with a small drift (``d``: -1 newer, +1 older)."""
+        if not ANIMATE or not self.active:
+            return
+        still = self._snapshot(self.full if self.full is not None else self.stage)
+        self.xf_tween.stop()
+        self.xf_wait.stop()
+        self.out_img, self.out_dir, self.xf = still, d, 0.0   # the previous outgoing one goes
+        self.xf_waiting = still is not None
+        if self.xf_waiting:
+            self.xf_wait.start()
+
+    def _xf_go(self):
+        """The new picture is there (or took too long): crossfade to it."""
+        if not self.xf_waiting:
+            return
+        self.xf_wait.stop()
+        self.xf_waiting = False
+        self.xf_tween.run()
+
+    def _xf_tick(self, v):
+        self.xf = v
+        self._repaint()
+
+    def _xf_done(self):
+        self.out_img = None       # released as soon as it is faded out
+        self.xf = 1.0
+        self._repaint()
+
+    def _xf_drop(self):
+        self.xf_tween.stop()
+        self.xf_wait.stop()
+        self.out_img, self.xf_waiting, self.xf = None, False, 1.0
+
+    def _badge_tick(self, v):
+        self.badge_t = v
+        self.stage.update()
+
+    def _tick_clock(self):
+        """While playing: the time and knob move between the player's own updates."""
+        if not self.active or self.state != "playing" or self.is_shot():
+            self.clock.stop()
+            return
+        est = self.position + (time.monotonic() - self.pos_at)
+        if self.duration:
+            est = min(est, self.duration)
+        self.sync_time(est)
 
     # ------------------------------------------------------------------ items
     def _show(self, immediate=False):
@@ -888,6 +1252,7 @@ class Gallery(QObject):
         if item is None:
             self.state = "empty"
             self.message = EMPTY_FILTER.get(self.filter, EMPTY_FILTER["all"])
+            self._xf_drop()
         else:
             self.last_mtime = item.mtime
             self.state = "loading"
@@ -923,6 +1288,7 @@ class Gallery(QObject):
         self.state = "error"
         self.message = text
         self.frame = None
+        self._xf_drop()
         self.sync()
 
     def step(self, d, focus="counter"):
@@ -931,6 +1297,7 @@ class Gallery(QObject):
             return
         i = max(0, min(len(self.view) - 1, self.index + d))
         if i != self.index:
+            self._begin_switch(1 if i > self.index else -1)
             self.index = i
             self._show()
         self.focus(focus)
@@ -941,6 +1308,7 @@ class Gallery(QObject):
             return
         i = max(0, min(len(self.view) - 1, i))
         if i != self.index:
+            self._begin_switch(1 if i > self.index else -1)
             self.index = i
             self._show()
         self.focus(focus)
@@ -959,6 +1327,7 @@ class Gallery(QObject):
         if new is not None and old is not None and new.path == old.path:
             self.sync()             # the same item: it keeps playing
         else:
+            self._begin_switch(0)   # a crossfade, no drift
             self._show(immediate=old is None)
         self.focus(focus)
 
@@ -1038,8 +1407,11 @@ class Gallery(QObject):
         if frame is None or not frame.isValid():
             return
         # Keep the frame itself, no copy: it is converted when (and only if) it is painted,
-        # and Qt caches that conversion in the frame, so at most one picture is alive.
+        # and Qt caches that conversion in the frame, so at most one picture is alive
+        # (two for the 160 ms of a crossfade).
         self.frame = frame
+        if self.xf_waiting:
+            self._xf_go()
         self._repaint()
 
     def _release_frame(self):
@@ -1052,6 +1424,7 @@ class Gallery(QObject):
         if not self.active or self.is_shot():
             return
         self.position = max(0.0, ms / 1000.0)
+        self.pos_at = time.monotonic()
         self.sync_time()
 
     def _on_duration(self, ms):
@@ -1068,6 +1441,8 @@ class Gallery(QObject):
             return
         if state == self._States.PlayingState:
             self.state = "playing"
+            self.pos_at = time.monotonic()
+            self.clock.start()
         elif state == self._States.PausedState:
             self.state = "paused"
         elif self.state not in ("ended", "loading"):
@@ -1155,9 +1530,10 @@ class Gallery(QObject):
         t = max(0.0, min(dur, t)) if dur > 0 else max(0.0, t)
         player.setPosition(int(round(t * 1000)))
         self.position = t
+        self.pos_at = time.monotonic()
         if self.state == "ended" and (dur <= 0 or t < dur):
             player.play()           # stepping back from the end plays that part again
-        self.sync_time()
+        self.sync_time(animate=True)
         self.sync()
 
     def toggle_mute(self, focus="mute"):
@@ -1166,6 +1542,7 @@ class Gallery(QObject):
             return
         self.muted = not self.muted
         self._apply_audio()
+        self.badge_tween.run(self.badge_t, 1.0 if self.muted else 0.0)
         self.sync()
         self.focus(focus)
 
@@ -1206,6 +1583,8 @@ class Gallery(QObject):
             return
         self.frame = img
         self.state = "shown"
+        if self.xf_waiting:
+            self._xf_go()
         self.sync()
 
     @staticmethod
@@ -1248,12 +1627,8 @@ class Gallery(QObject):
         p.save()
         p.setClipPath(clip)
         p.fillRect(r, QColor("#000000"))
-        img = self.frame
-        if img is not None and not isinstance(img, QImage):
-            img = img.toImage()      # a QVideoFrame (cached by Qt for that frame)
-        if img is not None and not img.isNull():
-            p.drawImage(_fit(img.width(), img.height(), r), img)
-        elif self.message:
+        shown = self._paint_layers(p, r)
+        if not shown and self.message:
             p.setPen(QColor(ov.MUTED))
             p.setFont(font(15))
             p.drawText(r, Qt.AlignCenter, self.message)
@@ -1261,18 +1636,44 @@ class Gallery(QObject):
         item = self.current()
         if item is None or item.kind != "clip" or self.state == "error":
             return
-        if badge and self.muted:
+        if badge and self.badge_t > 0.01:
             b = QRectF(r.right() - 12 - 34, r.top() + 12, 34, 26)
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(0, 0, 0, 150))
+            p.setBrush(QColor(0, 0, 0, int(150 * self.badge_t)))
             p.drawRoundedRect(b, 13, 13)
-            draw_speaker(p, b.center().x() - 0.5, b.center().y(), QColor(255, 255, 255, 225), True)
+            draw_speaker(p, b.center().x() - 0.5, b.center().y(), QColor(255, 255, 255, int(225 * self.badge_t)),
+                         True)
         if self.state == "ended":
             c = r.center()
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(0, 0, 0, 150))
             p.drawEllipse(c, 28, 28)
             draw_replay(p, c.x(), c.y(), QColor(255, 255, 255, 235), scale=2.0)
+
+    def _picture(self):
+        img = self.frame
+        if img is not None and not isinstance(img, QImage):
+            img = img.toImage()      # a QVideoFrame (cached by Qt for that frame)
+        return img if img is not None and not img.isNull() else None
+
+    def _paint_layers(self, p, r):
+        """The picture(s) in ``r``: the current one, and during a switch the outgoing one
+        fading and drifting out while the new one fades and drifts in. True if any."""
+        cur = self._picture()
+        out = self.out_img
+        if out is None:
+            if cur is not None:
+                p.drawImage(_fit(cur.width(), cur.height(), r), cur)
+            return cur is not None
+        t = 0.0 if self.xf_waiting else self.xf
+        p.save()
+        p.setOpacity(1.0 - t)
+        p.drawImage(r.translated(-self.out_dir * SLIDE_PX * t, 0), out)
+        if cur is not None and not self.xf_waiting:
+            p.setOpacity(t)
+            p.drawImage(_fit(cur.width(), cur.height(), r).translated(self.out_dir * SLIDE_PX * (1.0 - t), 0), cur)
+        p.restore()
+        return True
 
     def _repaint(self):
         if self.full is not None:
@@ -1284,15 +1685,16 @@ class Gallery(QObject):
     def _views(self):
         return [c for c in (self.panel, self.fullc if self.full is not None else None) if c is not None]
 
-    def sync_time(self):
+    def sync_time(self, pos=None, animate=False):
         dur = self.duration
+        pos = self.position if pos is None else pos
         for c in self._views():
             w = c.w
             if "now" in w:
-                txt = ov._mmss(self.position)
+                txt = ov._mmss(pos)
                 if w["now"].text() != txt:
                     w["now"].setText(txt)
-                w["scrub"].set_value(self.position / dur if dur > 0 else 0.0)
+                w["scrub"].set_value(pos / dur if dur > 0 else 0.0, animate)
 
     def sync(self):
         item = self.current()
@@ -1302,6 +1704,7 @@ class Gallery(QObject):
         count = f"{self.index + 1} / {n}" if n else "0 / 0"
         for key, b in self.tabs.items():
             b.set_sel(key == self.filter)
+        self.header.select(self.tabs.get(self.filter))
         play_kind = "replay" if self.state == "ended" else "pause" if self.state in ("playing", "loading") else "play"
         usable = clip and self.state != "error"
         if item is not None:
@@ -1403,6 +1806,7 @@ class Gallery(QObject):
     def enter_full(self):
         if self.full is not None or self.current() is None or not self.active:
             return
+        self._finish_leaving()
         bar = self.bar
         view = self.W.FullView(self)
         screen = bar.screen() or QGuiApplication.primaryScreen()
@@ -1424,7 +1828,10 @@ class Gallery(QObject):
                     view.windowHandle().setScreen(screen)
                 view.setGeometry(screen.geometry())
         self.full, self.full_layered = view, layered
-        self.chrome = True
+        self.chrome = False       # the strip fades in once the picture has grown
+        self.full_from = self._stage_rect(view)
+        self.full_t = 0.0 if ANIMATE else 1.0
+        view.place()
         if layered:
             self.kit.set_keyboard(bar, False)    # one surface with the keyboard at a time
             view.show()
@@ -1436,10 +1843,39 @@ class Gallery(QObject):
         self.sync()
         for b in self.window_pills():
             b.sync(animate=False)
-        self.focus_default()
-        self.wake_chrome()
+        view.setFocus(Qt.OtherFocusReason)
+        self.full_tween.run(self.full_t, 1.0)
         if self.is_shot():
             self._load_image(self.current())    # sharp at the screen's size
+
+    def _stage_rect(self, view):
+        """The stage's rect in ``view``'s coordinates (where the picture grows from / shrinks to)."""
+        try:
+            bar = self.bar
+            if bar.layered:
+                # a layer surface doesn't know its position: the bar is bottom-centred
+                scr = (bar.screen() or QGuiApplication.primaryScreen()).geometry()
+                origin = QPoint(scr.x() + (scr.width() - bar.width()) // 2,
+                                scr.y() + scr.height() - ov.BOTTOM_MARGIN - bar.height())
+                top_left = origin + self.stage.mapTo(bar, QPoint(0, 0)) - scr.topLeft()
+            else:
+                top_left = self.stage.mapToGlobal(QPoint(0, 0)) - view.geometry().topLeft()
+            return QRectF(QPointF(top_left), QSize(self.stage.width(), self.stage.height()).toSizeF())
+        except Exception:  # noqa: BLE001 - only a nicer start for the animation
+            return None
+
+    def _full_tick(self, v):
+        self.full_t = v
+        view = self.full or self.leaving
+        if view is not None:
+            view.update()
+
+    def _full_done(self):
+        if self.leaving is not None:
+            self._finish_leaving()
+        elif self.full is not None:
+            self.full_from = None
+            self.wake_chrome()        # the strip fades in; focus goes to its default control
 
     def exit_full(self, restore=True):
         view = self.full
@@ -1448,12 +1884,41 @@ class Gallery(QObject):
         self.full = None
         self.fullc = None
         self.chrome_timer.stop()
+        self.chrome_tween.stop()
+        for s in view.strips.values():
+            s.setGraphicsEffect(None)
+            s.hide()
+        if restore and ANIMATE:
+            # shrink back into the stage; the view goes (and the bar gets the keyboard) after
+            self.full_tween.stop()
+            self.leaving = view
+            self.full_from = self._stage_rect(view)
+            self.stage.update()
+            self.full_tween.run(self.full_t, 0.0)
+            self._back_to_panel()
+            return
+        self.full_tween.stop()
         view.hide()
         view.deleteLater()
         if not restore:
             return
+        self._back_to_panel(view_gone=True)
+
+    def _finish_leaving(self):
+        view, self.leaving = self.leaving, None
+        if view is None:
+            return
+        self.full_tween.stop()
+        view.hide()
+        view.deleteLater()
+        if self.full_layered and self.bar.isVisible():
+            self.kit.set_keyboard(self.bar, True)
+            self.bar.activateWindow()
+            self._activate(self.bar)
+
+    def _back_to_panel(self, view_gone=False):
         bar = self.bar
-        if self.full_layered and bar.isVisible():
+        if view_gone and self.full_layered and bar.isVisible():
             self.kit.set_keyboard(bar, True)
         bar.raise_()
         bar.activateWindow()
@@ -1479,11 +1944,15 @@ class Gallery(QObject):
         """Full screen: show the strip; it hides again after CHROME_MS while nothing is paused."""
         if self.full is None:
             return
-        if not self.chrome:
+        if not self.chrome and self.full_t >= 1.0:
             self.chrome = True
             self.full.unsetCursor()
             self.full.place()
+            self._fade_strip(1.0)
             self.focus_default()
+        elif self.chrome and self.chrome_tween.running() and self.chrome_tween.end <= 0.0:
+            self.full.unsetCursor()   # input while it fades out: back in
+            self._fade_strip(1.0)
         if self.state in ("playing", "shown", "loading"):
             self.chrome_timer.start()
         else:
@@ -1496,10 +1965,39 @@ class Gallery(QObject):
         strip = view.strip()
         if strip.underMouse() or self.state in ("paused", "ended", "error"):
             return
-        self.chrome = False
         view.setFocus(Qt.OtherFocusReason)   # keys keep working with the strip gone
-        view.place()
         view.setCursor(Qt.BlankCursor)
+        self._fade_strip(0.0)
+
+    def _fade_strip(self, end):
+        """The full screen strip fades in (end 1) or out (end 0, then it hides)."""
+        view = self.full
+        if view is None:
+            return
+        strip = view.strip()
+        effect = strip.graphicsEffect()
+        start = effect.opacity() if effect is not None else (0.0 if end else 1.0)
+        if ANIMATE:
+            effect = QGraphicsOpacityEffect(strip)
+            effect.setOpacity(start)
+            strip.setGraphicsEffect(effect)
+        self.chrome_tween.run(start, end)
+
+    def _chrome_tick(self, v):
+        view = self.full
+        if view is not None:
+            effect = view.strip().graphicsEffect()
+            if effect is not None:
+                effect.setOpacity(v)
+
+    def _chrome_done(self):
+        view = self.full
+        if view is None:
+            return
+        view.strip().setGraphicsEffect(None)
+        if self.chrome_tween.end <= 0.0:
+            self.chrome = False
+            view.place()
 
     # ------------------------------------------------------------------ input
     def _stage_clicked(self):
