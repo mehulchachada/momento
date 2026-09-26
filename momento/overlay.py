@@ -175,7 +175,7 @@ SUBJECT = {"screen": "Full Screen", "window": "Window"}
 RECORD_TEXT = {"screen": "Full screen", "window": "Window"}
 # Settings tabs: (name, keys). The daemon's settings reply ("tabs") wins; this is
 # for an older daemon / settings module without them.
-DEFAULT_TABS = (("General", ("record", "keep_history")),
+DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
                 ("Audio", ("audio_source", "mic", "mic_device")),
                 ("Controller", ("controller", "controller_exclusive", "controller_open")),
@@ -714,6 +714,15 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         ex, ey = x + r * math.cos(a), y - r * math.sin(a)
         p.drawPolyline(QPolygonF([P(ex - 2.6, ey - 1.2), P(ex, ey), P(ex + 0.9, ey - 2.7)]))
         p.drawPolyline(QPolygonF([P(x, y - 3.5), P(x, y), P(x + 2.5, y + 1.6)]))
+    elif kind == "timer":
+        # a stopwatch: how long the replay reaches back
+        cy = y + 1.2
+        p.drawEllipse(P(x, cy), 6, 6)
+        p.drawLine(P(x, cy - 6), P(x, cy - 7.8))
+        p.drawLine(P(x - 2, y - 6.8), P(x + 2, y - 6.8))
+        p.drawLine(P(x + 4.4, cy - 4.4), P(x + 5.6, cy - 5.6))
+        p.drawLine(P(x, cy), P(x, cy - 3.4))
+        p.drawLine(P(x, cy), P(x + 2.4, cy + 1.4))
     elif kind == "hourglass":
         p.drawLine(P(x - 5, y - 7), P(x + 5, y - 7))
         p.drawLine(P(x - 5, y + 7), P(x + 5, y + 7))
@@ -784,9 +793,11 @@ RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K",
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
              "controller_exclusive": "lock", "controller_open": "press_tap", "keep_history": "history",
+             "replay_length": "timer",
              "hour_warning": "hourglass", "instant_bar": "bolt"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
-ROW_TITLES = {"record": "Record", "keep_history": "Keep history", "resolution": "Resolution",
+ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_history": "Keep history",
+              "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
               "mic_device": "Mic device", "controller": "Controller", "controller_exclusive": "Exclusive",
               "controller_open": "Open with", "hour_warning": "Hour warning", "instant_bar": "Instant bar"}
@@ -794,6 +805,11 @@ ON_OFF_KEYS = ("mic", "controller_exclusive", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 OPEN_ICONS = {"hold": "press_hold", "tap": "press_tap"}      # so does Open with's
 VALUE_ICONS = {"record": RECORD_ICONS, "controller_open": OPEN_ICONS}
+# Settings the daemon applies without restarting the recording (settings.LIVE_KEYS
+# wins; this is for an older settings module).
+LIVE_KEYS = ("controller", "controller_exclusive", "controller_open", "replay_length", "keep_history",
+             "hour_warning", "instant_bar")
+REPLAY_MINUTES = (15, 30, 60)   # the Replay length row, when the reply has no choices for it
 # How the controller shortcut opens the bar: the Open with row's choices.
 OPEN_TEXT = {"hold": "Hold", "tap": "Tap"}
 GLYPH_W = 16             # settings: icon column
@@ -2368,6 +2384,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if value not in [o[0] for o in opts]:
                     opts.append((value, str(value).capitalize()))
                 return SettingRow(self, key, title, opts, value, avail)
+            if key == "replay_length":
+                opts = list(choices.get(key) or REPLAY_MINUTES)
+                if value not in opts:
+                    opts.append(value)      # a hand-edited [buffer] max_seconds, in whole minutes
+                return SettingRow(self, key, title, [(m, f"{m} min") for m in opts], value, avail)
             opts = list(choices.get(key) or (("off", "on") if key in ON_OFF_KEYS else ()))
             if key == "hour_warning":
                 if value not in opts:
@@ -2412,8 +2433,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 hl.addWidget(b)
                 self.tab_btns.append(b)
             hl.addStretch(1)
-            self.note = QLabel("Applying restarts recording · your replay is kept" if data.get("online")
-                               else "Momento is off — changes apply when it starts")
+            self.note = QLabel(self.note_text())
             self.note.setObjectName("dim")
             nf = ui_font()
             nf.setPixelSize(TAB_PX)
@@ -2524,11 +2544,38 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             vals = self.sdata["values"]
             return {k: v for k, v in self.pending().items() if vals.get(k) != v}
 
+        def live_keys(self):
+            """Settings the daemon applies without restarting the recording."""
+            return set(getattr(settings, "LIVE_KEYS", None) or LIVE_KEYS) | set(settings.CONTROLLER_KEYS)
+
+        def note_text(self):
+            """The line next to the tabs: what Apply will do with the changes made so far."""
+            data = self.sdata or {}
+            if not data.get("online"):
+                return "Momento is off — changes apply when it starts"
+            ch = self.changes() if self.rows else {}
+            was, now = data.get("values", {}).get("replay_length"), ch.get("replay_length")
+            if isinstance(was, int) and isinstance(now, int) and now < was:
+                return f"Keeps the newest {now} min · older footage is dropped"
+            if ch and set(ch) <= self.live_keys():
+                return "Applies right away · your replay is kept"
+            return "Applying restarts recording · your replay is kept"
+
+        def replay_seconds(self, v=None):
+            """The replay length the rows now say, in seconds (the saved max_seconds, exact,
+            while the row is unchanged: a hand-edited length is not rounded)."""
+            v = self.pending() if v is None else v
+            saved = int(self.sdata.get("max_seconds") or 3600)
+            new = v.get("replay_length")
+            if not isinstance(new, int) or new == self.sdata["values"].get("replay_length"):
+                return saved
+            return new * 60
+
         def estimate(self):
             v = self.pending()
             cap = {"resolution": v["resolution"], "quality": v["quality"], "fps": v.get("fps", quality.FPS),
                    "bitrate_kbps": self.sdata["values"].get("bitrate", 0)}
-            secs = int(self.sdata.get("max_seconds") or 3600)
+            secs = self.replay_seconds(v)
             # what is really recorded: a resolution above the picture costs the picture's size
             gb = quality.buffer_gb(quality.bitrate_kbps(cap, self.res_source()[0]), secs)
             return f"{cap['fps']} fps · ~{gb:.1f} GB for {secs // 60} min"
@@ -2545,7 +2592,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if not isinstance(sto, dict):
                 return None
             need = (sto.get("required") or {}).get(f"{v['resolution']}/{v['quality']}/{v.get('fps', quality.FPS)}")
-            return float(need) if need is not None else None
+            if need is None:
+                return None
+            # the reply counts the saved replay length; the buffer part scales with the length
+            saved = int(self.sdata.get("max_seconds") or 3600)
+            secs = self.replay_seconds(v)
+            if secs != saved and saved > 0:
+                reserve = float(sto.get("reserve") or 0)
+                need = reserve + (float(need) - reserve) * secs / saved
+            return float(need)
 
         def fits(self, v):
             need, free = self.storage_need(v), self.storage_free()
@@ -2568,7 +2623,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def update_fit(self):
             v = self.pending()
-            for key in ("resolution", "quality", "fps"):
+            for key in ("resolution", "quality", "fps", "replay_length"):
                 row = self.row(key)
                 if row is None or row.cycle:
                     continue
@@ -2594,6 +2649,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_row_changed(self, row):
             if row.key == "resolution":
                 self.update_res_note()
+            note = self.note_text()
+            if self.note.text() != note:
+                self.note.setText(note)
             if row.key == "mic" and self.row("mic_device") is not None:
                 # the panel keeps its height (sized for the tallest tab): nothing moves
                 self.row("mic_device").setHidden(row.value != "on")
@@ -2672,11 +2730,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                                     "recording": False, "error": r.get("warning")}
                 self.after(APPLY_CLOSE_MS, self.after_apply)
                 return
-            # Controller settings (and Keep history, Hour warning, Instant bar) apply at
-            # once, without restarting the recording.
+            # Controller settings (and Replay length, Keep history, Hour warning, Instant
+            # bar) apply at once, without restarting the recording.
             applied = set(self.applied or ())
-            live_keys = set(getattr(settings, "LIVE_KEYS", ())) | set(settings.CONTROLLER_KEYS) | {
-                "keep_history", "hour_warning", "instant_bar"}
+            live_keys = self.live_keys()
             pads_only = bool(applied) and applied <= set(settings.CONTROLLER_KEYS)
             live = (bool(applied) and applied <= live_keys) or r.get("restarted") is False
             if not r.get("online"):
