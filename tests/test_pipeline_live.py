@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -198,6 +199,95 @@ def test_window_mode_live(tmp_path):
     check_window(tmp_path)
 
 
+SHOT_AFTER = 2.0
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    assert data[:8] == b"\x89PNG\r\n\x1a\n", data[:8]
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
+def check_screenshot(tmp_path: Path) -> dict:
+    """A screenshot while recording with the test source: the next frame the encoder
+    gets (scaled to the 1080p preset), captured after the request, written as a PNG
+    in <output>/Images without overwriting an existing file."""
+    from momento import config, screenshot
+    from momento.pipeline import Recorder
+    from momento.ringbuffer import RingBuffer
+
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg["capture"].update(source="test", resolution="1080p", bitrate_kbps=2000)
+    cfg["audio"]["desktop"] = False
+    cfg["buffer"].update(segment_seconds=2, dir=str(tmp_path / "sbuffer"))
+    cfg["output"]["dir"] = str(tmp_path / "clips")
+    ring = RingBuffer(max_seconds=3600)
+    loop = GLib.MainLoop()
+    rec = Recorder(cfg, ring, lambda s, m: None)
+    result = {}
+
+    def take():
+        result["asked"] = time.time()
+
+        def got(frame):
+            result["got"] = time.time()
+            result["frame"] = frame
+            if frame is not None:
+                result["pts_wall"] = rec._start_wall + frame.buffer.pts / Gst.SECOND
+            loop.quit()
+        rec.grab_frame(got)
+        return False
+
+    GLib.timeout_add(int(SHOT_AFTER * 1000), take)
+    GLib.timeout_add(10_000, lambda: (loop.quit(), False)[1])
+    rec.start()
+    loop.run()
+    frame = result.get("frame")
+    try:
+        assert frame is not None, "no frame"
+        assert result["pts_wall"] >= result["asked"] - 0.02, result  # captured after the request
+        assert frame.size == (1920, 1080), frame.size
+        when = datetime.now()
+        t0 = time.monotonic()
+        first = screenshot.save(frame, cfg, when)
+        result["encode"] = time.monotonic() - t0
+        second = screenshot.save(frame, cfg, when)  # same second: a new name, nothing overwritten
+    finally:
+        rec.stop()
+    assert first.parent == tmp_path / "clips" / "Images", first
+    assert first.name == when.strftime("Momento_%Y-%m-%d_%H-%M-%S.png"), first.name
+    assert second.name == first.stem + "_2.png", second.name
+    data = first.read_bytes()
+    assert png_size(data) == (1920, 1080)
+    assert data == second.read_bytes()
+    assert not [p for p in first.parent.iterdir() if p.suffix == ".tmp"]
+    # With nothing running there is no frame.
+    late = []
+    rec.grab_frame(late.append)
+    GLib.MainContext.default().iteration(False)
+    assert late == [None], late
+    result.update(path=first, bytes=len(data), wait=result["got"] - result["asked"],
+                  memory=frame.caps.get_features(0).to_string())
+    return result
+
+
+def test_screenshot_live(tmp_path):
+    check_screenshot(tmp_path)
+
+
+def test_screenshot_system_memory(tmp_path):
+    """A frame in system memory (encoders other than VA-API) converts too."""
+    from momento import screenshot
+    from momento.pipeline import Frame
+
+    pipe = Gst.parse_launch("videotestsrc num-buffers=1 pattern=smpte ! "
+                            "video/x-raw,format=I420,width=640,height=360 ! appsink name=out")
+    pipe.set_state(Gst.State.PLAYING)
+    sample = pipe.get_by_name("out").emit("try-pull-sample", 5 * Gst.SECOND)
+    pipe.set_state(Gst.State.NULL)
+    frame = Frame(sample.get_buffer(), sample.get_caps())
+    assert png_size(screenshot.encode_png(frame)) == (640, 360)
+
+
 if __name__ == "__main__":
     import logging
 
@@ -215,4 +305,8 @@ if __name__ == "__main__":
         w = check_window(Path(d))
         print(f"window mode: states={[s for s, _ in w['states']]} locked={w['locked']} "
               f"segments={len(w['segments'])} ({sum(s.end - s.start for s in w['segments']):.2f}s kept)")
+        sh = check_screenshot(Path(d))
+        print(f"screenshot: {sh['memory']} frame {sh['wait'] * 1000:.0f} ms after the request, "
+              f"PNG {sh['bytes'] // 1000} kB in {sh['encode'] * 1000:.0f} ms -> {sh['path'].name}")
+        test_screenshot_system_memory(Path(d))
         print("OK")

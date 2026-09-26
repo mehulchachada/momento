@@ -91,6 +91,16 @@ Commands (fields are in ``COMMANDS``)
     width/height/fps/codec/audio is never mixed in). Works in any state while
     footage exists. Errors: ``bad duration: ...``; ``nothing recorded yet``;
     ``code: no_storage`` when the output dir lacks the clip size + 256 MiB.
+``screenshot``
+    Save one frame of the recording as a PNG in ``<output dir>/Images``
+    (``Momento_<date>_<time>.png``, ``_2``, ``_3``... on collision; never
+    overwrites). The frame is the first one *captured after the request*, as
+    the encoder gets it: what is recorded (the picked window in window mode,
+    the screen otherwise) at the recording's resolution. So a client that hides
+    itself before asking (the clip bar) is not in the picture. Reply ``path``,
+    ``width``, ``height``; the daemon also shows a desktop notification. Only
+    while recording: otherwise ``code: not_recording``; ``code: no_storage``
+    when the output dir has less than 256 MiB free.
 ``pause``
     Stop capture, keep the buffer (saves still work). Idempotent. Reply
     ``state: "paused"``.
@@ -203,7 +213,9 @@ STATES = {
 
 # Values of `code` in an error reply ({"ok": false, "code": ..., "error": ...}).
 ERROR_CODES = {
-    "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip (save)",
+    "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip "
+                  "(save, screenshot)",
+    "not_recording": "screenshot: capture isn't running (paused, stopped, starting or failed)",
 }
 
 
@@ -323,6 +335,16 @@ COMMANDS: dict[str, dict] = {
             "requested": (("integer",), True),   # what was asked for, in seconds
             "partial": (("boolean",), True),     # saved noticeably less than requested
             "reason": (("string",), False),      # why it is short, when known
+        },
+        "error": {},
+    },
+    "screenshot": {
+        "request": {},
+        "reply": {
+            "ok": (("boolean",), True),
+            "path": (("string",), True),         # absolute path of the new PNG
+            "width": (("integer",), True),       # picture size (the recording's resolution)
+            "height": (("integer",), True),
         },
         "error": {},
     },

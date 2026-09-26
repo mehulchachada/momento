@@ -54,10 +54,37 @@ STOP_TIMEOUT = 3.0
 # few frames of pipeline latency behind the moment flush() was called.
 FLUSH_TOLERANCE = 0.25
 
+# Screenshots: a frame that reaches the encoder this long after the request was
+# certainly captured after it (the queues hold ~0.15 s at most), whatever its
+# timestamp says; guards against a source whose timestamps run behind.
+FRAME_IN_FLIGHT_MAX = 0.5
+
 # Window mode messages (state "no_window"); the clip bar shows its own wording.
 WINDOW_CLOSED = "The game window closed \u2014 pick a window to keep recording"
 WINDOW_NOT_PICKED = "No game window picked \u2014 press play to pick one"
 WINDOW_STOPPED = "Window capture stopped \u2014 pick a window to keep recording"
+
+
+@dataclass(frozen=True)
+class Frame:
+    """One video frame as the encoder receives it (after scaling), for a screenshot.
+
+    ``buffer`` may live in GPU memory (VAMemory); ``va_context`` is the recording
+    pipeline's VA display, so a converter can read the surface (see screenshot.py).
+    """
+
+    buffer: Gst.Buffer
+    caps: Gst.Caps
+    va_context: Gst.Context | None = None
+
+    @property
+    def size(self) -> tuple[int, int]:
+        st = self.caps.get_structure(0)
+        return st.get_int("width")[1], st.get_int("height")[1]
+
+
+# The context type the va plugin shares its display under.
+VA_DISPLAY_CONTEXT = "gst.va.display.handle"
 
 
 @dataclass(frozen=True)
@@ -152,6 +179,7 @@ class Recorder:
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
         self._size_caps: str | None = None      # caps of the "size" capsfilter, without width/height
         self._locked_size: tuple[int, int] | None = None
+        self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
 
     # --- public API -------------------------------------------------------------
 
@@ -213,6 +241,76 @@ class Recorder:
             enc.send_event(GstVideo.video_event_new_upstream_force_key_unit(Gst.CLOCK_TIME_NONE, True, 0))
         mux = self._pipeline.get_by_name("mux")
         mux.emit("split-now")
+
+    def grab_frame(self, callback: Callable[[Frame | None], None], timeout: float = 3.0) -> None:
+        """Hand the next captured frame to ``callback(frame)`` on the main loop (screenshots).
+
+        The frame is the one the encoder gets: after scaling, so it matches the
+        recording (the picked window in window mode, the screen otherwise). Only
+        frames captured after this call count, so nothing that was already on its
+        way through the pipeline is taken. Nothing runs until it is called: a
+        one-shot buffer probe sits on the "size" capsfilter until the frame
+        arrives. ``frame`` is None when capture isn't running, stops first, or no
+        frame comes within ``timeout`` seconds.
+        """
+        pipeline = self._pipeline
+        size = pipeline.get_by_name("size") if pipeline is not None and self.recording else None
+        if size is None:
+            GLib.idle_add(_once(lambda: callback(None)))
+            return
+        if self._start_wall is None:
+            self._compute_start_wall()
+        waiter = {"callback": callback, "after": time.time(), "start_wall": self._start_wall,
+                  "context": pipeline.get_context(VA_DISPLAY_CONTEXT), "pad": size.get_static_pad("src"),
+                  "fired": False, "probe": 0, "timer": 0}
+        waiter["probe"] = waiter["pad"].add_probe(Gst.PadProbeType.BUFFER, self._frame_probe, waiter)
+        waiter["timer"] = GLib.timeout_add(int(timeout * 1000), self._frame_timeout, waiter)
+        self._frame_waiters.append(waiter)
+
+    def _frame_probe(self, pad: Gst.Pad, info: Gst.PadProbeInfo, waiter: dict):
+        """Streaming thread: keep a reference to the first frame captured after the request."""
+        if waiter["fired"]:
+            return Gst.PadProbeReturn.REMOVE
+        buf = info.get_buffer()
+        if buf is None:
+            return Gst.PadProbeReturn.OK
+        if (buf.pts != Gst.CLOCK_TIME_NONE and waiter["start_wall"] is not None
+                and waiter["start_wall"] + buf.pts / Gst.SECOND < waiter["after"]
+                and time.time() - waiter["after"] < FRAME_IN_FLIGHT_MAX):
+            return Gst.PadProbeReturn.OK  # captured before the request: still in flight
+        caps = pad.get_current_caps()
+        if caps is None:
+            return Gst.PadProbeReturn.OK
+        waiter["fired"] = True
+        # The buffer stays ours (a reference, no copy) until the screenshot is written.
+        GLib.idle_add(self._frame_ready, waiter, Frame(buf, caps, waiter["context"]))
+        return Gst.PadProbeReturn.REMOVE
+
+    def _frame_ready(self, waiter: dict, frame: Frame | None) -> bool:
+        if waiter in self._frame_waiters:
+            self._frame_waiters.remove(waiter)
+            if waiter["timer"]:
+                GLib.source_remove(waiter["timer"])
+                waiter["timer"] = 0
+            _once(lambda: waiter["callback"](frame))()
+        return False
+
+    def _frame_timeout(self, waiter: dict) -> bool:
+        waiter["timer"] = 0
+        if waiter in self._frame_waiters:
+            log.warning("no video frame for a screenshot within the timeout")
+            waiter["fired"] = True
+            try:
+                waiter["pad"].remove_probe(waiter["probe"])
+            except Exception:  # noqa: BLE001 - already removed with its pipeline
+                pass
+            self._frame_ready(waiter, None)
+        return False
+
+    def _fail_frame_waiters(self) -> None:
+        for waiter in list(self._frame_waiters):
+            waiter["fired"] = True
+            GLib.idle_add(self._frame_ready, waiter, None)
 
     # --- startup ------------------------------------------------------------------
 
@@ -689,6 +787,7 @@ class Recorder:
                     self._on_element(s)
         pipeline.set_state(Gst.State.NULL)
         self.recording = False
+        self._fail_frame_waiters()
 
     def _close_portal(self) -> None:
         if self._portal is not None:
