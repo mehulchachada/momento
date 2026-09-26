@@ -1,4 +1,4 @@
-"""Command line: momento daemon | overlay | save 5m | status | settings | set KEY VALUE | pause | resume | quit."""
+"""Command line: momento daemon | overlay | save 5m | screenshot | status | settings | set KEY VALUE | pause | resume | quit."""
 
 from __future__ import annotations
 
@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     presets = ", ".join(label for _, label in durations.PRESETS)
     s = sub.add_parser("save", help="save the last N of footage")
     s.add_argument("duration", type=_duration, help=f"e.g. {presets}, or 90s / 2m")
+    sub.add_parser("screenshot", help="save a picture of what is being recorded (in the Images folder "
+                                      "next to your clips)")
     sub.add_parser("status", help="show recorder status")
     sub.add_parser("settings", help="show video and audio settings (and audio devices)")
     keys = "; ".join(f"{k}: {h}" for k, h in settings.KEYS.items())
@@ -151,6 +153,16 @@ def main(argv: list[str] | None = None) -> int:
         if r.get("partial"):
             print(f"momento: only {durations.label(r['seconds'])} was buffered "
                   f"(asked for {durations.label(r['requested'])})", file=sys.stderr)
+        print(r["path"])
+        return 0
+
+    if args.command == "screenshot":
+        r = _request({"cmd": "screenshot"}, timeout=30)
+        if r is None:
+            return 1
+        if not r.get("ok"):
+            print(f"momento: {r.get('error', 'screenshot failed')}", file=sys.stderr)
+            return 1
         print(r["path"])
         return 0
 

@@ -689,6 +689,8 @@ class Daemon:
             reply(self.status())
         elif cmd == "save":
             self.save(msg, reply)
+        elif cmd == "screenshot":
+            self.screenshot(reply)
         elif cmd == "reload":
             self.reload(reply)
         elif cmd == "settings":
@@ -1004,6 +1006,73 @@ class Daemon:
             reply(result)
 
         threading.Thread(target=work, name="export", daemon=True).start()
+
+    def screenshot(self, reply) -> None:
+        """Save the next recorded frame as a PNG in <output dir>/Images (only while recording).
+
+        The frame is one captured after this request arrived, so a client that got
+        out of the way first (the clip bar hides itself) is not in the picture.
+        """
+        from . import screenshot
+
+        rec = self.recorder
+        if self.paused or rec is None or not getattr(rec, "recording", False):
+            reply({"ok": False, "code": "not_recording",
+                   "error": "Not recording — screenshots are taken from the recording"})
+            return
+        out_dir = screenshot.images_dir(self.cfg)
+        try:
+            free = storage.free_bytes(out_dir)
+        except OSError as e:
+            log.warning("cannot check free space for the screenshot: %s", e)
+            free = storage.SAVE_MARGIN
+        if free < storage.SAVE_MARGIN:
+            error = f"Not enough space to save a screenshot: {storage.human(free)} free"
+            notify(self.bus, "Momento: not enough disk space", error, "dialog-warning")
+            reply({"ok": False, "code": "no_storage", "error": error})
+            return
+        when = datetime.now()
+        cfg = self.cfg
+
+        def got(frame) -> None:
+            if frame is None:
+                self._finish_screenshot(reply, {"ok": False, "error": "No picture came from the recording"})
+                return
+
+            def work() -> None:
+                try:
+                    path = screenshot.save(frame, cfg, when)
+                    w, h = frame.size
+                    result = {"ok": True, "path": str(path), "width": w, "height": h}
+                except Exception as e:  # noqa: BLE001
+                    log.exception("screenshot failed")
+                    result = {"ok": False, "error": str(e) or e.__class__.__name__}
+                self._finish_screenshot(reply, result)
+
+            threading.Thread(target=work, name="screenshot", daemon=True).start()
+
+        try:
+            rec.grab_frame(got)
+        except Exception as e:  # noqa: BLE001
+            log.exception("screenshot failed")
+            self._finish_screenshot(reply, {"ok": False, "error": str(e) or e.__class__.__name__})
+
+    def _finish_screenshot(self, reply, result: dict) -> None:
+        """Any thread: reply, and notify from the main loop (as a save does)."""
+        from gi.repository import GLib
+
+        if not result.get("ok"):
+            log.warning("screenshot failed: %s", result.get("error"))
+        GLib.idle_add(self._notify_screenshot, result)
+        reply(result)
+
+    def _notify_screenshot(self, result: dict) -> bool:
+        # The clip bar hides itself before asking, so the notification is the feedback.
+        if result.get("ok"):
+            notify(self.bus, "Screenshot saved", result["path"], "camera-photo")
+        else:
+            notify(self.bus, "Momento: screenshot failed", result.get("error", ""), "dialog-error")
+        return False
 
     def _finish_save(self, result: dict) -> bool:
         if result.get("ok"):

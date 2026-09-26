@@ -423,8 +423,38 @@ class CLITest(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             cli.build_parser().parse_args(["save", "3h"])
         for argv in (["set", "audio_source", "off"], ["set", "mic", "on"], ["set", "mic_device", "default"],
-                     ["pause"], ["resume"], ["stop"], ["quit"]):
+                     ["pause"], ["resume"], ["stop"], ["quit"], ["screenshot"]):
             self.assertEqual(cli.build_parser().parse_args(argv).command, argv[0])
+
+    def test_screenshot(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        sent = []
+
+        def fake(reply):
+            def request(msg, timeout=None, **_):
+                sent.append((msg, timeout))
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+            return request
+
+        ok = {"ok": True, "path": "/v/Momento/Images/Momento_2026-09-26_21-04-11.png", "width": 1920, "height": 1080}
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ipc, "request", fake(ok)), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["screenshot"]), 0)
+        self.assertEqual(out.getvalue().strip(), ok["path"])
+        self.assertEqual(sent[0][0], {"cmd": "screenshot"})
+        refused = {"ok": False, "code": "not_recording", "error": "Not recording"}
+        with mock.patch.object(ipc, "request", fake(refused)), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(["screenshot"]), 1)
+            with mock.patch.object(ipc, "request", fake(ipc.DaemonNotRunning("no socket"))):
+                self.assertEqual(cli.main(["screenshot"]), 1)
+        self.assertIn("Not recording", err.getvalue())
 
     def test_set_writes_config(self):
         import contextlib
@@ -661,6 +691,41 @@ class FakeRecorder:
         self.stopped += 1
         self.recording = False
         self.on_state("stopped", None)
+
+    frame = "a frame"   # what grab_frame hands over (None: no frame came)
+
+    def grab_frame(self, callback, timeout=3.0):
+        callback(self.frame if self.recording else None)
+
+
+class _FakeFrame:
+    size = (1920, 1080)
+
+
+class ScreenshotFileTest(unittest.TestCase):
+    """Where screenshots go and how they are named: never over an existing file."""
+
+    def test_dir_and_name(self):
+        from momento import screenshot
+
+        cfg = {"output": {"dir": "/v/Momento"}}
+        self.assertEqual(screenshot.images_dir(cfg), Path("/v/Momento/Images"))
+        self.assertEqual(screenshot.file_name(datetime(2026, 9, 26, 21, 4, 11)), "Momento_2026-09-26_21-04-11.png")
+
+    def test_write_new_never_overwrites(self):
+        from momento import screenshot
+
+        with tempfile.TemporaryDirectory() as d:
+            images = Path(d) / "Momento" / "Images"          # created on first use
+            a = screenshot.write_new(images, "Momento_x.png", b"one")
+            b = screenshot.write_new(images, "Momento_x.png", b"two")
+            (images / "Momento_x_3.png").write_bytes(b"someone else's")
+            c = screenshot.write_new(images, "Momento_x.png", b"three")
+            self.assertEqual([p.name for p in (a, b, c)], ["Momento_x.png", "Momento_x_2.png", "Momento_x_4.png"])
+            self.assertEqual([p.read_bytes() for p in (a, b, c)], [b"one", b"two", b"three"])
+            self.assertEqual((images / "Momento_x_3.png").read_bytes(), b"someone else's")
+            self.assertEqual(sorted(p.name for p in images.iterdir()),
+                             ["Momento_x.png", "Momento_x_2.png", "Momento_x_3.png", "Momento_x_4.png"])
 
 
 class DaemonControlTest(unittest.TestCase):
@@ -1300,6 +1365,76 @@ class DaemonBufferTest(unittest.TestCase):
             self.d._stopping = False  # same daemon object, second shutdown
             self.assertEqual(self.call({"cmd": "quit"}), {"ok": True, "buffer_cleared": True})
         self.assertFalse(buf.exists())
+
+
+class DaemonScreenshotTest(unittest.TestCase):
+    """The screenshot command against a fake Recorder; the PNG writer is stubbed."""
+
+    setUp_ = DaemonControlTest.setUp
+    call = DaemonControlTest.call
+
+    def setUp(self):
+        from unittest import mock
+
+        from momento import screenshot
+
+        self.setUp_()
+        self.addCleanup(self._tmp.cleanup)
+        self.d.cfg["output"]["dir"] = str(Path(self._tmp.name) / "clips")   # never the real ~/Videos
+        self.saved = []
+
+        def fake_save(frame, cfg, when=None):
+            path = screenshot.write_new(screenshot.images_dir(cfg), screenshot.file_name(when), b"png")
+            self.saved.append((frame, path))
+            return path
+        p = mock.patch.object(screenshot, "save", side_effect=fake_save)
+        p.start()
+        self.addCleanup(p.stop)
+        self.d.recorder.frame = _FakeFrame()
+
+    def notified(self):
+        from gi.repository import GLib
+
+        while GLib.MainContext.default().iteration(False):
+            pass
+        return self.notes
+
+    def test_saved_while_recording(self):
+        r = self.call({"cmd": "screenshot"})
+        self.assertTrue(r["ok"], r)
+        path = Path(r["path"])
+        self.assertEqual(path.parent, Path(self.d.cfg["output"]["dir"]) / "Images")
+        self.assertRegex(path.name, r"^Momento_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d(_\d+)?\.png$")
+        self.assertEqual((r["width"], r["height"]), (1920, 1080))
+        self.assertTrue(path.exists())
+        self.assertIn("Screenshot saved", self.notified())
+        again = self.call({"cmd": "screenshot"})
+        self.assertNotEqual(again["path"], r["path"])            # never overwrites
+
+    def test_refused_unless_recording(self):
+        self.call({"cmd": "pause"})
+        r = self.call({"cmd": "screenshot"})
+        self.assertEqual((r["ok"], r["code"]), (False, "not_recording"))
+        self.call({"cmd": "stop"})
+        self.assertEqual(self.call({"cmd": "screenshot"})["code"], "not_recording")
+        self.call({"cmd": "resume"})
+        self.d.recorder.recording = False                       # starting / failed
+        self.assertEqual(self.call({"cmd": "screenshot"})["code"], "not_recording")
+        self.assertEqual(self.saved, [])
+
+    def test_no_frame_and_no_space(self):
+        from momento import storage
+
+        self.d.recorder.frame = None
+        r = self.call({"cmd": "screenshot"})
+        self.assertFalse(r["ok"])
+        self.assertNotIn("code", r)
+        self.assertIn("Momento: screenshot failed", self.notified())
+        self.d.recorder.frame = _FakeFrame()
+        self.free = storage.SAVE_MARGIN - 1
+        r = self.call({"cmd": "screenshot"})
+        self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
+        self.assertEqual(self.saved, [])
 
 
 class FakeBarProc:

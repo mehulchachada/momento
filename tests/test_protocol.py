@@ -67,12 +67,19 @@ class _FakeRecorder:
         self.flushes += 1
         callback()
 
+    def grab_frame(self, callback, timeout=3.0):
+        callback(_FakeFrame() if self.recording else None)
+
+
+class _FakeFrame:
+    size = (1920, 1080)
+
 
 class _DaemonCase(unittest.TestCase):
     """A real Daemon with a fake Recorder, fake free space and no notifications."""
 
     def setUp(self):
-        from momento import config, daemon, settings, storage
+        from momento import config, daemon, screenshot, settings, storage
 
         self._tmp = tempfile.TemporaryDirectory(prefix="momento-proto-")
         self.tmp = Path(self._tmp.name)
@@ -87,6 +94,8 @@ class _DaemonCase(unittest.TestCase):
         for p in (mock.patch.dict(sys.modules, {"momento.pipeline": fake}),
                   mock.patch.object(storage, "free_bytes", side_effect=lambda path: self.free),
                   mock.patch.object(daemon, "notify"),
+                  # the PNG writer needs a real frame; the protocol only needs the file
+                  mock.patch.object(screenshot, "encode_png", return_value=b"\x89PNG\r\n\x1a\n"),
                   mock.patch.object(settings, "list_audio_devices", return_value={
                       "outputs": [{"name": "sink.monitor", "label": "Speakers", "default": True}],
                       "inputs": [{"name": "mic0", "label": "Mic", "default": False}]})):
@@ -204,6 +213,25 @@ class DaemonContractTest(_DaemonCase):
 
         self.free = storage.SAVE_MARGIN
         self.check({"cmd": "save", "seconds": 30}, ok=False, code="no_storage")
+
+    def test_screenshot(self):
+        r = self.check({"cmd": "screenshot"}, ok=True)
+        self.assertTrue(Path(r["path"]).is_absolute() and Path(r["path"]).exists())
+        self.assertEqual(Path(r["path"]).parent, self.tmp / "clips" / "Images")
+        self.assertTrue(Path(r["path"]).name.startswith("Momento_") and r["path"].endswith(".png"))
+        self.assertEqual((r["width"], r["height"]), (1920, 1080))
+        self.assertNotEqual(self.check({"cmd": "screenshot"}, ok=True)["path"], r["path"])  # never overwrites
+
+    def test_screenshot_errors(self):
+        from momento import storage
+
+        self.free = storage.SAVE_MARGIN - 1
+        self.check({"cmd": "screenshot"}, ok=False, code="no_storage")
+        self.free = 10**13
+        self.check({"cmd": "pause"})
+        self.check({"cmd": "screenshot"}, ok=False, code="not_recording")
+        self.check({"cmd": "stop"})
+        self.check({"cmd": "screenshot"}, ok=False, code="not_recording")
 
     def test_pause_resume(self):
         r = self.check({"cmd": "pause"}, ok=True)
@@ -520,10 +548,16 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(validate_reply("pick_window", {"ok": False, "code": "no_storage", "error": "x",
                                                         "state": "no_storage"}), [])
         self.assertTrue(validate_reply("pick_window", {"ok": True}))
+        shot = {"ok": True, "path": "/v/Images/Momento_2026-09-26_21-04-11.png", "width": 1920, "height": 1080}
+        self.assertEqual(validate_reply("screenshot", shot), [])
+        self.assertEqual(validate_reply("screenshot", {"ok": False, "code": "not_recording", "error": "x"}), [])
+        self.assertTrue(validate_reply("screenshot", {"ok": True, "path": "/x.png"}))          # no size
+        self.assertTrue(validate_reply("screenshot", {**shot, "width": 1920.5}))
 
     def test_requests(self):
         self.assertEqual(validate_request({"cmd": "save", "seconds": "5m"}), [])
         self.assertEqual(validate_request({"cmd": "pick_window"}), [])
+        self.assertEqual(validate_request({"cmd": "screenshot"}), [])
         self.assertEqual(validate_request({"cmd": "configure", "changes": {"record": "window"}}), [])
         self.assertTrue(validate_request({"cmd": "save"}))
         self.assertTrue(validate_request({"cmd": "configure", "changes": {}}))
@@ -538,7 +572,9 @@ class ValidatorTest(unittest.TestCase):
         self.assertIn("record", protocol.SETTING_CHOICES)
         self.assertIn("no_window", protocol.STATES)     # kept for older daemons
         self.assertEqual(set(protocol.STOP_REASONS), {"user", "window_closed"})
-        self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode, keep history: additive changes
+        self.assertIn("not_recording", protocol.ERROR_CODES)
+        self.assertIn("screenshot", protocol.COMMANDS)          # additive: the version stays
+        self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode, keep history, screenshots: additive
         self.assertEqual(protocol.PROTOCOL_VERSION, 1)
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)
