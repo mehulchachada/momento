@@ -17,13 +17,21 @@ mid-stream: it is scaled (with black bars) to the configured resolution, and
 with ``native`` the output size is locked to the first size of the session, so
 the encoder output never changes inside a session.
 
-Never upscaled: the captured picture's size (``source_size``, from the first
-caps on the source pad) caps the resolution. A preset taller than the source
-(``quality.fits_source``) records at the source's own size instead, as if
-``native`` were set, with the bitrate of that size (``resolution_effective``
-says which was used). The config is left alone. Never taller than
-``quality.MAX_HEIGHT`` (1080) either: ``native`` scales a taller picture down
-to fit (``quality.native_size``, aspect kept).
+Never upscaled: the captured picture's size (``source_size``) caps the
+resolution. It is known before the pipeline is built when the portal says how
+big the stream is (the test source always knows), so the "size" capsfilter is
+created at the final output size and nothing renegotiates once the stream runs:
+changing those caps at runtime makes pipewiresrc renegotiate with the
+compositor, which drops all its buffers (KWin), and that looks like the window
+closing. Otherwise the first caps on the source pad tell, and the capsfilter is
+changed then (a fallback; an early "buffers removed" error after it restarts
+the pipeline once at the now-known size instead of ending capture).
+
+A preset taller than the source (``quality.fits_source``) records at the
+source's own size instead, as if ``native`` were set, with the bitrate of that
+size (``resolution_effective`` says which was used). The config is left alone.
+Never taller than ``quality.MAX_HEIGHT`` (1080) either: ``native`` scales a
+taller picture down to fit (``quality.native_size``, aspect kept).
 
 Everything here runs on the GLib main loop of the caller.
 """
@@ -63,6 +71,10 @@ STOP_TIMEOUT = 3.0
 # covering it: the forced keyframe is stamped with its capture time, which is a
 # few frames of pipeline latency behind the moment flush() was called.
 FLUSH_TOLERANCE = 0.25
+# A PipeWire source that fails this soon after the pipeline started, or after the
+# output caps were changed at runtime, is most likely renegotiating (the
+# compositor drops every buffer), not a closed window: restart once first.
+RENEGOTIATE_GRACE = 3.0
 
 # Screenshots: a frame that reaches the encoder this long after the request was
 # certainly captured after it (the queues hold ~0.15 s at most), whatever its
@@ -154,6 +166,9 @@ class Recorder:
     # The "test" source's picture size (a stand-in for a 1080p screen); tests set
     # another one on an instance to stand in for a smaller screen or a window.
     test_size = (1920, 1080)
+    # The test source says its size in advance, as a portal does; tests turn this
+    # off to exercise the runtime fallback (the size learnt from the first caps).
+    test_size_known = True
 
     def __init__(
         self,
@@ -201,6 +216,12 @@ class Recorder:
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
         self._size_caps: str | None = None      # caps of the "size" capsfilter, without width/height
         self._locked_size: tuple[int, int] | None = None
+        # The source's size before the pipeline is built (the portal's stream size,
+        # the test source's size, or the real size after a restart); None: unknown.
+        self._known_size: tuple[int, int] | None = None
+        self._source_seen = False
+        self._settle_from = 0.0          # monotonic time of the start / last runtime caps change
+        self._restarted = False          # a renegotiation restart was used (once per start)
         self._kbps = 0  # the encoder's bitrate as last set
         self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
 
@@ -350,6 +371,11 @@ class Recorder:
         return out
 
     def _begin(self) -> None:
+        self._restarted = False
+        if self.source_name == "test":
+            self._known_size = quality.source_size(tuple(self.test_size)) if self.test_size_known else None
+        elif self.source_name != "portal":
+            self._known_size = None  # x11 / gamescope: learnt from the first caps
         if self.source_name == "portal" and self._pw_fd is None:
             self._start_portal()
             return
@@ -377,6 +403,8 @@ class Recorder:
             os.close(fd)
             return
         self._pw_fd, self._pw_node = fd, node_id
+        # How big the stream is, so the pipeline is built at its final output size.
+        self._known_size = quality.source_size(getattr(self._portal, "stream_size", None))
         self._build_and_play()
 
     def _on_portal_error(self, message: str) -> None:
@@ -430,6 +458,7 @@ class Recorder:
         bus = pipeline.get_bus()
         bus.add_signal_watch()
         self._bus_watch = bus.connect("message", self._on_message)
+        self._settle_from = time.monotonic()
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._teardown(graceful=False)
             self._next_variant_or_fail(f"{variant}: failed to enter PLAYING")
@@ -473,24 +502,68 @@ class Recorder:
         """Native resolution in window mode: the output keeps the first window size."""
         return self.size is None and self.window_mode
 
+    def _plan_size(self, source: tuple[int, int] | None) -> None:
+        """Decide what a source of size ``source`` (None: unknown) is recorded at.
+
+        Sets ``source_size``, ``resolution_effective`` and ``_locked_size``: the
+        output is pinned to ``quality.native_size`` of the source (its own size in
+        even numbers, at most ``quality.MAX_HEIGHT`` lines) when the preset is
+        taller than the source (never upscale), with ``native`` on a taller
+        source, and in window mode with ``native`` (the size of a session never
+        changes). Otherwise the preset's size (or, native, the source's own).
+        """
+        source = quality.source_size(source)
+        self.source_size = source
+        if source is None:
+            self.resolution_effective = None
+            self._locked_size = None
+            return
+        capped = self.size is not None and not quality.fits_source(self.size_name, source)
+        shrink = self.size is None and source[1] > quality.MAX_HEIGHT  # native, taller than we record
+        self.resolution_effective = "native" if capped else self.size_name
+        pin = capped or shrink or self._lock_size()
+        self._locked_size = quality.native_size(source) if pin else None
+
+    def _output_size(self) -> tuple[int, int] | None:
+        """The size the encoder gets (None: whatever the source is, native on a screen)."""
+        return self._locked_size or self.size
+
+    def _output_caps(self) -> str:
+        """The "size" capsfilter's caps for the current plan."""
+        out = self._output_size()
+        return self._size_caps + (f",width={out[0]},height={out[1]}" if out else "")
+
+    def _log_size(self, kbps: int) -> None:
+        w_h = self.source_size
+        if w_h is None:
+            return
+        if self.resolution_effective == "native" and self.size is not None:
+            log.info("source is %dx%d, smaller than %s: recording at %dx%d, %d kbps (never upscaled)",
+                     *w_h, self.size_name, *self._locked_size, kbps)
+        elif self.size is None and w_h[1] > quality.MAX_HEIGHT:
+            log.info("source is %dx%d, taller than %dp: recording at %dx%d, %d kbps",
+                     *w_h, quality.MAX_HEIGHT, *self._locked_size, kbps)
+        elif self._locked_size is not None:
+            log.info("window capture: output size locked to %dx%d for this session", *self._locked_size)
+
     def _video_chain(self, v: _Variant) -> str:
         fps = f"{self.fps}/1"
-        size = f",width={self.size[0]},height={self.size[1]}" if self.size else ""
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
         # (A window that is resized mid-stream is scaled into the same frame.)
         # Always there: native may have to scale a picture taller than
         # quality.MAX_HEIGHT down (_pin_size); at the same size it passes through.
         scale = "videoscale add-borders=true ! "
         queue = "queue max-size-buffers={} max-size-bytes=0 max-size-time=0 leaky=downstream"
-        # The output size lives in one named capsfilter ("size") so native window
-        # capture can pin it to the first negotiated size (see _pin_size).
+        # The output size lives in one named capsfilter ("size"), created at the
+        # planned size (_plan_size); _pin_size changes it only when the source's
+        # size wasn't known in advance (or turned out different).
         if v.zero_copy or v.encoder in VA_ENCODERS:
             self._size_caps = "video/x-raw(memory:VAMemory),format=NV12"
         elif v.encoder in ("x264enc", "openh264enc"):
             self._size_caps = f"video/x-raw,format=I420,framerate={fps}"
         else:
             self._size_caps = f"video/x-raw,framerate={fps}"
-        sized = f'capsfilter name=size caps="{self._size_caps}{size}"'
+        sized = f'capsfilter name=size caps="{self._output_caps()}"'
         if v.zero_copy:
             # Copy each frame into our own VA surface right away (GPU colour
             # conversion + scaling) so the compositor gets its buffer back within
@@ -546,6 +619,9 @@ class Recorder:
 
     def _build(self, v: _Variant) -> Gst.Pipeline:
         seg_ns = int(float(self.cfg["buffer"]["segment_seconds"]) * Gst.SECOND)
+        # The output size is decided before the chain is described, so the "size"
+        # capsfilter starts at its final caps when the source's size is known.
+        self._prepare_size()
         parts = [
             "splitmuxsink name=mux muxer=mpegtsmux send-keyframe-requests=true max-files=0 max-size-bytes=0",
             f"{self._video_source()} ! {self._video_chain(v)}",
@@ -572,17 +648,13 @@ class Recorder:
             # Resend the last frame on a static screen so the encoder (and
             # segment splitting) keeps going; error out when the stream dies.
             _set(src, keepalive_time=250, on_disconnect="error")
-        self._locked_size = None
-        self._source_seen = False
-        self.source_size = self.resolution_effective = None
-        # Sees the source's caps before they travel on: learns its size, and pins
-        # the output size when the preset is taller (or native in window mode).
+        # Sees the source's caps before they travel on: checks its size, and pins
+        # the output size at runtime when it wasn't known in advance (fallback).
         src.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._pin_size,
                                             (pipeline.get_by_name("size"), pipeline.get_by_name("enc"),
                                              v.encoder))
 
         enc = pipeline.get_by_name("enc")
-        self._kbps = quality.bitrate_kbps(self.cfg["capture"])  # until the source's size is known
         self._encoder_settings(enc, v.encoder, self._kbps)
 
         aenc = pipeline.get_by_name("aenc")
@@ -607,16 +679,27 @@ class Recorder:
         elif name == "openh264enc":
             _set(enc, bitrate=kbps * 1000, gop_size=gop)
 
-    def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, data: tuple):
-        """Streaming thread: learn the source's size from its first caps; pin the output size.
+    def _prepare_size(self) -> None:
+        """Before a pipeline is built: plan its output size from the known source size
+        (None: learnt from the first caps) and the encoder bitrate that goes with it."""
+        self._source_seen = False
+        self._plan_size(self._known_size)
+        # The bitrate of the size really recorded (unknown: the preset's, until the caps tell).
+        self._kbps = quality.bitrate_kbps(self.cfg["capture"], self.source_size)
+        self._log_size(self._kbps)
 
-        Runs before the caps event travels on, so the first negotiation already
-        carries the pinned size; later resizes (a window) are scaled into it. The
-        output is pinned to ``quality.native_size`` of the source (its own size in
-        even numbers, scaled down to at most ``quality.MAX_HEIGHT`` lines) when the
-        preset is taller than the source (never upscale), with ``native`` on a
-        taller source, and in window mode with ``native`` (the size of a session
-        never changes). The encoder gets the bitrate of the size really recorded.
+    def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, data: tuple):
+        """Streaming thread: check the source's first caps against the plan.
+
+        Normally the size was known when the pipeline was built (``_prepare_size``)
+        and the "size" capsfilter already has the right caps: nothing changes.
+        When the size wasn't known, or the first caps differ from what the portal
+        said, the plan is made again from the real size and the capsfilter's caps
+        are changed here, before the caps event travels on, and only if they
+        differ (a fallback: on a PipeWire source it renegotiates with the
+        compositor, see ``_may_be_renegotiation``). Later resizes (a window) are
+        scaled into the session's size. The encoder gets the bitrate of the size
+        really recorded.
         """
         capsfilter, enc, encoder = data
         event = info.get_event()
@@ -629,31 +712,37 @@ class Recorder:
             return Gst.PadProbeReturn.OK
         if not self._source_seen:
             self._source_seen = True
-            self.source_size = (w, h)
-            capped = self.size is not None and not quality.fits_source(self.size_name, (w, h))
-            shrink = self.size is None and h > quality.MAX_HEIGHT  # native, taller than we record
-            self.resolution_effective = "native" if capped else self.size_name
-            if capped or shrink or self._lock_size():
-                size = quality.native_size((w, h))  # even numbers (H.264), at most MAX_HEIGHT lines
-                self._locked_size = size
-                capsfilter.set_property("caps", Gst.Caps.from_string(
-                    f"{self._size_caps},width={size[0]},height={size[1]}"))
-            # The bitrate of the size really recorded (native: the picture's own class).
+            if self.source_size == (w, h):
+                return Gst.PadProbeReturn.OK  # as planned: the capsfilter is already right
+            if self.source_size is not None:
+                log.info("source is %dx%d, not the %dx%d the portal announced", w, h, *self.source_size)
+            self._plan_size((w, h))
+            self._apply_output_caps(capsfilter)
             kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h))
             if enc is not None and kbps != self._kbps:
                 self._kbps = kbps
                 self._encoder_settings(enc, encoder, kbps)
-            if capped:
-                log.info("source is %dx%d, smaller than %s: recording at %dx%d, %d kbps (never upscaled)",
-                         w, h, self.size_name, *self._locked_size, kbps)
-            elif shrink:
-                log.info("source is %dx%d, taller than %dp: recording at %dx%d, %d kbps",
-                         w, h, quality.MAX_HEIGHT, *self._locked_size, kbps)
-            elif self._locked_size is not None:
-                log.info("window capture: output size locked to %dx%d for this session", *self._locked_size)
+            self._log_size(kbps)
         elif self._locked_size is not None and (w, h) != self._locked_size:
             log.info("source resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
         return Gst.PadProbeReturn.OK
+
+    def _apply_output_caps(self, capsfilter) -> bool:
+        """Give the "size" capsfilter the planned caps, unless it has them already.
+
+        Returns whether they changed. A change is remembered (``_settle_from``):
+        the source may renegotiate right after it.
+        """
+        if capsfilter is None:
+            return False
+        want = Gst.Caps.from_string(self._output_caps())
+        have = capsfilter.get_property("caps")
+        if isinstance(have, Gst.Caps) and have.is_equal(want):
+            return False
+        log.info("output caps changed after the stream started: %s", want.to_string())
+        self._settle_from = time.monotonic()
+        capsfilter.set_property("caps", want)
+        return True
 
     # --- bus ------------------------------------------------------------------------
 
@@ -759,8 +848,38 @@ class Recorder:
             self._params = params  # caps are fixed for the life of this pipeline
         return params
 
+    def _may_be_renegotiation(self) -> bool:
+        """Could the video source's failure be a renegotiation rather than the stream ending?
+
+        pipewiresrc (on-disconnect=error) reports "all buffers have been removed"
+        both when the node is destroyed (the window closed) and when the
+        compositor re-allocates its buffers because the format was renegotiated,
+        e.g. right after the output caps changed. Within ``RENEGOTIATE_GRACE`` of
+        the start or of such a change, while our portal session (so its node) is
+        still there, it is taken for the latter, once per start.
+        """
+        if self._restarted or self.source_name not in ("portal", "gamescope"):
+            return False
+        if self.source_name == "portal" and (self._portal is None or self._pw_fd is None):
+            return False  # the portal session is gone: so is the stream
+        return time.monotonic() - self._settle_from < RENEGOTIATE_GRACE
+
+    def _restart_stream(self, message: str) -> None:
+        """Rebuild the pipeline on the same PipeWire stream, at the size now known."""
+        self._restarted = True
+        log.info("video source stopped %.1fs after starting (%s): taken for a renegotiation, "
+                 "not a closed window; restarting once at %s", time.monotonic() - self._settle_from, message,
+                 "%dx%d" % self.source_size if self.source_size else "an unknown size")
+        self._teardown(graceful=self._got_fragment, source_lost=True)
+        if self.source_size is not None:
+            self._known_size = self.source_size  # the real size: no runtime change this time
+        GLib.idle_add(self._retry_build)
+
     def _on_pipeline_failure(self, message: str, source_lost: bool = False) -> None:
         if self._stop_requested:
+            return
+        if source_lost and self._may_be_renegotiation():
+            self._restart_stream(message)
             return
         if self.window_mode and (source_lost or self._got_fragment):
             # No automatic retry for a window: a new session could open the picker
@@ -862,6 +981,7 @@ class Recorder:
                 pass
             self._pw_fd = None
             self._pw_node = None
+            self._known_size = None  # the next portal session says its own size
 
     def _window_gone(self, message: str, forget_token: bool) -> None:
         """Window mode: capture ends here and stays off until the user picks again."""

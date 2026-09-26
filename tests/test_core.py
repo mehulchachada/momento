@@ -2700,29 +2700,39 @@ class RecorderWindowTest(unittest.TestCase):
         # native may scale a screen taller than 1080 lines down (at the same size it passes through)
         self.assertIn("videoscale add-borders=true", screen._video_chain(self.pipeline._Variant("x264enc", False)))
 
-    def pin(self, rec, size):
-        """Feed a source's first caps to Recorder._pin_size, as the probe would (no pipeline).
+    def pin(self, rec, size, known=None, first=None):
+        """Plan the output like _build (the source's size ``known`` in advance, or not),
+        then feed the source's first caps (``first``, default ``size``) to
+        Recorder._pin_size, as the probe would (no pipeline).
 
-        Returns (the size the output is pinned to or None, the encoder bitrate set or None)."""
+        Returns (the size the output is pinned to or None, the encoder bitrate set
+        at runtime or None). ``self.chain`` is the video chain as built,
+        ``self.caps_sets`` the caps the "size" capsfilter was given at runtime."""
         from unittest import mock
 
-        from momento import quality
-
         Gst = self.pipeline.Gst
-        rec._video_chain(self.pipeline._Variant("x264enc", False))   # sets the size caps
-        rec._source_seen, rec._locked_size = False, None
-        rec._kbps = quality.bitrate_kbps(rec.cfg["capture"])          # as _build sets it
-        capsfilter, info = mock.Mock(), mock.Mock()
+        first = first or size
+        rec._known_size = known
+        rec._prepare_size()
+        self.chain = rec._video_chain(self.pipeline._Variant("x264enc", False))
+        capsfilter = Gst.ElementFactory.make("capsfilter", None)
+        capsfilter.set_property("caps", Gst.Caps.from_string(rec._output_caps()))   # as built
+        self.caps_sets = []
+        capsfilter.connect("notify::caps", lambda el, _p: self.caps_sets.append(el.get_property("caps")))
+        info = mock.Mock()
         info.get_event.return_value = Gst.Event.new_caps(
-            Gst.Caps.from_string(f"video/x-raw,width={size[0]},height={size[1]}"))
+            Gst.Caps.from_string(f"video/x-raw,width={first[0]},height={first[1]}"))
         with mock.patch.object(rec, "_encoder_settings") as settings:
             self.assertEqual(rec._pin_size(None, info, (capsfilter, object(), "x264enc")), Gst.PadProbeReturn.OK)
-        if rec._locked_size is not None:
-            caps = capsfilter.set_property.call_args[0][1].get_structure(0)
-            self.assertEqual((caps.get_int("width")[1], caps.get_int("height")[1]), rec._locked_size)
+        out = rec._output_size()
+        caps = capsfilter.get_property("caps").get_structure(0)
+        if out is not None:
+            self.assertEqual((caps.get_int("width")[1], caps.get_int("height")[1]), out)
         else:
-            capsfilter.set_property.assert_not_called()
-        self.assertEqual(rec.source_size, tuple(size))
+            self.assertFalse(caps.has_field("width"))
+        if rec._locked_size is None:
+            self.assertEqual(self.caps_sets, [])       # the preset's (or the source's own) size as built
+        self.assertEqual(rec.source_size, tuple(first))
         return rec._locked_size, (settings.call_args[0][2] if settings.called else None)
 
     def test_native_never_records_taller_than_1080p(self):
@@ -2751,6 +2761,164 @@ class RecorderWindowTest(unittest.TestCase):
         self.assertEqual(old.resolution_effective, "1080p")
 
 
+    def test_size_known_before_the_pipeline_is_built(self):
+        """The portal said how big the stream is: the "size" capsfilter is built at the
+        final output size and the first caps change nothing (no renegotiation)."""
+        cases = (
+            # target, resolution, source -> recorded, effective
+            ("window", "native", (1920, 1080), (1920, 1080), "native"),   # the live bug: 1080p window, native
+            ("window", "native", (1271, 713), (1270, 712), "native"),     # locked, even numbers
+            ("window", "1080p", (1271, 713), (1270, 712), "native"),      # capped: never upscaled
+            ("screen", "1080p", (1280, 720), (1280, 720), "native"),      # capped screen
+            ("screen", "native", (3840, 2160), (1920, 1080), "native"),   # shrink to 1080 lines
+            ("screen", "native", (3440, 1440), (2580, 1080), "native"),   # ultrawide, aspect kept
+            ("window", "native", (3840, 2160), (1920, 1080), "native"),   # a 4K window
+            ("screen", "1080p", (3840, 2160), (1920, 1080), "1080p"),     # the preset scales it
+            ("screen", "720p", (1920, 1200), (1280, 720), "720p"),
+        )
+        from momento import quality
+
+        for target, res, source, recorded, effective in cases:
+            with self.subTest(target=target, res=res, source=source):
+                rec = self.recorder(target=target, resolution=res)
+                rec.start(interactive=True)
+                _, runtime_kbps = self.pin(rec, source, known=source)
+                self.assertIsNone(runtime_kbps)                                         # nothing at runtime
+                self.assertIn(f"width={recorded[0]},height={recorded[1]}", self.chain)            # built that way
+                self.assertEqual(self.caps_sets, [])
+                self.assertEqual((rec.source_size, rec.resolution_effective), (source, effective))
+                self.assertEqual(rec._kbps, quality.bitrate_kbps(rec.cfg["capture"], source))
+        rec = self.recorder(target="screen", resolution="native")
+        self.pin(rec, (1920, 1080), known=(1920, 1080))
+        self.assertNotIn("width=", self.chain)            # native screen at its own size: passes through
+        self.assertEqual(self.caps_sets, [])
+
+    def test_runtime_pin_is_a_fallback(self):
+        """Unknown in advance (or not what the portal said): the capsfilter changes once,
+        only when its caps differ, and the change opens the renegotiation grace."""
+        rec = self.recorder(resolution="native")
+        rec.start(interactive=True)
+        self.assertEqual(self.pin(rec, (1920, 1080)), ((1920, 1080), None))     # unknown: pinned at runtime
+        self.assertEqual(len(self.caps_sets), 1)
+        rec._settle_from = 0.0
+        self.assertEqual(self.pin(rec, (1280, 720), known=(1920, 1080)), ((1280, 720), 10_000))  # differs
+        self.assertEqual(len(self.caps_sets), 1)
+        self.assertGreater(rec._settle_from, 0.0)                               # a change was made just now
+        screen = self.recorder(target="screen", resolution="1080p")
+        self.assertEqual(self.pin(screen, (1920, 1080)), (None, None))           # the preset's caps: left alone
+        self.assertEqual(self.caps_sets, [])
+        self.assertEqual(self.pin(screen, (1920, 1200), known=(1920, 1080)), (None, None))  # same output
+        self.assertEqual(self.caps_sets, [])
+
+    def test_test_source_and_portal_announce_the_size(self):
+        import os
+
+        from unittest import mock
+
+        rec = self.recorder(source="test")
+        rec.test_size = (1280, 720)
+        rec.start(interactive=True)
+        self.assertEqual(rec._known_size, (1280, 720))
+        rec = self.recorder(source="portal")
+        rec.start(interactive=True)
+        rec._portal = mock.Mock(stream_size=(1920, 1080))
+        rec._on_portal_ready(os.open(os.devnull, os.O_RDONLY), 77)
+        self.assertEqual(rec._known_size, (1920, 1080))
+        rec._build_and_play.assert_called_once()
+        rec._close_portal()
+        self.assertIsNone(rec._known_size)                                      # the next session says its own
+        rec._portal = mock.Mock(stream_size=None)                               # a portal that doesn't say
+        rec._on_portal_ready(os.open(os.devnull, os.O_RDONLY), 78)
+        self.assertIsNone(rec._known_size)
+        rec._close_portal()
+
+    def started(self, **capture):
+        """A recorder whose portal stream just started playing (no real pipeline)."""
+        import os
+
+        from unittest import mock
+
+        self.token.parent.mkdir(parents=True, exist_ok=True)
+        self.token.write_text("tok")
+        rec = self.recorder(**capture)
+        rec.start(interactive=True)
+        rec._portal = mock.Mock(stream_size=(1920, 1080))
+        rec._on_portal_ready(os.open(os.devnull, os.O_RDONLY), 77)
+        self.addCleanup(rec._close_portal)
+        rec._settle_from = time.monotonic()           # what _build_and_play does
+        rec.source_size = (1920, 1080)
+        return rec
+
+    def test_early_buffers_removed_restarts_instead_of_closing(self):
+        from unittest import mock
+
+        GLib = self.pipeline.GLib
+        rec = self.started(resolution="native")
+        self.states.clear()
+        with mock.patch.object(self.pipeline.GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("all buffers have been removed", source_lost=True)
+        self.assertEqual(self.states, [])                            # not no_window: not the window closing
+        idle.assert_called_once_with(rec._retry_build)
+        self.assertTrue(self.token.exists())
+        self.assertFalse(rec._stop_requested)
+        self.assertEqual(rec._known_size, (1920, 1080))              # rebuilt at the size now known
+        rec._retry_build()
+        self.assertEqual(rec._build_and_play.call_count, 2)
+        # Once per start: failing again (the node really is gone) ends it as before.
+        rec._settle_from = time.monotonic()
+        with mock.patch.object(GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("all buffers have been removed", source_lost=True)
+        idle.assert_not_called()
+        self.assertEqual(self.states, [("no_window", self.pipeline.WINDOW_CLOSED)])
+        self.assertFalse(self.token.exists())
+
+    def test_late_node_destruction_closes_the_window(self):
+        from unittest import mock
+
+        rec = self.started(resolution="native")
+        rec._got_fragment = rec.recording = True
+        rec._settle_from = time.monotonic() - 10                     # well after the start
+        self.states.clear()
+        with mock.patch.object(self.pipeline.GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("all buffers have been removed", source_lost=True)
+        idle.assert_not_called()
+        self.assertEqual(self.states, [("no_window", self.pipeline.WINDOW_CLOSED)])
+        self.assertFalse(self.token.exists())
+
+    def test_early_failure_without_the_portal_session_closes(self):
+        from unittest import mock
+
+        rec = self.started(resolution="native")
+        rec._got_fragment = rec.recording = True
+        rec._portal.close()
+        rec._portal = None                                           # the session already went away
+        with mock.patch.object(self.pipeline.GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("all buffers have been removed", source_lost=True)
+        idle.assert_not_called()
+        self.assertEqual(self.states[-1], ("no_window", self.pipeline.WINDOW_CLOSED))
+
+    def test_other_early_failures_are_not_restarted(self):
+        from unittest import mock
+
+        rec = self.started(resolution="native")
+        rec._got_fragment = True
+        with mock.patch.object(self.pipeline.GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("encoder hiccup")               # not the source
+        idle.assert_not_called()
+        self.assertEqual(self.states[-1], ("error", self.pipeline.WINDOW_STOPPED))
+
+    def test_screen_mode_early_failure_restarts_on_the_same_stream(self):
+        from unittest import mock
+
+        rec = self.started(target="screen", resolution="native")
+        self.states.clear()
+        with mock.patch.object(self.pipeline.GLib, "idle_add") as idle:
+            rec._on_pipeline_failure("all buffers have been removed", source_lost=True)
+        idle.assert_called_once_with(rec._retry_build)
+        self.assertEqual(self.states, [])
+        self.assertEqual(rec._retry_id, 0)                           # no 3 s error retry, no new portal session
+        self.assertIsNotNone(rec._pw_fd)
+
 class _FakeMatch:
     def __init__(self, bus, key):
         self.bus, self.key = bus, key
@@ -2766,6 +2934,7 @@ class _FakePortalBus:
         self.receivers = {}
         self.calls = []
         self.props = {"version": 5, "AvailableCursorModes": 3, "AvailableSourceTypes": source_types}
+        self.stream_props = {}   # the Start response's stream properties
 
     def get_unique_name(self):
         return ":1.42"
@@ -2800,7 +2969,7 @@ class _FakePortalObject:
             elif member == "SelectSources":
                 bus.respond(args[1], {})
             elif member == "Start":
-                bus.respond(args[2], {"streams": [(77, {})], "restore_token": "fresh-token"})
+                bus.respond(args[2], {"streams": [(77, bus.stream_props)], "restore_token": "fresh-token"})
             elif member == "OpenPipeWireRemote":
                 reply_handler(os.open(os.devnull, os.O_RDONLY))
             elif member == "Close":
@@ -2831,14 +3000,16 @@ class PortalWindowTest(unittest.TestCase):
         config.portal_token_path("screen").write_text("screen-token")
         config.portal_token_path("window").write_text("window-token")
 
-    def run_portal(self, target, source_types=3):
+    def run_portal(self, target, source_types=3, stream_props=None):
         from momento import portal
 
         bus = _FakePortalBus(source_types)
+        bus.stream_props = stream_props or {}
         got = {}
         p = portal.ScreenCastPortal(bus, self.config.portal_token_path(target), False,
                                     portal.SOURCE_WINDOW if target == "window" else portal.SOURCE_MONITOR)
         p.start(lambda fd, node: got.update(fd=fd, node=node), lambda msg: got.update(error=msg))
+        self.portal = p
         if "fd" in got:
             os.close(got["fd"])
         select = next((a for m, a in bus.calls if m == "SelectSources"), None)
@@ -2859,6 +3030,25 @@ class PortalWindowTest(unittest.TestCase):
         self.assertEqual(str(options["restore_token"]), "screen-token")
         self.assertEqual(self.config.portal_token_path("screen").read_text(), "fresh-token")
         self.assertEqual(self.config.portal_token_path("window").read_text(), "window-token")
+
+    def test_stream_size(self):
+        import dbus
+
+        from momento import portal
+
+        got, _ = self.run_portal("window", stream_props={
+            "size": dbus.Struct((dbus.Int32(1280), dbus.Int32(720)), signature="ii"),
+            "position": dbus.Struct((dbus.Int32(0), dbus.Int32(0)), signature="ii"),
+            "source_type": dbus.UInt32(2)})
+        self.assertEqual(got.get("node"), 77, got)
+        self.assertEqual(self.portal.stream_size, (1280, 720))
+        got, _ = self.run_portal("screen")                          # a portal that doesn't say
+        self.assertEqual(got.get("node"), 77, got)
+        self.assertIsNone(self.portal.stream_size)
+        self.assertEqual(portal.stream_size((77, {"size": (3840, 2160)})), (3840, 2160))
+        for stream in ((77,), (77, {}), (77, None), (77, {"size": (0, 720)}), (77, {"size": "big"}),
+                       (77, {"size": (1280,)}), None):
+            self.assertIsNone(portal.stream_size(stream), stream)
 
     def test_desktop_without_window_sharing(self):
         got, options = self.run_portal("window", source_types=1)

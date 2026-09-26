@@ -210,10 +210,11 @@ def frame_sizes(path: Path) -> set:
     return set(out)
 
 
-def record_capped(tmp_path: Path, name: str, source: tuple, copy_path=False, **capture) -> dict:
+def record_capped(tmp_path: Path, name: str, source: tuple, copy_path=False, known=True, **capture) -> dict:
     """Record CAP_SECONDS from a test source of size ``source``; what came out.
 
     ``copy_path``: the VA encoder fed through videoconvert instead of zero-copy vapostproc.
+    ``known=False``: the size isn't known in advance (the runtime pin, a fallback).
     """
     from momento import config, quality
     from momento.pipeline import Recorder, _Variant
@@ -228,6 +229,7 @@ def record_capped(tmp_path: Path, name: str, source: tuple, copy_path=False, **c
     loop = GLib.MainLoop()
     rec = Recorder(cfg, ring, lambda s, m: states.append((s, m)))
     rec.test_size = source
+    rec.test_size_known = known
     if copy_path:
         plan = rec._plan_variants
         rec._plan_variants = lambda: [_Variant(v.encoder, False) for v in plan() if v.zero_copy][:1] or plan()
@@ -271,6 +273,12 @@ def check_capped(tmp_path: Path) -> list:
     assert r["kbps"] == r["want_kbps"] == 10_000, r
     assert {(s.width, s.height) for s in r["segments"]} == {(1270, 712)}, r["segments"]
     out.append(r)
+    # The same when the size isn't known in advance: pinned from the first caps.
+    r = record_capped(tmp_path, "capwinlate", (1271, 713), known=False, resolution="1080p", target="window")
+    assert (r["source"], r["effective"], r["locked"]) == ((1271, 713), "native", (1270, 712)), r
+    assert r["kbps"] == r["want_kbps"] == 10_000, r
+    assert {(s.width, s.height) for s in r["segments"]} == {(1270, 712)}, r["segments"]
+    out.append(r)
     # The same through videoconvert (the VA encoder's copy path).
     r = record_capped(tmp_path, "capcopy", (1271, 713), copy_path=True, resolution="1080p", target="window")
     assert (r["effective"], r["locked"], r["kbps"]) == ("native", (1270, 712), 10_000), r
@@ -283,7 +291,7 @@ def check_capped(tmp_path: Path) -> list:
     assert {(s.width, s.height) for s in r["segments"]} == {(1280, 720)}, r["segments"]
     out.append(r)
     if shutil.which("ffprobe"):
-        for r, want in zip(out, ("1728,1080", "1270,712", "1270,712", "1280,720")):
+        for r, want in zip(out, ("1728,1080", "1270,712", "1270,712", "1270,712", "1280,720")):
             seg = r["segments"][-1]
             assert frame_sizes(seg.path) == {want}, (seg, frame_sizes(seg.path))
     return out

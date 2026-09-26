@@ -9,6 +9,10 @@ The source type is a monitor (full screen) or a single window. Each kind keeps
 its own token file (see ``config.portal_token_path``). A window token only
 restores while that window still exists: the compositor matches the window
 itself, so a relaunched game is picked again.
+
+The Start response also says how big the stream is (``stream_size``: a
+monitor's mode, a window's size, in pixels), so the recorder can build its
+pipeline at the final output size before the first frame arrives.
 """
 
 from __future__ import annotations
@@ -38,6 +42,20 @@ PERSIST_PERSISTENT = 2
 _RESPONSE_TEXT = {1: "cancelled", 2: "failed"}
 
 
+def stream_size(stream) -> tuple[int, int] | None:
+    """The ``size`` (i,i) of one Start response stream ``(node_id, props)``; None when absent or bad.
+
+    KDE, GNOME and wlroots portals report it (a monitor: its mode; a window: its size).
+    """
+    try:
+        props = stream[1] if len(stream) > 1 else {}
+        w, h = (props or {}).get("size")
+        w, h = int(w), int(h)
+    except (TypeError, ValueError, AttributeError, IndexError, KeyError):
+        return None
+    return (w, h) if w > 0 and h > 0 else None
+
+
 def register_app_id(bus: dbus.Bus, app_id: str) -> None:
     """Tell xdg-desktop-portal which app this connection is (host apps only).
 
@@ -63,6 +81,8 @@ class ScreenCastPortal:
         self.source_type = source_type
         self.session_handle: str | None = None
         self.node_id: int | None = None
+        # The stream's size from the Start response (pixels), None when the portal didn't say.
+        self.stream_size: tuple[int, int] | None = None
         self._sender = bus.get_unique_name().lstrip(":").replace(".", "_")
         self._obj = bus.get_object(BUS_NAME, OBJECT_PATH)
         self._iface = dbus.Interface(self._obj, SCREENCAST_IFACE)
@@ -78,6 +98,7 @@ class ScreenCastPortal:
         self._on_ready, self._on_error = on_ready, on_error
         self._done = False
         self._closed = False
+        self.stream_size = None
         session_token = self._new_token("momento_s")
         self._request(
             "CreateSession",
@@ -146,6 +167,7 @@ class ScreenCastPortal:
             self._fail("portal returned no streams")
             return
         self.node_id = int(streams[0][0])
+        self.stream_size = stream_size(streams[0])
         self._iface.OpenPipeWireRemote(
             dbus.ObjectPath(self.session_handle),
             dbus.Dictionary({}, signature="sv"),
@@ -158,7 +180,8 @@ class ScreenCastPortal:
             return
         fd = fd.take() if hasattr(fd, "take") else int(fd)
         self._done = True
-        log.info("portal ready: pipewire fd=%d node=%d", fd, self.node_id)
+        size = "%dx%d" % self.stream_size if self.stream_size else "unknown"
+        log.info("portal ready: pipewire fd=%d node=%d size=%s", fd, self.node_id, size)
         if self._on_ready:
             self._on_ready(fd, self.node_id)
 
