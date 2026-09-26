@@ -519,13 +519,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setFocusPolicy(Qt.StrongFocus)
             self.setFixedSize(ICON_W, BAR_HEIGHT)
             self.setCursor(Qt.PointingHandCursor)
-            self.setToolTip(self.TIPS[kind])
+            self.setAccessibleDescription(self.TIPS[kind])
             self.setAccessibleName(self.TIPS[kind])
 
         def set_kind(self, kind):
             if kind != self.kind:
                 self.kind = kind
-                self.setToolTip(self.TIPS[kind])
+                self.setAccessibleDescription(self.TIPS[kind])
                 self.setAccessibleName(self.TIPS[kind])
                 self.update()
 
@@ -564,7 +564,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setProperty("sel", False)
             self.setProperty("nofit", False)
             if tip:
-                self.setToolTip(tip)
+                self.setAccessibleDescription(tip)
 
         def set_sel(self, on):
             if self.property("sel") != on:
@@ -658,7 +658,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 lbl = self.labels[self.idx]
                 text = self.cur.fontMetrics().elidedText(lbl, Qt.ElideRight, self.cur.maximumWidth() - 2 * SEG_PAD - 2)
                 self.cur.setText(text)
-                self.cur.setToolTip(lbl if text != lbl else "")
+                self.cur.setAccessibleDescription(lbl if text != lbl else "")
                 self.cur.set_sel(True)
             else:
                 for i, b in enumerate(self.buttons):
@@ -958,7 +958,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
             self.dot.show()
             self.name.setText(self.NAMES[view])
-            self.name.setToolTip("")
+            self.name.setAccessibleDescription("")
             for c in self.controls:
                 pb = c["pause"]
                 if view == "off" or (view == "starting" and not running):
@@ -1051,7 +1051,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 else:
                     self.set_time(_mmss(self.buffered), TEXT if view in ("rec", "paused") else MUTED)
                 if view == "error" and st.get("error"):
-                    self.name.setToolTip(str(st["error"]))
+                    # Shown in the strip above the bar; the bar has no tooltips (see main()).
+                    self.warn = str(st["error"])
                 for o in self.options:
                     o.set_long(o.seconds > self.buffered + 0.5)
             if self.stack.currentIndex() != 0:
@@ -1646,7 +1647,13 @@ def main(argv=None) -> int:
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
 
+    # Our own palette and stylesheet draw everything. Use Qt's neutral Fusion
+    # style rather than the desktop's (Breeze on KDE): with layer-shell as the
+    # shell integration for *all* windows, Breeze's tooltip/animation handling
+    # crashed the bar (null call in Breeze::Style::eventFilter on a timer).
+    os.environ.setdefault("QT_STYLE_OVERRIDE", "Fusion")
     app = QApplication.instance() or QApplication(["momento-overlay"] + argv)
+    app.setStyle("Fusion")
     app.setApplicationName("Momento")
     app.setDesktopFileName("io.github.mehulchachada.Momento")
 
