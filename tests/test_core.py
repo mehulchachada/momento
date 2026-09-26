@@ -2689,6 +2689,61 @@ class CLIStatusTest(unittest.TestCase):
         self.assertIn("record: window: Elden Ring", text)
         self.assertIn("history: kept when recording stops", text)
 
+    ST = {"ok": True, "state": "recording", "recording": True, "buffered": 60.0, "max_seconds": 3600,
+          "target": "screen", "resolution": "2160p", "fps": 60, "quality": "high", "bitrate_kbps": 15000,
+          "resolution_effective": "native", "source_size": [1920, 1080]}
+
+    def test_status_shows_the_resolution_really_recorded(self):
+        _code, text = self.run_cli(["status"], [self.ST])
+        self.assertIn("video: 2160p, recording at 1080p (your screen's size), 60 fps, high (15 Mbps)", text)
+        win = {**self.ST, "target": "window", "source_size": [1280, 720], "bitrate_kbps": 10000}
+        _code, text = self.run_cli(["status"], [win])
+        self.assertIn("video: 2160p, recording at 1280\u00d7720 (the window's size), 60 fps", text)
+        for fits in ({**self.ST, "resolution": "1080p", "resolution_effective": "1080p"},
+                     {**self.ST, "resolution": "native"},
+                     {k: v for k, v in self.ST.items() if k not in ("resolution_effective", "source_size")}):
+            _code, text = self.run_cli(["status"], [fits])
+            self.assertNotIn("recording at", text)
+            self.assertIn(f"video: {fits['resolution']} 60 fps", text)
+
+    def test_set_resolution_above_the_screen_notes_it(self):
+        conf = {"ok": True, "changed": {"resolution": "2160p"}, "restarted": True, "paused": False,
+                "state": "starting"}
+        code, text = self.run_cli(["set", "resolution", "4k"], [conf, self.ST])
+        self.assertEqual(code, 0)
+        self.assertEqual(text.splitlines(), ["resolution = 2160p", "Recording restarted with the new setting.",
+                                             "Your screen is 1080p, so this records at 1080p; "
+                                             "a bigger size would only waste space."])
+        code, text = self.run_cli(["set", "resolution", "1080p"],
+                                  [{**conf, "changed": {"resolution": "1080p"}}, self.ST])
+        self.assertNotIn("waste", text)
+        win = {**self.ST, "target": "window", "source_size": [1280, 720]}
+        _code, text = self.run_cli(["set", "resolution", "1440p"], [{**conf, "changed": {"resolution": "1440p"}}, win])
+        self.assertIn("The window is 1280\u00d7720, so this records at 1280\u00d7720;", text)
+        # no size known yet (or no status): nothing to add
+        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, {**self.ST, "source_size": None}])
+        self.assertNotIn("waste", text)
+        _code, text = self.run_cli(["set", "resolution", "4k"], [conf, OSError("gone")])
+        self.assertNotIn("waste", text)
+
+    def test_settings_show_the_resolution_really_recorded(self):
+        from unittest import mock
+
+        from momento import settings, storage
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text(f'[capture]\nresolution = "2160p"\ntarget = "screen"\n[buffer]\ndir = "{d}/buf"\n')
+            with mock.patch.object(settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                    mock.patch.object(storage, "free_bytes", return_value=10**12):
+                _code, text = self.run_cli(["--config", str(path), "settings"], [self.ST])
+                self.assertIn("resolution: 2160p, records at 1080p (your screen's size)", text)
+                self.assertIn("bitrate: 15 Mbps (automatic)", text)
+                self.assertIn("disk use: about 7.2 GB for the full buffer", text)
+                _code, text = self.run_cli(["--config", str(path), "settings"], [OSError("not running")])
+                self.assertIn("resolution: 2160p\n", text)
+                self.assertIn("bitrate: 45 Mbps (automatic)", text)
+
     def test_stop_and_resume_messages(self):
         _code, text = self.run_cli(["stop"], [{"ok": True, "state": "stopped", "buffer_cleared": False}])
         self.assertIn("The replay is kept", text)
