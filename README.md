@@ -41,16 +41,16 @@ Press play once and Momento records in the background. When something worth keep
 
 ## How it compares
 
-| | **Momento** | Steam recording | OBS replay |
-|---|:---:|:---:|:---:|
-| Works with any game | ✓ | Steam games only | ✓ |
-| Pick the length when you save (15 s – 60 min) | ✓ | Trim on a timeline | Whole buffer only |
-| Controller-friendly overlay | ✓ | ✓ | ✗ |
-| Memory for an hour of replay | ~150 MB | Kept on disk | ~6.8 GB |
-| Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin |
-| Steam Gaming Mode | Records; bar coming | ✓ | ✗ |
-
-More detail, including GPU Screen Recorder: [docs/COMPARISON.md](docs/COMPARISON.md).
+| | **Momento** | Steam recording | OBS replay | GPU Screen Recorder |
+|---|:---:|:---:|:---:|:---:|
+| Works with any game | ✓ | Steam games only | ✓ | ✓ |
+| Pick the length when you save | 15 s – 60 min | Trim on a timeline | Whole buffer | Whole, 1 or 10 min |
+| Controller-friendly overlay | ✓ | ✓ | ✗ | ✓ |
+| Memory for an hour at 1080p | ~150 MB | Kept on disk | ~6.8 GB | ~6.8 GB (RAM mode) |
+| Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin | ✓ |
+| Steam Gaming Mode | Records; bar coming | ✓ | ✗ | ? |
+| Longest replay | 60 min | 120 min | 6 h | 24 h |
+| Video formats | H.264 | MP4 | H.264, HEVC, AV1 | H.264, HEVC, AV1 |
 
 ## Install
 
