@@ -304,16 +304,23 @@ class Recorder:
         test = self.source_name == "test"
         norm = "audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2"
 
-        def src(device: str, freq: int) -> str:
+        def src(device: str, freq: int, follow: str) -> str:
             if test:
                 return f"audiotestsrc is-live=true wave=ticks freq={freq}"
+            if device == follow and _have("pipewiresrc"):
+                # A PipeWire stream with no target follows the default device,
+                # so switching speakers/headphones/HDMI mid-session keeps working.
+                # (pulsesrc resolves @DEFAULT_...@ once and stays pinned.)
+                sink = ",stream.capture.sink=true" if follow == "@DEFAULT_MONITOR@" else ""
+                return (f"pipewiresrc do-timestamp=true provide-clock=false "
+                        f"stream-properties=\"props,node.name=momento-audio,node.description=Momento{sink}\" ! audio/x-raw")
             return f"pulsesrc device=\"{device}\" do-timestamp=true provide-clock=false"
 
         inputs = []
         if a.get("desktop"):
-            inputs.append(src(a.get("desktop_device") or "@DEFAULT_MONITOR@", 440))
+            inputs.append(src(a.get("desktop_device") or "@DEFAULT_MONITOR@", 440, "@DEFAULT_MONITOR@"))
         if a.get("microphone"):
-            inputs.append(src(a.get("microphone_device") or "@DEFAULT_SOURCE@", 880))
+            inputs.append(src(a.get("microphone_device") or "@DEFAULT_SOURCE@", 880, "@DEFAULT_SOURCE@"))
         if not inputs:
             return None
         aac = "avenc_aac" if _have("avenc_aac") else "fdkaacenc" if _have("fdkaacenc") else None
