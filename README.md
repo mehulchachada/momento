@@ -34,6 +34,7 @@ Momento is the Linux version of the PS5's Create button. It records in the backg
 - **Settings in the bar.** Resolution, 60 or 120 fps, quality, sound and mic.
 - **Works with a controller.** Hold View + Menu to open the bar, then pick with the D-pad and A.
 - **Pause and stop** from the bar whenever you want.
+- **Screenshots too.** The camera button saves a picture of your game to `~/Videos/Momento/Images`.
 - **Keeps your history** through restarts and reboots.
 - **Protects your game.** Uses little memory and never fills your disk.
 - **Light on performance.** Your graphics card does the heavy lifting.
@@ -133,12 +134,14 @@ The first time Momento starts, your desktop asks what to share, like when you sh
 | **P**, or the pause button | Pauses or resumes recording. Your history is kept |
 | **S**, or the gear button | Opens settings in the bar |
 | The stop button | Stops recording and clears the history (the bar asks first). The bar then shows **Start** |
+| The camera button | Takes a screenshot. The bar gets out of the way first, and a notification tells you it's saved |
 | **Esc** | Closes the bar without saving |
 
 The **Super** key is the Windows / start-menu key. Momento uses Super + Shift + G because KDE already uses Super + G.
 
 ```bash
 momento save 30s        # save without opening the bar (15s, 1m, 5m, 60m, 90s...)
+momento screenshot      # save a picture of your game
 momento status          # is it recording, and how much is kept
 momento settings        # current settings and your sound devices
 momento set fps 120     # change a setting
