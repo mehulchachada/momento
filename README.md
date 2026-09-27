@@ -152,7 +152,7 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | **General** | Record | Full screen, **Window**. The bar shows what it's recording, like *Recording Ember Rift*. |
 | | Replay length | **15 min**, 30 min, 60 min. How far back you can save. Clip lengths longer than this are greyed out. |
 | | Keep history | **Off**: stopping clears the replay. On: it's kept, and every full replay is also saved to Videos. |
-| **Video** | Resolution | 720p, **1080p**, Native (your screen's shape, up to 1080p) |
+| **Video** | Resolution | 480p, 720p, **1080p**, Native (your screen's shape, up to 1080p). 480p: smallest files, softest picture. |
 | | Frame rate | **60 fps**, 120 fps. 120 only helps if your game runs above 100 fps. |
 | | Quality | Standard, **High**, Ultra. Higher is sharper and takes more space. |
 | | Format | **Auto** picks one your PC records well: H.264 on most PCs. |
