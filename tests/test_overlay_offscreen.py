@@ -456,7 +456,7 @@ class OverlayOffscreen(unittest.TestCase):
                           "resolution": "display",
                           "fps": "gauge", "quality": "sliders", "format": "film", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "hour_warning": "hourglass",
-                          "instant_bar": "bolt"})
+                          "instant_bar": "bolt", "report": "report"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
@@ -1495,7 +1495,7 @@ class OverlayOffscreen(unittest.TestCase):
                 "Video": ["resolution", "fps", "quality", "format"],
                 "Audio": ["audio_source", "mic", "mic_device"],
                 "Controller": ["controller"],
-                "Misc": ["hour_warning", "instant_bar"]}
+                "Misc": ["hour_warning", "instant_bar", "report"]}
         heights = set()
         for i, name in enumerate(bar.tab_names):
             bar.switch_tab(i, "row")
@@ -1575,7 +1575,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Replay length", "Keep history", "Resolution", "Frame rate", "Quality",
                           "Format", "Sound", "Mic",
-                          "Mic device", "Controller", "Hour warning", "Instant bar"])
+                          "Mic device", "Controller", "Hour warning", "Instant bar", "Problem?"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
             self.assertLessEqual(lbl.fontMetrics().horizontalAdvance(lbl.text()), lbl.width())
@@ -1658,6 +1658,71 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.tab_names, ["General", "Video", "Audio", "Controller"])   # Misc is empty
         self.assertEqual([r.key for r in bar.rows if r.tab == 0], ["record"])
         bar.clear_rows()
+
+    def test_settings_report_row(self):
+        """Settings -> Misc -> Problem?: Make a report (off the UI thread; the note says where
+        the file went and its folder opens) and Open logs. Not a setting: Apply never sees it,
+        and the panel keeps its height."""
+        from unittest import mock
+
+        from momento import logs, report
+
+        daemon = FakeDaemon(True)
+        bar = self.make(daemon)
+        bar.move(100, 700)
+        h0 = bar.height()
+        self.open_settings(bar)
+        opened, started = [], threading.Event()
+        path = Path.home() / "Momento-report-2026-09-27_12-30.txt"
+
+        def write(**_kw):
+            started.set()
+            self.assertIsNot(threading.current_thread(), threading.main_thread())   # off the UI thread
+            return path
+        self.enterContext(mock.patch.object(report, "write", side_effect=write))
+        self.enterContext(mock.patch.object(logs, "open_folder", side_effect=lambda p: opened.append(Path(p)) or True))
+        for _ in range(6):
+            self.key(Qt.Key_PageDown)                                   # Misc
+        self.assertEqual([r.key for r in bar.visible_rows()], ["hour_warning", "instant_bar", "report"])
+        row = bar.row("report")
+        self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.icon.kind),
+                         ("Problem?", ["Make a report", "Open logs"], "report"))
+        self.assertFalse(any(b.selected() for b in row.buttons))       # buttons, not a choice
+        self.assertEqual(row.note.text(), overlay.REPORT_IDLE_NOTE)
+        self.assertEqual(bar.panel_rows, 4)                             # Video is still the tallest tab
+        self.assertEqual(bar.height(), h0 + self.PANEL + 1)
+        self.assertNotIn("report", bar.pending())
+        self.assertEqual(bar.changes(), {})
+        self.key(Qt.Key_Down)
+        self.key(Qt.Key_Down)                                           # Problem?: Make a report
+        self.assertTrue(row.buttons[0].hasFocus())
+        self.key(Qt.Key_Return)                                         # runs the report, not Apply
+        self.wait_for(lambda: opened)
+        self.assertTrue(started.is_set())
+        self.assertEqual(opened, [Path.home()])                         # the file's folder
+        self.assertEqual(row.note.text(), f"Saved to Home/{path.name} \u00b7 Attach it to your GitHub issue")
+        self.assertEqual((daemon.configures, bar.apply_state), ([], None))
+        self.assertTrue(bar.isVisible())
+        self.shot(bar, "settings-misc-report", "v7")
+        self.key(Qt.Key_Right)                                          # Open logs
+        self.assertTrue(row.buttons[1].hasFocus())
+        self.key(Qt.Key_Right)                                          # the last one: stays
+        self.assertTrue(row.buttons[1].hasFocus())
+        self.key(Qt.Key_Return)
+        self.assertEqual(opened[-1], logs.log_dir())
+        self.assertTrue(str(logs.log_dir()).startswith(os.environ["MOMENTO_TEST_SANDBOX"]))
+        self.assertIn("Opened", row.note.text())
+        # a failed report says why, in the same place
+        with mock.patch.object(report, "write", side_effect=OSError("disk full")):
+            QTest.mouseClick(row.buttons[0], Qt.LeftButton)
+            self.wait_for(lambda: "Couldn't" in row.note.text())
+        self.assertEqual(row.note.text(), "Couldn't make the report: disk full")
+        self.assertEqual(daemon.configures, [])
+
+    def test_report_note(self):
+        self.assertEqual(overlay.report_note(Path.home() / "Momento-report-x.txt"),
+                         "Saved to Home/Momento-report-x.txt \u00b7 Attach it to your GitHub issue")
+        self.assertEqual(overlay.report_note("/tmp/r.txt"), "Saved to /tmp/r.txt \u00b7 Attach it to your GitHub issue")
 
     # ---------------------------------------------------------------- the label next to the time
 
