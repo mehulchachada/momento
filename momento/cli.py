@@ -159,7 +159,7 @@ def controller_line(cfg: dict) -> str:
     label = settings.controller_label(settings.current(cfg)["controller"])
     if ctl["hold_ms"]:
         line = f"hold {label} ({ctl['hold_ms'] / 1000:g} s) to open or close the bar"
-    else:   # controller_open = tap
+    else:   # a tap (hold_ms = 0, the default)
         line = f"press {label} to open or close the bar"
     if not ctl["exclusive"]:
         line += "; the game also sees the presses"
@@ -341,6 +341,12 @@ def main(argv: list[str] | None = None) -> int:
         except settings.Unavailable as e:  # 1440p / 4K: a friendly sentence, not an error code
             print(e, file=sys.stderr)
             return 1
+        except ValueError as e:
+            print(f"momento: {e}", file=sys.stderr)
+            return 1
+        try:
+            if "controller" in clean:
+                settings.check_new_shortcut(clean["controller"])   # two buttons, or off
         except ValueError as e:
             print(f"momento: {e}", file=sys.stderr)
             return 1

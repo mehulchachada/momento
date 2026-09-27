@@ -204,6 +204,12 @@ class Daemon:
         # The history is cleared on a stop unless [buffer] keep_history.
         self.stopped = False
         self.stop_reason: str | None = None  # "user" | "window_closed" (status.stop_reason)
+        # Why it is paused, when not by the user: "gallery" (Full screen: the clip bar's
+        # gallery is open, see pause()). Cleared by any user pause/resume/stop, so only
+        # a pause still held by the gallery is ever resumed on its behalf.
+        self.pause_reason: str | None = None
+        self._gallery_pid: int | None = None   # the bar process holding that pause
+        self._gallery_timer = 0
         self._stopping = False
         # The current session's footage and hour marks (see HourMarks).
         self.hours = HourMarks()
@@ -308,6 +314,7 @@ class Daemon:
                 self.shortcut.close()
             except Exception:  # noqa: BLE001
                 pass
+        self._clear_pause_reason()
         self.stop_bar()
         self._close_controller()
         if self.server is not None:
@@ -369,6 +376,9 @@ class Daemon:
         if proc is not self.bar_proc:
             return False  # a bar we stopped on purpose
         self.bar_proc = None
+        if self.pause_reason == "gallery" and self._gallery_pid in (None, proc.pid):
+            log.info("clip bar exited with its gallery open; resuming recording")
+            self._gallery_resume()
         if self._stopping or not self.keep_bar_loaded():
             return False
         if code == config.BAR_RECYCLE_EXIT:
@@ -536,6 +546,7 @@ class Daemon:
         self.paused = True
         self.stopped = True
         self.stop_reason = reason
+        self._clear_pause_reason()
         if reason == "user" and self.recorder is not None:
             self.recorder.stop()
         cleared = not self.keep_history()
@@ -806,9 +817,9 @@ class Daemon:
         elif cmd == "configure":
             self.configure(msg, reply)
         elif cmd == "pause":
-            self.pause(reply)
+            self.pause(reply, msg)
         elif cmd == "resume":
-            self.resume(reply)
+            self.resume(reply, msg)
         elif cmd == "pick_window":
             self.pick_window(reply)
         elif cmd == "stop":
@@ -947,13 +958,89 @@ class Daemon:
             self.cfg.setdefault("ui", {})["keep_bar_loaded"] = saved["ui"].get("keep_bar_loaded", True)
             self._sync_bar()
 
-    def pause(self, reply) -> None:
-        """Stop capturing but keep what is buffered; saves keep working on it."""
+    def pause(self, reply, msg: dict | None = None) -> None:
+        """Stop capturing but keep what is buffered; saves keep working on it.
+
+        ``reason: "gallery"`` (the clip bar opened its gallery, with ``pid``: the bar's
+        process) pauses only in Full screen mode while recording, so the gallery never
+        ends up in the clips; the reply's ``pause_reason`` says whether it did. That
+        pause is resumed by ``resume`` with the same reason, or when the bar process
+        goes away first (it exited, crashed, was killed or recycled). A plain pause
+        while it holds makes it the user's: it is then never resumed on its own.
+        """
+        reason = (msg or {}).get("reason")
+        if reason == "gallery":
+            if not self.paused and not self.stopped and not self._window_target() \
+                    and self.state in ("recording", "starting"):
+                self.paused = True
+                self.pause_reason = "gallery"
+                pid = (msg or {}).get("pid")
+                self._gallery_pid = pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 \
+                    else None
+                if self.recorder is not None:
+                    self.recorder.stop()
+                self._watch_gallery_owner()
+                log.info("recording paused while the gallery is open")
+            reply({"ok": True, "state": self._idle_state(), "pause_reason": self.pause_reason})
+            return
+        self._clear_pause_reason()   # the user's pause now
         if not self.paused:
             self.paused = True
             if self.recorder is not None:
                 self.recorder.stop()
         reply({"ok": True, "state": self._idle_state()})
+
+    def _clear_pause_reason(self) -> None:
+        self.pause_reason = None
+        self._gallery_pid = None
+        if self._gallery_timer:
+            from gi.repository import GLib
+
+            GLib.source_remove(self._gallery_timer)
+            self._gallery_timer = 0
+
+    def _gallery_resume(self) -> None:
+        """Resume a pause the gallery still holds (nothing else)."""
+        if self.pause_reason != "gallery" or not self.paused or self.stopped:
+            self._clear_pause_reason()
+            return
+        self.resume(lambda _r: None)
+        log.info("recording resumed after the gallery")
+
+    # How often a gallery pause checks that the bar holding it is still running.
+    GALLERY_OWNER_CHECK_MS = 2000
+
+    @staticmethod
+    def _process_alive(pid: int) -> bool:
+        """``pid`` is running (a zombie, exited but not reaped, is not)."""
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as f:
+                stat = f.read()
+        except OSError:
+            return False
+        return stat[stat.rfind(b")") + 2:][:1] != b"Z"
+
+    def _check_gallery_owner(self) -> bool:
+        """Timer: the bar holding the gallery pause is gone -> resume. False stops the timer."""
+        if self.pause_reason != "gallery":
+            self._gallery_timer = 0
+            return False
+        pid = self._gallery_pid
+        if pid is not None and not self._process_alive(pid):
+            log.info("clip bar %d gone with its gallery open; resuming recording", pid)
+            self._gallery_timer = 0
+            self._gallery_resume()
+            return False
+        return True
+
+    def _watch_gallery_owner(self) -> None:
+        if self._gallery_pid is None or self._gallery_timer:
+            return
+        try:
+            from gi.repository import GLib
+        except ImportError:
+            return
+        self._gallery_timer = GLib.timeout_add(self.GALLERY_OWNER_CHECK_MS, self._check_gallery_owner)
 
     def stop_recording(self, reply) -> None:
         """The bar's Stop: end recording, but keep the service (and with it the global
@@ -965,14 +1052,22 @@ class Daemon:
     def _idle_state(self) -> str:
         return "stopped" if self.stopped else "paused" if self.paused else self.state
 
-    def resume(self, reply) -> None:
+    def resume(self, reply, msg: dict | None = None) -> None:
         """Play: start capturing again; the footage from before stays.
+
+        ``reason: "gallery"`` (the gallery closed) resumes only a pause the gallery
+        still holds; otherwise it changes nothing (the user paused or resumed meanwhile,
+        or it never paused: window mode, not recording).
 
         From paused it continues the session (window mode: the stored window is
         restored, or the portal asks). From stopped it starts a new session, and
         in window mode that means picking the window again: the stored one is
         forgotten, so the picker opens.
         """
+        if (msg or {}).get("reason") == "gallery" and self.pause_reason != "gallery":
+            reply({"ok": True, "state": self._idle_state()})
+            return
+        self._clear_pause_reason()
         # Also retry after an error (e.g. the screen-share prompt was dismissed),
         # so the bar's play button is always a way back to recording.
         if self.paused or self.state in ("no_storage", "error", "no_window"):
@@ -1003,6 +1098,7 @@ class Daemon:
         self._forget_target_name()
         if self.stopped:
             self._new_session()
+        self._clear_pause_reason()
         self.paused = False
         self.stopped = False
         if self.recorder is not None:
@@ -1035,6 +1131,8 @@ class Daemon:
             # Why it is stopped: "user" (Stop), "window_closed", or null (not stopped
             # by either, e.g. window mode waiting for the first play).
             "stop_reason": self.stop_reason if self.stopped else None,
+            # Why it is paused when not by the user: "gallery" (Full screen, the gallery is open).
+            "pause_reason": self.pause_reason if self.paused and not self.stopped else None,
             "keep_history": self.keep_history(),
             # The setting; an older config's 1440p/2160p reads as what it records at (1080p).
             "resolution": quality.offered(self.cfg["capture"]["resolution"]),

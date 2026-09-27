@@ -108,7 +108,11 @@ GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: p
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
-GALLERY_GAP = 8            # between the gallery's panel and the bar under it
+FPS_NOTE = "120 fps only helps if your game runs above 100 fps"   # Video: at the Frame rate row's end
+# Full screen: the gallery isn't recorded. In the room of the stopped sentence (dot and
+# time hidden); "Paused while the gallery is open" would need the bar 7 px wider.
+GALLERY_PAUSED = "Paused while in the gallery"
+GALLERY_JOIN = 1           # the hairline between the gallery's panel and the bar row
 START_TIMEOUT_S = 10
 START_POLL_S = 0.5
 LOGO_SIZE = 18
@@ -180,7 +184,7 @@ RECORD_TEXT = {"screen": "Full screen", "window": "Window"}
 DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
                 ("Audio", ("audio_source", "mic", "mic_device")),
-                ("Controller", ("controller", "controller_exclusive", "controller_open")),
+                ("Controller", ("controller",)),
                 ("Misc", ("hour_warning", "instant_bar")))
 
 
@@ -669,6 +673,15 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(color))
         p.drawRoundedRect(QRectF(x - 4.5, y - 4.5, 9, 9), 1.5, 1.5)
+    elif kind == "trash":
+        # a bin: the lid with its handle, the body narrowing a little, two ribs
+        p.drawLine(P(x - 6, y - 4.5), P(x + 6, y - 4.5))
+        p.drawPolyline(QPolygonF([P(x - 2.2, y - 4.5), P(x - 2.2, y - 6.8), P(x + 2.2, y - 6.8),
+                                  P(x + 2.2, y - 4.5)]))
+        p.drawPolyline(QPolygonF([P(x - 4.6, y - 4.5), P(x - 3.8, y + 6.5), P(x + 3.8, y + 6.5),
+                                  P(x + 4.6, y - 4.5)]))
+        p.drawLine(P(x - 1.3, y - 1.5), P(x - 1.1, y + 3.8))
+        p.drawLine(P(x + 1.3, y - 1.5), P(x + 1.1, y + 3.8))
     elif kind == "cross":
         p.drawLine(P(x - 4.5, y - 4.5), P(x + 4.5, y + 4.5))
         p.drawLine(P(x - 4.5, y + 4.5), P(x + 4.5, y - 4.5))
@@ -738,21 +751,6 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "bolt":
         p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
                                  P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
-    elif kind == "press_hold":
-        # a button held down: a timer ring closing around it
-        p.drawEllipse(P(x, y), 2.6, 2.6)
-        r = 6.8
-        p.drawArc(QRectF(x - r, y - r, 2 * r, 2 * r), 90 * 16, -270 * 16)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawEllipse(P(x - r, y), 1.3, 1.3)
-    elif kind == "press_tap":
-        # a button tapped: it opens the moment it is down
-        p.drawEllipse(P(x, y), 2.6, 2.6)
-        for deg in (45, 135, 225, 315):
-            a = math.radians(deg)
-            c, s_ = math.cos(a), math.sin(a)
-            p.drawLine(P(x + 5.2 * c, y + 5.2 * s_), P(x + 7.4 * c, y + 7.4 * s_))
     elif kind == "gallery":
         # a media library: a photo (a mountain and a sun in a frame) on a stack
         # of them; the back frame shows only where the front one leaves room
@@ -778,42 +776,28 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
                                  P(left + 8.6, bottom - 3.9), P(front.right(), bottom - 0.4),
                                  P(front.right(), bottom)]))
         p.drawEllipse(P(front.right() - 3.3, front.top() + 3.2), 1.35, 1.35)
-    elif kind == "lock":
-        p.drawRoundedRect(QRectF(x - 5.5, y - 1.5, 11, 8.5), 2, 2)
-        shackle = QPainterPath(P(x - 3.3, y - 1.5))
-        shackle.lineTo(x - 3.3, y - 3.8)
-        shackle.arcTo(QRectF(x - 3.3, y - 7.1, 6.6, 6.6), 180, -180)
-        shackle.lineTo(x + 3.3, y - 1.5)
-        p.drawPath(shackle)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawEllipse(P(x, y + 2.6), 1.2, 1.2)
     p.restore()
 
 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
-             "controller_exclusive": "lock", "controller_open": "press_tap", "keep_history": "history",
+             "keep_history": "history",
              "replay_length": "timer",
              "hour_warning": "hourglass", "instant_bar": "bolt"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
 ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_history": "Keep history",
               "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
-              "mic_device": "Mic device", "controller": "Controller", "controller_exclusive": "Exclusive",
-              "controller_open": "Open with", "hour_warning": "Hour warning", "instant_bar": "Instant bar"}
-ON_OFF_KEYS = ("mic", "controller_exclusive", "keep_history", "instant_bar")
+              "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
+              "instant_bar": "Instant bar"}
+ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
-OPEN_ICONS = {"hold": "press_hold", "tap": "press_tap"}      # so does Open with's
-VALUE_ICONS = {"record": RECORD_ICONS, "controller_open": OPEN_ICONS}
+VALUE_ICONS = {"record": RECORD_ICONS}
 # Settings the daemon applies without restarting the recording (settings.LIVE_KEYS
 # wins; this is for an older settings module).
-LIVE_KEYS = ("controller", "controller_exclusive", "controller_open", "replay_length", "keep_history",
-             "hour_warning", "instant_bar")
+LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar")
 REPLAY_MINUTES = (15, 30, 60)   # the Replay length row, when the reply has no choices for it
-# How the controller shortcut opens the bar: the Open with row's choices.
-OPEN_TEXT = {"hold": "Hold", "tap": "Tap"}
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
 
@@ -1125,11 +1109,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.on = on
                 self.sync()
 
-        def target(self):
-            state, style = super().target()
-            if state == "selected":   # a quiet fill, like the open settings tab
-                return state, (QColor(TAB_SEL), QColor(TEXT), 0.0)
-            return state, style
+        # "on" (the gallery open) is drawn like a chosen value: the light fill, a dark icon
 
         def set_kind(self, kind):
             if kind != self.kind:
@@ -1469,6 +1449,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.online = None
             self.running = False      # daemon reachable
             self.paused = False
+            self.pause_reason = None  # status pause_reason: "gallery" while the gallery holds it
+            # The pause this bar asked for while its gallery is open (Full screen):
+            # None | "asked" | "held". Its requests go out in order on one worker.
+            self.gallery_pause = None
+            self._gallery_jobs = None
             self.buffered = 0.0
             # From the status: what is recorded ("screen" | "window"), the window's
             # title, and whether a stop keeps the footage (keep_history).
@@ -1506,6 +1491,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.applied = None       # settings: the changes the last Apply sent
             self.pads = None          # game controllers while the bar is on screen
             self.pads_handle = None
+            self.pad_used = None      # the controller last in use, kept across opens (its hints)
             self.gallery = None       # momento.gallery.Gallery, built on the first open
             self.gallery_hint = None  # "No clips or screenshots yet" in the strip above the bar
             self.recycle = False      # the gallery was used: a resident bar exits once hidden
@@ -1538,19 +1524,21 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             outer.setSpacing(0)
 
             # The gallery (momento/gallery.py builds its panel in here on its first open):
-            # a panel of its own above everything else, a GALLERY_GAP under it, then the
-            # bar as it always is. One surface, so the keyboard, the pointer's leave and
-            # the layer-shell anchor stay as they are; it grows upward like settings.
+            # the bar grows upward into it, like settings: one shape, rounded only at its
+            # very top and bottom, the panel and the bar row apart by a hairline like the
+            # bar's other dividers. One surface, so the keyboard, the pointer's leave and
+            # the layer-shell anchor stay as they are.
             self.gallery_host = QWidget()
             gl = QVBoxLayout(self.gallery_host)
             gl.setContentsMargins(0, 0, 0, 0)
             gl.setSpacing(0)
             self.gallery_host.hide()
             outer.addWidget(self.gallery_host)
-            self.gallery_gap = QWidget()      # the panel's bottom edge, the gap, the bar's top edge
-            self.gallery_gap.setFixedHeight(GALLERY_GAP + 2)
-            self.gallery_gap.hide()
-            outer.addWidget(self.gallery_gap)
+            self.gallery_join = QFrame()
+            self.gallery_join.setFixedHeight(GALLERY_JOIN)
+            self.gallery_join.setStyleSheet(f"background: {BORDER}; margin: 0 12px;")
+            self.gallery_join.hide()
+            outer.addWidget(self.gallery_join)
 
             # Above the bar (bottom-anchored, so the bar grows upward):
             # a one-line hint while paused, or the settings rows.
@@ -1630,7 +1618,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                         + [nfm.horizontalAdvance(n) + 8 + tfm.horizontalAdvance(t)
                            for n, t in (("Starting", "00:00"), ("Off", "—"), ("Error", "00:00"),
                                         ("Low storage", "00:00"))])
-            self.stopped_w = block + 16 - 8   # the stopped sentence's room (the name's margin aside)
+            # the room of a sentence (stopped, the gallery's pause; the name's margin aside)
+            self.stopped_w = block + 16 - 8
             head.setFixedWidth(LOGO_SIZE + 12 + 16 + block + 12 + ICON_W + 4 + self.storage_hint.width())
             row.addWidget(head)
             row.addSpacing(10)
@@ -1781,15 +1770,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(QColor(BORDER), 1))
             p.setBrush(QColor(*BG))
+            # one shape, the gallery's panel (when open) included: it grows with the bar
             r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            if not self.gallery_host.isHidden():
-                # the gallery's panel: a surface of its own, fading in and out with its motion
-                split = self.gallery_host.y() + self.gallery_host.height() + 1
-                g = self.gallery
-                p.setOpacity(max(0.0, min(1.0, g.reveal)) if g is not None else 1.0)
-                p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, split - 1), 10, 10)
-                p.setOpacity(1.0)
-                r.setTop(split + GALLERY_GAP + 0.5)
             p.drawRoundedRect(r, 10, 10)
             p.end()
 
@@ -1827,13 +1809,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 gh = g.shown_height()                 # grows / folds with the gallery's motion
                 self.gallery_host.setFixedHeight(gh)
                 self.gallery_host.show()
-                self.gallery_gap.show()
-                h += gh + GALLERY_GAP + 2
-                if g.reveal < 1.0 or g.closing:
-                    self.update()                     # the panel's surface fades with it
+                self.gallery_join.setHidden(gh <= 0)
+                h += gh + (GALLERY_JOIN if gh > 0 else 0)
             else:
                 self.gallery_host.hide()
-                self.gallery_gap.hide()
+                self.gallery_join.hide()
             if h == self.height():
                 return
             bottom = self.y() + self.height()
@@ -1866,7 +1846,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return self.target_name or SUBJECT["window"]
             return SUBJECT["screen"]
 
+        def gallery_paused_view(self, view=None):
+            return (self.view if view is None else view) == "paused" and self.pause_reason == "gallery"
+
         def view_label(self, view):
+            if view == "paused" and self.pause_reason == "gallery":
+                return GALLERY_PAUSED
             if view in ("rec", "paused"):
                 return f"{self.NAMES[view]} {self.subject()}"
             if view == "stopped":
@@ -1879,9 +1864,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             running = self.running
             dot = RED if view in ("rec", "lowstorage") else MUTED if view == "paused" else DIM
             self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
-            self.dotbox.setHidden(view == "stopped")
+            # a sentence ("Press play to ...", "Paused while the gallery is open") takes
+            # the dot's and the time's room
+            sentence = view == "stopped" or self.gallery_paused_view(view)
+            self.dotbox.setHidden(sentence)
             label = self.view_label(view)
-            room = self.stopped_w if view == "stopped" else self.name_w
+            room = self.stopped_w if sentence else self.name_w
             fm = self.name.fontMetrics()
             shown = label if fm.horizontalAdvance(label) <= room else fm.elidedText(label, Qt.ElideRight, room)
             if self.name.text() != shown:
@@ -2013,6 +2001,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 # an older daemon kept the footage in no_window and cleared it on stop
                 self.keep_history = bool(kept) if kept is not None else state == "no_window"
                 self.paused = state == "paused"
+                self.pause_reason = st.get("pause_reason") if self.paused else None
                 buffered = float(st.get("buffered") or 0.0)
                 # stopped: the footage is saveable only while the history is kept
                 self.buffered = 0.0 if self.stopped and not self.keep_history else buffered
@@ -2036,7 +2025,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.set_view(view, self.buffered > 0)
                 self.set_live({} if self.stopped else st, view == "rec")
                 shown = self.live_seconds()
-                if view == "stopped":
+                if view == "stopped" or self.gallery_paused_view(view):
                     self.set_time("", MUTED)   # the sentence takes the time's place
                 elif view == "lowstorage":
                     # the numbers are in the warning strip right above; keep the head compact
@@ -2248,6 +2237,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             threading.Thread(target=work, daemon=True).start()
 
         def on_control(self, cmd, r):
+            if cmd in ("gallery_pause", "gallery_resume"):
+                self.on_gallery_pause(cmd, r)
+                return
             self.control_busy = False
             picks, self.resume_picks = self.resume_picks and cmd == "resume", False
             if picks and r.get("ok"):
@@ -2419,18 +2411,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if key == "controller":
                 if not data.get("controller_available", True):
                     return None             # no python-evdev: the controller settings do nothing
-                ctl = [("off", "Off")] + [(k, label) for k, label, _b in gamepad.CHORD_PRESETS]
+                # Off / PS / Xbox + Down; any other saved shortcut (an older preset, a
+                # hand-edited list) stays as an extra choice named by its buttons
+                ctl = [(k, settings.controller_label(k)) for k in ("off", *gamepad.CHORD_OFFERED)]
                 if value not in [c[0] for c in ctl]:
-                    ctl.append((value, settings.controller_label(value), True))
+                    # as the controller in use labels them (Xbox names without one)
+                    ctl.append((value, settings.controller_label(value, self.pad_symbols()), True))
                 return SettingRow(self, key, title, ctl, value, avail)
-            if key in ("controller_exclusive", "controller_open") and not data.get("controller_available", True):
-                return None
-            if key == "controller_open":
-                opts = [(o, OPEN_TEXT.get(o, str(o).capitalize()))
-                        for o in choices.get(key) or list(OPEN_TEXT)]
-                if value not in [o[0] for o in opts]:
-                    opts.append((value, str(value).capitalize()))
-                return SettingRow(self, key, title, opts, value, avail)
             if key == "replay_length":
                 opts = list(choices.get(key) or REPLAY_MINUTES)
                 if value not in opts:
@@ -2511,6 +2498,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.update_fit()
             self.track_mouse(self.panel)
             self.update_res_note()
+            self.update_fps_note()
 
         # ---- the resolution cap
         def res_source(self):
@@ -2541,6 +2529,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             row = self.row("resolution")
             if row is not None:
                 row.set_note(self.res_note(row.value))
+
+        def update_fps_note(self):
+            """120 fps costs more and only shows in a game that runs above 100 fps: say so."""
+            row = self.row("fps")
+            if row is not None:
+                row.set_note(FPS_NOTE if row.value == 120 else "")
 
         # ---- tabs
         def show_tab(self, i):
@@ -2696,6 +2690,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_row_changed(self, row):
             if row.key == "resolution":
                 self.update_res_note()
+            elif row.key == "fps":
+                self.update_fps_note()
             note = self.note_text()
             if self.note.text() != note:
                 self.note.setText(note)
@@ -2904,7 +2900,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             factory = PAD_FACTORY or gamepad.Gamepads
             hub = factory(navigate=True, chord=ctl["chord"], hold_ms=ctl["hold_ms"],
                           on_action=self.on_pad_action, on_chord=self.on_pad_chord,
-                          on_button=self.on_pad_button, on_devices=self.on_pads_changed)
+                          on_button=self.on_pad_button, on_devices=self.on_pads_changed,
+                          on_active=self.on_pads_changed)
             try:
                 ok = hub.start()
             except Exception:  # noqa: BLE001
@@ -2914,6 +2911,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 hub.close()
                 return
             self.pads = hub
+            if self.pad_used in getattr(hub, "pads", {}):
+                hub.last_input_key = self.pad_used    # still there: its buttons in the hints
             self.pads_handle = hub.attach_qt(self)
             if ctl["exclusive"]:
                 hub.grab()
@@ -2922,6 +2921,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def pads_close(self):
             hub, self.pads = self.pads, None
             handle, self.pads_handle = self.pads_handle, None
+            if getattr(hub, "last_input_key", None) is not None:
+                self.pad_used = hub.last_input_key    # the next open starts with its symbols
             try:
                 if handle is not None:
                     handle.detach()
@@ -2957,8 +2958,18 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             except Exception:  # noqa: BLE001 - only decides which hints show
                 return False
 
+        def pad_symbols(self):
+            """Whose button names the hints show: "playstation" (✕ ○ □ △, L1 / R1),
+            "nintendo" or "xbox", from the controller in use (``Gamepads.symbols``)."""
+            symbols = getattr(self.pads, "symbols", None)
+            try:
+                return symbols() if symbols is not None else "xbox"
+            except Exception:  # noqa: BLE001 - only decides which hints show
+                return "xbox"
+
         def on_pads_changed(self):
-            """A controller came or went (or the hub opened): the hints follow."""
+            """A controller came or went, or another one is in use (or the hub opened):
+            the hints follow."""
             if self.gallery is not None and self.mode == "gallery":
                 self.gallery.sync_hints()
 
@@ -3047,12 +3058,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.idle.setInterval(GALLERY_IDLE_MS)
             self.touch_idle()
             self.pad_renew.start()
+            self.gallery_hold()
 
         def leave_gallery(self):
             """Back from the gallery to the clip view, on the gallery button."""
             self.pad_renew.stop()
             self.mode = "clip"
             self.gallery_btn.set_on(False)
+            self.gallery_release()
             self.idle.setInterval(IDLE_HIDE_MS)
             self.back_to_clip()
             if self.stack.currentIndex() == 0:
@@ -3066,9 +3079,61 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.gallery is not None:
                 self.gallery.close()
             self.gallery_btn.set_on(False)
+            self.gallery_release()
             if self.mode == "gallery":
                 self.mode = "clip"
                 self.idle.setInterval(IDLE_HIDE_MS)
+
+        # Full screen mode records the whole screen, gallery included: recording pauses
+        # while it is open and picks up again when it closes. The daemon keeps the reason
+        # ("gallery"), resumes only a pause the gallery still holds (a pause or play by
+        # the user takes it over), and resumes by itself if this process goes away.
+        def gallery_hold(self):
+            if self.gallery_pause is not None or self.target != "screen" or self.view != "rec":
+                return
+            self.gallery_pause = "asked"
+            self._gallery_send({"cmd": "pause", "reason": "gallery", "pid": os.getpid()})
+
+        def gallery_release(self):
+            if self.gallery_pause is None:
+                return
+            self.gallery_pause = None
+            self._gallery_send({"cmd": "resume", "reason": "gallery"})   # a no-op unless still held
+            if self.pause_reason == "gallery" and self.last_status and self.last_status.get("ok"):
+                # show it right away; the next poll confirms
+                self.apply_status({**self.last_status, "state": "starting", "recording": False,
+                                   "pause_reason": None})
+
+        def _gallery_send(self, msg):
+            if self._gallery_jobs is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                # one worker: a resume never overtakes its pause; exit waits for the last one
+                self._gallery_jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gallery-pause")
+            gen = self.gen
+
+            def work():
+                try:
+                    r = ipc.request(msg, timeout=10)
+                except Exception as e:  # noqa: BLE001
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
+                self.bridge.control.emit(gen, f"gallery_{msg['cmd']}", r)
+            self._gallery_jobs.submit(work)
+
+        def on_gallery_pause(self, what, r):
+            """The answer to the gallery's pause ("gallery_pause") or resume (not a protocol cmd)."""
+            if what == "gallery_pause" and self.gallery_pause == "asked":
+                held = bool(r.get("ok")) and r.get("pause_reason") == "gallery"
+                if held:
+                    self.gallery_pause = "held"
+                elif r.get("ok"):
+                    self.gallery_pause = None   # it didn't pause (window mode, not recording)
+                # no answer: stays "asked", so closing still sends the (harmless) resume
+                if held and self.last_status and self.last_status.get("ok"):
+                    self.apply_status({**self.last_status, "state": "paused", "recording": False,
+                                       "pause_reason": "gallery"})
+            self.status_inflight = False
+            self.refresh_async()
 
         def gallery_yield(self):
             """Before a bar action that takes the bar row or hides the bar (a save, the stop
@@ -3102,7 +3167,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def leave_exempt(self):
             """Watching a clip with the pointer parked elsewhere is normal; full screen too."""
             g = self.gallery
-            return self.mode == "gallery" and g is not None and (g.playing() or g.full is not None)
+            return self.mode == "gallery" and g is not None and (g.playing() or g.full is not None
+                                                                 or g.asking())
 
         def on_leave(self):
             if not self.isVisible() or self.leave_exempt():
@@ -3114,6 +3180,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         # ---------------- input
         def on_idle(self):
             if self.apply_state == "busy" or self.control_busy:
+                self.idle.start()
+                return
+            g = self.gallery
+            if self.mode == "gallery" and g is not None and g.asking():
+                g.cancel_delete()               # the delete question times out to Cancel, the bar stays
                 self.idle.start()
                 return
             self.request_close()
@@ -3322,6 +3393,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.focus_visible = on
             for b in self.pills():
                 b.sync()
+            if self.gallery is not None and self.mode == "gallery":
+                self.gallery.on_focus_visible()
 
         def settle(self):
             """Jump every running pill transition to its end (screenshots, tests)."""

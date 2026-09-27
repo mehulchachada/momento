@@ -269,6 +269,102 @@ class Mapping(Base):
         self.assertIn(BTN_TL, hub.pads[d.path].held)
 
 
+class Symbols(Base):
+    """Which buttons' names the hints show: the pad in use's own (✕ ○ □ △ on a PS pad)."""
+
+    def setUp(self):
+        super().setUp()
+        self.active = []
+
+    def symbols_hub(self):
+        return self.hub(on_active=lambda: self.active.append(self.clock.t))
+
+    def test_detection(self):
+        self.assertEqual(g.symbols_for(vendor=0x054c, driver="playstation"), "playstation")
+        self.assertEqual(g.symbols_for(driver="playstation"), "playstation")
+        self.assertEqual(g.symbols_for(vendor=0x054c), "playstation")        # hid-sony, or Bluetooth
+        self.assertEqual(g.symbols_for(driver="sony"), "playstation")
+        self.assertEqual(g.symbols_for(vendor=0x057e, driver="nintendo"), "nintendo")
+        self.assertEqual(g.symbols_for(vendor=0x045e, driver="xpad"), "xbox")
+        self.assertEqual(g.symbols_for(vendor=0x28de, name="Steam Deck"), "xbox")
+        self.assertEqual(g.symbols_for(), "xbox")                            # anything else
+
+    def test_labels_by_position(self):
+        by = {s: [g.button_symbol(b, s) for b in ("south", "east", "west", "north", "tl", "tr", "tl2", "tr2")]
+              for s in ("xbox", "playstation", "nintendo")}
+        self.assertEqual(by["xbox"], ["A", "B", "X", "Y", "LB", "RB", "LT", "RT"])
+        self.assertEqual(by["playstation"], ["✕", "○", "□", "△", "L1", "R1", "L2", "R2"])
+        self.assertEqual(by["nintendo"], ["B", "A", "Y", "X", "L", "R", "ZL", "ZR"])
+        self.assertEqual(g.button_symbol("south", "unknown"), "A")
+
+    def test_only_pad_is_in_use(self):
+        hub = self.symbols_hub()
+        self.assertIsNone(hub.active_pad())
+        self.assertEqual(hub.symbols(), "xbox")                     # nothing connected
+        d = dualsense()
+        self.devs.append(d)
+        hub.add_device(d)
+        self.assertEqual(hub.active_pad().key, d.path)              # the only one, before any press
+        self.assertEqual(hub.symbols(), "playstation")
+        self.assertEqual(hub.devices()[0]["symbols"], "playstation")
+        self.push(hub, d, EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual(self.active, [])                           # it already was the one in use
+
+    def test_last_pad_pressed_wins_and_switches(self):
+        hub = self.symbols_hub()
+        ps = dualsense()
+        self.devs.append(ps)
+        xb = self.dev(name="Microsoft X-Box One Elite 2 pad", path="/fake/xbox")
+        hub.add_device(ps)
+        hub.add_device(xb)
+        self.assertIsNone(hub.active_pad())                         # two, none pressed yet
+        self.assertEqual(hub.symbols(), "xbox")                     # they disagree: Xbox letters
+        self.push(hub, ps, EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual((hub.symbols(), len(self.active)), ("playstation", 1))
+        self.push(hub, ps, EV_KEY, BTN_SOUTH, 0)
+        self.clock.t += 1
+        self.push(hub, xb, EV_KEY, BTN_TL, 1)                       # the other pad picked up
+        self.assertEqual((hub.symbols(), len(self.active)), ("xbox", 2))
+        self.push(hub, xb, EV_KEY, BTN_TL, 0)
+        self.clock.t += 1
+        self.push(hub, ps, EV_ABS, ABS_HAT0Y, 1)                    # the D-pad counts too
+        self.assertEqual((hub.symbols(), len(self.active)), ("playstation", 3))
+        self.push(hub, ps, EV_ABS, ABS_HAT0Y, 0)
+        hub.remove_device(ps.path)                                  # unplugged: the one left
+        self.assertEqual(hub.symbols(), "xbox")
+
+    def test_mirrored_pad_does_not_take_over(self):
+        """Steam's virtual Xbox pad repeats the real pad's presses a moment later."""
+        hub = self.symbols_hub()
+        ps = dualsense()
+        self.devs.append(ps)
+        mirror = self.dev(name="Microsoft X-Box 360 pad 0", path="/fake/steam-virtual", vendor=0x28de)
+        hub.add_device(ps)
+        hub.add_device(mirror)
+        self.push(hub, ps, EV_KEY, BTN_SOUTH, 1)
+        self.clock.t += 0.004
+        self.push(hub, mirror, EV_KEY, BTN_SOUTH, 1)
+        self.assertEqual(hub.symbols(), "playstation")
+        self.assertEqual([a for a, _ in self.actions], ["accept"])   # and the action counts once
+        self.clock.t += 0.5
+        self.push(hub, mirror, EV_KEY, BTN_SOUTH, 0)                 # releases don't switch
+        self.assertEqual(hub.symbols(), "playstation")
+        self.push(hub, ps, EV_KEY, BTN_EAST, 1)                      # the real pad keeps it...
+        self.clock.t += 0.004
+        self.push(hub, mirror, EV_KEY, BTN_EAST, 1)
+        self.assertEqual((hub.symbols(), len(self.active)), ("playstation", 1))
+
+    def test_stick_counts_as_use(self):
+        hub = self.symbols_hub()
+        xb = self.dev(path="/fake/xbox")
+        ps = dualsense()
+        self.devs.append(ps)
+        hub.add_device(xb)
+        hub.add_device(ps)
+        self.push(hub, ps, EV_ABS, ABS_X, 255)                      # stick right: an action
+        self.assertEqual(hub.symbols(), "playstation")
+
+
 class Triggers(Base):
     def names(self):
         return [a for a, _ in self.actions]
@@ -618,6 +714,10 @@ class Chord(Base):
         self.assertEqual(g.normalize_chord(["View", "Menu"]), ("select", "start"))
         self.assertEqual(g.normalize_chord("l3+r3"), ("thumbl", "thumbr"))
         self.assertEqual(g.normalize_chord(["left-paddle"]), ("left_paddle",))
+        self.assertEqual(g.normalize_chord("L1 + R1"), ("tl", "tr"))                 # the pads' own names
+        self.assertEqual(g.normalize_chord("cross+triangle"), ("south", "north"))
+        self.assertEqual(g.normalize_chord("a+y"), ("south", "north"))
+        self.assertEqual(g.normalize_chord("create+options"), ("select", "start"))
         with self.assertRaises(ValueError):
             g.normalize_chord(["select", "turbo"])
         with self.assertRaises(ValueError):
@@ -812,6 +912,7 @@ class DpadChord(Base):
         self.assertEqual(g.DEFAULT_CHORD, ("mode", "dpad_down"))
         self.assertEqual(tuple(config.DEFAULTS["controller"]["open_chord"]), g.DEFAULT_CHORD)
         self.assertEqual(g.CHORD_PRESETS[0], ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")))
+        self.assertEqual((g.CHORD_OFFERED, g.CHORD_SIZE), (("ps_down",), 2))   # the bar offers just it
         self.assertEqual([k for k, _l, _b in g.CHORD_PRESETS],
                          ["ps_down", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
         self.assertEqual(g.chord_label(g.DEFAULT_CHORD), "PS / Xbox + Down")
