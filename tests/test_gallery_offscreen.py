@@ -2106,6 +2106,33 @@ class PlaybackUnitTest(unittest.TestCase):
         self.assertIn("videoconvertscale add-borders=true", d)
         self.assertIn(f"width={gst_player.MIN_SIDE},height={gst_player.MIN_SIDE}", d)
 
+    def test_frame_at_its_device_size_is_blitted(self):
+        """At a fractional scale a frame already at the picture's device size is copied pixel for
+        pixel (a rescale would blur 1 px stripes to grey); any other size is scaled to fit."""
+        from momento import gallery
+
+        src = QImage(121, 68, QImage.Format_RGB32)
+        for x in range(src.width()):
+            for y in range(src.height()):
+                src.setPixelColor(x, y, QColor("#ffffff" if x % 2 else "#000000"))
+        dst = QImage(200, 120, QImage.Format_ARGB32_Premultiplied)
+        dst.setDevicePixelRatio(1.2)
+        dst.fill(0)
+        p = QPainter(dst)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gallery._draw_frame(p, src, QRectF(10, 10, 121 / 1.2, 68 / 1.2))
+        p.end()
+        x0, y0 = 12, 12                                               # 10 logical px at 1.2
+        row = [dst.pixelColor(x0 + x, y0 + 30).name() for x in range(121)]
+        self.assertEqual(row, [src.pixelColor(x, 30).name() for x in range(121)])
+        dst.fill(0)
+        p = QPainter(dst)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gallery._draw_frame(p, src, QRectF(10, 10, 60, 34))           # smaller: scaled, so blended
+        p.end()
+        greys = {dst.pixelColor(x, 40).name() for x in range(14, 80)} - {"#000000", "#ffffff"}
+        self.assertTrue(greys)
+
 
 @unittest.skipIf(QMediaPlayer is None or not shutil.which("ffmpeg"), "needs ffmpeg and QtMultimedia")
 class GalleryLive(unittest.TestCase):

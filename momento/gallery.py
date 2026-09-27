@@ -48,7 +48,7 @@ import time
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF,
                             QSize, QSizeF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader, QPainter,
-                           QPainterPath, QPen, QPolygonF, QRegion)
+                           QPainterPath, QPen, QPolygonF, QRegion, QTransform)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
@@ -475,6 +475,28 @@ def _fit(iw, ih, r: QRectF) -> QRectF:
     s = min(r.width() / iw, r.height() / ih)
     w, h = iw * s, ih * s
     return QRectF(r.x() + (r.width() - w) / 2, r.y() + (r.height() - h) / 2, w, h)
+
+
+def _draw_frame(p, img, r):
+    """``img`` letterboxed in ``r``. When it already has that size in device pixels (frames
+    from GStreamer come scaled to the picture) it is blitted 1:1 at whole device pixels: at
+    a fractional scale (1.2, 1.5) a plain drawImage would resample it again on the CPU."""
+    target = _fit(img.width(), img.height(), r)
+    dt = p.deviceTransform()
+    if dt.type() in (QTransform.TxNone, QTransform.TxTranslate, QTransform.TxScale):
+        dr = dt.mapRect(target)
+        if abs(dr.width() - img.width()) <= 2 and abs(dr.height() - img.height()) <= 2:
+            inv, ok = dt.inverted()
+            if ok:
+                p.save()
+                p.setWorldTransform(inv * p.worldTransform())      # device pixels, no scaling
+                if p.opacity() >= 1.0 and not img.hasAlphaChannel():
+                    p.setCompositionMode(QPainter.CompositionMode_Source)   # opaque: a copy, no blend
+                p.drawImage(QPoint(round(dr.center().x() - img.width() / 2),
+                                   round(dr.center().y() - img.height() / 2)), img)
+                p.restore()
+                return
+    p.drawImage(target, img)
 
 
 def _label(text="", px=META_PX, color=ov.NOTE, tabular=False, width=None,
@@ -1987,7 +2009,10 @@ class Gallery(QObject):
         clip.addRoundedRect(r, radius, radius)
         p.save()
         p.setClipPath(clip)
-        p.fillRect(r, QColor("#000000"))
+        cur = self.frame if isinstance(self.frame, QImage) else None
+        if not (cur is not None and self.out_img is None and not cur.hasAlphaChannel()
+                and _fit(cur.width(), cur.height(), r).adjusted(-1, -1, 1, 1).contains(r)):
+            p.fillRect(r, QColor("#000000"))     # (an opaque frame that fills the stage covers it)
         shown = self._paint_layers(p, r)
         if not shown and self.message:
             p.setPen(QColor(ov.NOTE))
@@ -2024,7 +2049,7 @@ class Gallery(QObject):
         out = self.out_img
         if out is None:
             if cur is not None:
-                p.drawImage(_fit(cur.width(), cur.height(), r), cur)
+                _draw_frame(p, cur, r)
             return cur is not None
         t = 0.0 if self.xf_waiting else self.xf
         p.save()
@@ -2032,7 +2057,7 @@ class Gallery(QObject):
         p.drawImage(r.translated(-self.out_dir * SLIDE_PX * t, 0), out)
         if cur is not None and not self.xf_waiting:
             p.setOpacity(t)
-            p.drawImage(_fit(cur.width(), cur.height(), r).translated(self.out_dir * SLIDE_PX * (1.0 - t), 0), cur)
+            _draw_frame(p, cur, r.translated(self.out_dir * SLIDE_PX * (1.0 - t), 0))
         p.restore()
         return True
 
