@@ -120,7 +120,7 @@ jobs:
         run: |
           momento --version
           momento settings
-          python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); import dbus; from PySide6 import QtWidgets; print(Gst.version_string())'
+          python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); import dbus; from PySide6 import QtWidgets, QtMultimedia; print(Gst.version_string())'
           test -f /usr/lib/systemd/user/momento.service
 
   release:

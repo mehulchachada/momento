@@ -118,6 +118,7 @@ overrides:
       - python3-pyside6.qtcore
       - python3-pyside6.qtgui
       - python3-pyside6.qtwidgets
+      - python3-pyside6.qtmultimedia
       - gstreamer1.0-plugins-base
       - gstreamer1.0-pipewire
       - gstreamer1.0-plugins-good
@@ -167,6 +168,8 @@ overrides:
       - gst-plugins-base
       - python-dbus
       - pyside6
+      # QtMultimedia (+ its FFmpeg backend): video playback in the gallery.
+      - qt6-multimedia
       - gst-plugin-pipewire
       - gst-plugins-good
       - gst-plugins-bad

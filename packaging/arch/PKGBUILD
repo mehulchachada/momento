@@ -14,6 +14,7 @@ depends=(
   'python-gobject'
   'python-dbus'
   'pyside6'
+  'qt6-multimedia'
   'gstreamer'
   'gst-plugins-base'
   'gst-plugin-pipewire'

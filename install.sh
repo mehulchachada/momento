@@ -164,7 +164,7 @@ detect_gpu() {
 
 # ------------------------------------------------ package names per need --
 # Verified in containers: Fedora 44, Ubuntu 24.04, Debian 13, Arch, Tumbleweed.
-# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl evdev
+# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl evdev media
 pkgs_for() {
     case "$FAMILY:$1" in
         fedora:python)   echo "python3" ;;
@@ -183,11 +183,12 @@ pkgs_for() {
         fedora:layer)    echo "layer-shell-qt" ;;
         fedora:pactl)    echo "pulseaudio-utils" ;;
         fedora:evdev)    echo "python3-evdev" ;;
+        fedora:media)    echo "python3-pyside6" ;;
 
         arch:python)     echo "python" ;;
         arch:gi)         echo "python-gobject gstreamer gst-plugins-base-libs" ;;
         arch:dbus)       echo "python-dbus" ;;
-        arch:pyside)     echo "pyside6" ;;
+        arch:pyside)     echo "pyside6 qt6-multimedia" ;;
         arch:pipewire)   echo "gst-plugin-pipewire" ;;
         arch:good)       echo "gst-plugins-good" ;;
         arch:bad)        echo "gst-plugins-bad" ;;
@@ -198,11 +199,12 @@ pkgs_for() {
         arch:layer)      echo "layer-shell-qt" ;;
         arch:pactl)      echo "libpulse" ;;
         arch:evdev)      echo "python-evdev" ;;
+        arch:media)      echo "qt6-multimedia" ;;
 
         debian:python)   echo "python3" ;;
         debian:gi)       echo "python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools" ;;
         debian:dbus)     echo "python3-dbus" ;;
-        debian:pyside)   echo "python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets" ;;
+        debian:pyside)   echo "python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets python3-pyside6.qtmultimedia" ;;
         debian:pipewire) echo "gstreamer1.0-pipewire" ;;
         debian:good)     echo "gstreamer1.0-plugins-good gstreamer1.0-pulseaudio" ;;
         debian:bad)      echo "gstreamer1.0-plugins-bad" ;;
@@ -214,6 +216,7 @@ pkgs_for() {
         debian:layer)    echo "layer-shell-qt" ;;
         debian:pactl)    echo "pulseaudio-utils" ;;
         debian:evdev)    echo "python3-evdev" ;;
+        debian:media)    echo "python3-pyside6.qtmultimedia" ;;
         debian:venv)     echo "python3-venv" ;;
 
         suse:python)     echo "python3" ;;
@@ -231,6 +234,7 @@ pkgs_for() {
         suse:layer)      echo "layer-shell-qt6" ;;
         suse:pactl)      echo "pulseaudio-utils" ;;
         suse:evdev)      echo "python3-evdev" ;;
+        suse:media)      echo "python3-pyside6" ;;
 
         *:python)   echo "python3 (3.11 or newer)" ;;
         *:gi)       echo "PyGObject + GStreamer introspection data (Gst, GstVideo)" ;;
@@ -245,6 +249,7 @@ pkgs_for() {
         *:layer)    echo "layer-shell-qt (Qt 6)" ;;
         *:pactl)    echo "pactl (pulseaudio-utils / libpulse)" ;;
         *:evdev)    echo "python-evdev" ;;
+        *:media)    echo "PySide6 QtMultimedia" ;;
         *)          echo "" ;;
     esac
 }
@@ -367,7 +372,13 @@ check_deps() {
         need gi "PyGObject + GStreamer introspection"
     fi
     if py_try 'import dbus, dbus.mainloop.glib'; then ok "dbus-python"; else need dbus "dbus-python"; fi
-    if py_try 'from PySide6 import QtCore, QtGui, QtWidgets'; then ok "PySide6"; else need pyside "PySide6"; fi
+    if py_try 'from PySide6 import QtCore, QtGui, QtWidgets'; then
+        ok "PySide6"
+        if py_try 'from PySide6 import QtMultimedia'; then ok "PySide6 QtMultimedia (plays clips in the gallery)"
+        else optneed media "PySide6 QtMultimedia (plays clips in the gallery)"; fi
+    else
+        need pyside "PySide6"
+    fi
 
     if have gst-inspect-1.0 || [ "$gst_ok" = 1 ]; then
         if found="$(gst_has_any pipewiresrc)"; then ok "GStreamer: $found"; else need pipewire "GStreamer: pipewiresrc"; fi
@@ -445,7 +456,7 @@ plan_packages() {
                 UNAVAILABLE="$UNAVAILABLE $p"; continue
             fi
             case "$k" in
-                layer|pactl|h264) EXTRA="$EXTRA $p" ;;
+                layer|pactl|h264|media) EXTRA="$EXTRA $p" ;;
                 *)                WANT="$WANT $p" ;;
             esac
         done
