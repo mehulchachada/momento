@@ -52,10 +52,15 @@ body:
       options: [Smooth, A few small stutters, Noticeable stutters]
     validations:
       required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Format (Settings → Video)
+      options: [Auto, H.264, H.265, AV1, Not sure]
   - type: input
     id: settings
     attributes:
-      label: Momento settings (optional)
+      label: Other Momento settings (optional)
       placeholder: e.g. 1080p, 60 fps, Full screen
   - type: textarea
     id: notes
