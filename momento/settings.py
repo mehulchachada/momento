@@ -23,7 +23,8 @@ KEYS = {
     "record": "window (only the window you pick; the default), screen (the whole screen)",
     "replay_length": "15m, 30m, 60m (how much of your game the replay keeps; 15m is the default, "
                      "longer needs more disk space)",
-    "resolution": ", ".join(quality.RESOLUTIONS),
+    "resolution": ", ".join(quality.RESOLUTIONS) + " (480p: smallest files, softest picture; "
+                  "native: your screen's shape, up to 1080p)",
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
     "format": "auto, h264, h265, av1 (auto picks a format your PC records well, H.264 on most PCs; "

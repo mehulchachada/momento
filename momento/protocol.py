@@ -199,7 +199,7 @@ are config-only escape hatches with no setting.
     the reply is ok with ``restarted: false``, ``state: "no_storage"`` and a
     ``warning``.
 
-Resolution choices: ``RESOLUTION_CHOICES`` (720p, 1080p, native), nothing
+Resolution choices: ``RESOLUTION_CHOICES`` (480p, 720p, 1080p, native), nothing
 taller than ``MAX_HEIGHT`` (1080) lines for now. 1440p and 2160p (4K) are not
 offered: ``configure`` refuses them (and ``4k``/``2k``/``uhd``/``qhd``) with
 the error ``1440p and 4K aren't available yet; Momento records up to 1080p for
@@ -212,12 +212,13 @@ a list of their own.
 
 Resolution cap: a preset is allowed when its height is at most the source's
 height * (1 + ``RESOLUTION_TOLERANCE``); ``native`` always is. So a 1920x1080
-(or taller) screen offers 720p, 1080p and native; a 1280x720 window 720p and
-native. A saved preset above the cap is kept in config.toml (``configure``
-accepts it) but records at the source's own size, rounded down to even
-numbers, as ``native`` would. The bitrate (and the storage math) is the one of
-the smallest preset at least as tall as what is really recorded, for
-``native`` too (an explicit ``bitrate`` still wins). A client that has no
+(or taller) screen offers 480p, 720p, 1080p and native; a 1280x720 window
+480p, 720p and native; a window under 471 lines only native. A saved preset
+above the cap is kept in config.toml (``configure`` accepts it) but records at
+the source's own size, rounded down to even numbers, as ``native`` would. The
+bitrate (and the storage math) is the one of the smallest preset at least as
+tall as what is really recorded (480p's for anything shorter), for ``native``
+too (an explicit ``bitrate`` still wins). A client that has no
 ``source_size`` yet MAY apply the rule to the largest screen it can see (in
 physical pixels), which is what the clip bar does to grey out choices.
 
@@ -297,7 +298,7 @@ RESOLUTION_TOLERANCE = 0.02
 # The resolutions offered (settings choices.resolution, in order) and the tallest
 # recording, in lines (native is scaled down to it). Same as quality.RESOLUTIONS /
 # quality.MAX_HEIGHT. Additive: 1440p/2160p come back by raising MAX_HEIGHT.
-RESOLUTION_CHOICES = ("720p", "1080p", "native")
+RESOLUTION_CHOICES = ("480p", "720p", "1080p", "native")
 MAX_HEIGHT = 1080
 # The video formats (settings choices.format, in order). Same as codecs.CHOICES.
 FORMAT_CHOICES = ("auto", "h264", "h265", "av1")
@@ -386,7 +387,7 @@ SETTING_VALUES = {
     # minutes of replay kept ([buffer] max_seconds / 60): 15 (default) | 30 | 60; a hand-edited
     # max_seconds reads as its whole minutes
     "replay_length": (("integer",), False),
-    "resolution": (("string",), True),     # one of choices.resolution ("720p" | "1080p" | "native")
+    "resolution": (("string",), True),     # one of choices.resolution ("480p" | "720p" | "1080p" | "native")
     "quality": (("string",), True),
     "fps": (("integer",), True),
     "bitrate": (("integer",), True),       # video kbps, 0 = automatic

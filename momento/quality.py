@@ -5,6 +5,7 @@ FPS_CHOICES = (60, 120)
 
 # Every preset Momento knows: name -> output size; None = keep the picture's own size.
 PRESETS: dict[str, tuple[int, int] | None] = {
+    "480p": (854, 480),   # 16:9, width rounded to even (H.264)
     "720p": (1280, 720),
     "1080p": (1920, 1080),
     "1440p": (2560, 1440),
@@ -25,9 +26,10 @@ RESOLUTIONS: dict[str, tuple[int, int] | None] = {
 LATER = tuple(name for name in PRESETS if name not in RESOLUTIONS)
 TALLEST = max((n for n, s in RESOLUTIONS.items() if s), key=lambda n: RESOLUTIONS[n][1])
 # How the presets are called in words ("2160p" is "4K").
-LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
+LABELS = {"480p": "480p", "720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 # Other names people use for the presets (`momento set resolution 4k`, a config file).
-ALIASES = {"4k": "2160p", "uhd": "2160p", "2k": "1440p", "qhd": "1440p", "fhd": "1080p", "hd": "720p"}
+ALIASES = {"4k": "2160p", "uhd": "2160p", "2k": "1440p", "qhd": "1440p", "fhd": "1080p", "hd": "720p",
+           "sd": "480p"}
 
 QUALITIES = ("standard", "high", "ultra")
 
@@ -35,6 +37,7 @@ QUALITIES = ("standard", "high", "ultra")
 # of another size (native, or a preset above the source) gets the row of the
 # smallest preset at least as tall (rate_class).
 _MBPS = {
+    "480p": (3, 5, 8),
     "720p": (6, 10, 15),
     "1080p": (10, 15, 25),
     "1440p": (16, 24, 40),
@@ -161,7 +164,8 @@ def rate_class(source) -> str:
     """The preset whose bitrates suit a picture of size ``source``: the smallest
     one at least as tall.
 
-    1920x1080 -> "1080p", 1920x1200 -> "1440p", a 1280x720 window -> "720p";
+    1920x1080 -> "1080p", 1920x1200 -> "1440p", a 1280x720 window -> "720p",
+    a 640x480 one -> "480p" (and anything shorter: 480p is the smallest);
     taller than every preset -> the tallest ("2160p"). Unknown -> TALLEST, the
     tallest offered one ("1080p"): native never records taller than that.
     """
