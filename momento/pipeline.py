@@ -240,6 +240,30 @@ class _Variant:
         return f"{self.encoder} ({'zero-copy vapostproc' if self.zero_copy else 'videoconvert'})"
 
 
+def describe_capture(size: tuple[int, int] | None, fps: int, quality_name: str, kbps: int, fmt: str | None,
+                     encoder: str, zero_copy: bool, window: bool, source: str, *, kbps_by_hand: bool = False,
+                     fallback: tuple[str, str] | None = None, stage: str | None = None) -> str:
+    """Everything that defines a recording, as the log's one line says it::
+
+        1280x720 @ 120 fps, ultra, 22000 kbps, AV1 (vaav1enc, zero-copy), full screen, portal
+
+    ``size`` is the picture really recorded (None: not known before the first frame).
+    ``window``: one window is recorded (never its title), else the full screen.
+    ``fallback``: (wanted, got) when the wanted format didn't start.
+    """
+    shown = f"{size[0]}x{size[1]}" if size else "size from the first frame"
+    how = [encoder, "zero-copy" if zero_copy else "not zero-copy"]
+    fmt_part = f"{codecs.label(fmt)} ({', '.join(how)}"
+    if fallback:
+        fmt_part += f"; {codecs.label(fallback[0])} didn't start"
+    fmt_part += ")"
+    parts = [f"{shown} @ {fps} fps", str(quality_name), f"{kbps} kbps" + (" (set by hand)" if kbps_by_hand else ""),
+             fmt_part, "window" if window else "full screen", source or "?"]
+    if stage:
+        parts.append(f"debug stage {stage}")
+    return ", ".join(parts)
+
+
 def _have(factory: str) -> bool:
     return Gst.ElementFactory.find(factory) is not None
 
@@ -357,6 +381,8 @@ class Recorder:
         self._kbps = 0  # the encoder's bitrate as last set
         self._stage: str | None = None  # the MOMENTO_DEBUG_STAGE of the pipeline last built
         self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
+        self._variant: _Variant | None = None   # the variant of the pipeline last built
+        self._logged: tuple | None = None       # (size, kbps) the last "recording:" line said
 
     # --- public API -------------------------------------------------------------
 
@@ -672,8 +698,8 @@ class Recorder:
         enc = pipeline.get_by_name("enc")
         self.encoder_name = enc.get_factory().get_name() if enc is not None else variant.encoder
         self.format_effective = codecs.format_of(self.encoder_name)
-        log.info("starting capture: source=%s encoder=%s format=%s", self.source_name, variant,
-                 codecs.label(self.format_effective))
+        self._variant = variant
+        self._log_capture()
         self._pipeline = pipeline
         self._session = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
         self._params = None
@@ -770,6 +796,27 @@ class Recorder:
         self.resolution_effective = "native" if capped else self.size_name
         pin = capped or shrink or self._lock_size()
         self._locked_size = quality.native_size(source) if pin else None
+
+    def recorded_size(self) -> tuple[int, int] | None:
+        """The picture size really recorded: the pinned or preset size, else (native) the
+        source's own; None while that isn't known yet."""
+        return self._locked_size or self.size or self.source_size
+
+    def capture_summary(self) -> str:
+        """The current (or last) capture, as its "recording:" log line says it."""
+        v = self._variant
+        cap = self.cfg["capture"]
+        return describe_capture(
+            self.recorded_size(), self.fps, str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(), self._kbps,
+            self.format_effective, self.encoder_name or (v.encoder if v else "?"), bool(v and v.zero_copy),
+            self.window_mode, self.source_name, kbps_by_hand=int(cap.get("bitrate_kbps") or 0) > 0,
+            fallback=self.format_fallback, stage=self._stage)
+
+    def _log_capture(self, note: str = "") -> None:
+        """One line with everything that defines this recording (at every pipeline start,
+        and again when the first frame changes its size or bitrate)."""
+        self._logged = (self.recorded_size(), self._kbps)
+        log.info("recording: %s%s", self.capture_summary(), note)
 
     def _output_size(self) -> tuple[int, int] | None:
         """The size the encoder gets (None: whatever the source is, native on a screen)."""
@@ -1075,6 +1122,8 @@ class Recorder:
                 self._kbps = kbps
                 self._encoder_settings(enc, encoder, kbps)
             self._log_size(kbps)
+            if self._logged is not None and self._logged != (self.recorded_size(), self._kbps):
+                self._log_capture(" (set by the first frame)")
         elif self._locked_size is not None and (w, h) != self._locked_size:
             log.info("source resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
         return Gst.PadProbeReturn.OK

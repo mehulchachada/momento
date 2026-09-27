@@ -530,7 +530,8 @@ class CLITest(unittest.TestCase):
             with mock.patch.object(ipc, "request", return_value=refusal) as req, \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 self.assertEqual(cli.main(["--config", str(path), "set", "resolution", "fhd"]), 1)
-            req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "1080p"}}, timeout=30)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"resolution": "1080p"}, "origin": "set"},
+                                        timeout=30)
             self.assertIn("35.2 GB", err.getvalue())
 
     def test_set_resolution_above_1080p_is_refused(self):
@@ -569,7 +570,8 @@ class CLITest(unittest.TestCase):
             reply = {"ok": True, "changed": {"controller": "left_paddle"}, "restarted": False, "paused": True}
             with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
                 self.assertEqual(cli.main(["--config", str(path), "set", "controller", "on"]), 0)
-            req.assert_called_once_with({"cmd": "configure", "changes": {"controller": "on"}}, timeout=30)
+            req.assert_called_once_with({"cmd": "configure", "changes": {"controller": "on"}, "origin": "set"},
+                                        timeout=30)
             text = out.getvalue()
             self.assertIn("controller = left_paddle", text)
             self.assertIn("Saved. Press Left paddle to open or close the bar.", text)   # a tap by default
@@ -4114,7 +4116,7 @@ class HistorySettingsTest(unittest.TestCase):
         reply = {"ok": True, "changed": {"replay_length": 15}, "restarted": False, "paused": False}
         with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["--config", str(self.path), "set", "replay_length", "15m"]), 0)
-        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"replay_length": 15}})
+        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"replay_length": 15}, "origin": "set"})
         self.assertIn("replay_length = 15m", out.getvalue())
         self.assertIn("applies right away", out.getvalue())
 
@@ -4174,7 +4176,7 @@ class HistorySettingsTest(unittest.TestCase):
         reply = {"ok": True, "changed": {"sounds": "on"}, "restarted": False, "paused": False}
         with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["--config", str(self.path), "set", "sounds", "on"]), 0)
-        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"sounds": "on"}})
+        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"sounds": "on"}, "origin": "set"})
         self.assertIn("applies right away", out.getvalue())
 
     def test_example_config_documents_them(self):
@@ -4817,6 +4819,226 @@ class TargetNameTest(unittest.TestCase):
             finally:
                 if had is not None:
                     pkg.windowname = had
+
+
+
+class SettingsChangeLogTest(unittest.TestCase):
+    """The log says which settings each recording used: one line per change, old -> new."""
+
+    # The configure tests run against a fake Recorder, like DaemonControlTest.
+    setUp = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def logged(self, msg):
+        """The daemon's INFO lines while ``msg`` is handled, and its reply."""
+        with self.assertLogs("momento.daemon", "INFO") as cm:
+            r = self.call(msg)
+        return [rec.getMessage() for rec in cm.records], r
+
+    def about_settings(self, lines):
+        return [line for line in lines if line.startswith("settings ")]
+
+    def test_describe_names_only_the_changed_keys(self):
+        from momento import config, settings
+
+        cfg = config.load(self.path)
+        before = settings.current(cfg)
+        after = dict(before, resolution="720p", quality="ultra", fps=120, format="av1", replay_length=30,
+                     bitrate=12000, keep_history="on", mic_device="default")      # mic_device: the same
+        changes = settings.diff(before, after)
+        self.assertEqual(list(changes), ["replay_length", "resolution", "quality", "fps", "format", "bitrate",
+                                         "keep_history"])
+        self.assertEqual(settings.describe_changes(changes),
+                         "replay length 15m -> 30m, resolution 1080p -> 720p, quality high -> ultra, fps 60 -> 120, "
+                         "format auto -> av1, bitrate auto -> 12000 kbps, keep history off -> on")
+        self.assertEqual(settings.diff(before, {"fps": 60}), {})
+        self.assertEqual(settings.describe_request({"fps": "75\n", "colour": "red"}), "fps=75?, colour=?")
+
+    def test_a_change_from_the_bar_is_one_line(self):
+        lines, r = self.logged({"cmd": "configure", "origin": "bar",
+                                "changes": {"resolution": "720p", "quality": "ultra", "fps": 120, "format": "av1",
+                                            "mic": "off"}})                            # mic: already off
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.about_settings(lines),
+                         ["settings changed: resolution 1080p -> 720p, quality high -> ultra, fps 60 -> 120, "
+                          "format auto -> av1 (from the bar)"])
+
+    def test_origin(self):
+        lines, _r = self.logged({"cmd": "configure", "origin": "set", "changes": {"fps": 120}})
+        self.assertEqual(self.about_settings(lines), ["settings changed: fps 60 -> 120 (from momento set)"])
+        lines, _r = self.logged({"cmd": "configure", "origin": "evil\nline", "changes": {"fps": 60}})
+        self.assertEqual(self.about_settings(lines), ["settings changed: fps 120 -> 60 (from a client)"])
+        lines, _r = self.logged({"cmd": "configure", "changes": {"keep_history": "on"}})    # live: no restart
+        self.assertEqual(self.about_settings(lines), ["settings changed: keep history off -> on (from a client)"])
+        lines, _r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"keep_history": "on"}})
+        self.assertEqual(self.about_settings(lines), ["settings unchanged (from the bar): keep history=on"])
+        from momento.protocol import validate_request
+
+        self.assertEqual(validate_request({"cmd": "configure", "changes": {"fps": 60}, "origin": "bar"}), [])
+        self.assertEqual(validate_request({"cmd": "configure", "changes": {"fps": 60}, "origin": "x"}),
+                         ["unknown origin 'x'"])
+
+    def test_refused_changes_say_why(self):
+        from momento import config
+
+        saved = self.path.read_text()
+        lines, r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"fps": 75}})
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.about_settings(lines),
+                         ["settings change refused (from the bar): fps: choose one of: 60, 120 (asked: fps=75)"])
+        lines, r = self.logged({"cmd": "configure", "origin": "set", "changes": {"resolution": "1440p"}})
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(self.about_settings(lines)), 1)
+        self.assertIn("settings change refused (from momento set): 1440p and 4K aren't available yet",
+                      self.about_settings(lines)[0])
+        self.free = 0                                                   # no room for a bigger buffer
+        lines, r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"quality": "ultra"}})
+        self.assertEqual(r.get("code"), "no_storage")
+        [line] = self.about_settings(lines)
+        self.assertTrue(line.startswith("settings change refused (from the bar): quality high -> ultra: "
+                                        "not enough disk space: "), line)
+        self.assertEqual(self.path.read_text(), saved)                  # nothing was written
+        self.assertEqual(config.load(self.path)["capture"]["quality"], "high")
+
+    def test_config_reload(self):
+        self.path.write_text(self.path.read_text().replace('resolution = "1080p"',
+                                                           'resolution = "720p"\nfps = 120'))
+        lines, r = self.logged({"cmd": "reload"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.about_settings(lines),
+                         ["settings changed: resolution 1080p -> 720p, fps 60 -> 120 (config reload)"])
+        lines, _r = self.logged({"cmd": "reload"})
+        self.assertEqual(self.about_settings(lines),
+                         ["settings unchanged (config reload): restarting capture with the same settings"])
+        # A change from the bar that also picks up a hand edit: each on its own line.
+        self.path.write_text(self.path.read_text().replace("fps = 120", "fps = 60"))
+        lines, _r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"quality": "standard"}})
+        self.assertEqual(self.about_settings(lines),
+                         ["settings changed: quality high -> standard (from the bar)",
+                          "settings changed: fps 120 -> 60 (from the config file)"])
+        self.path.write_text(self.path.read_text().replace("fps = 60", "fps = 75"))
+        lines, r = self.logged({"cmd": "reload"})
+        self.assertFalse(r["ok"])
+        [line] = self.about_settings(lines)
+        self.assertTrue(line.startswith("settings not applied (config reload): config not applied: "), line)
+
+    def test_clip_saved_says_format_size_and_fps(self):
+        from momento import daemon
+        from momento.ringbuffer import Segment, Selection
+
+        seg = Segment(Path("seg00000001.mkv"), 0.0, 10.0, width=1280, height=720, fps=120, codec="av1")
+        self.assertEqual(daemon.clip_params(Selection([seg], 0.0, 10.0, 0.0, 10.0)), "AV1 1280x720 @ 120 fps")
+        old = Segment(Path("seg00000001.ts"), 0.0, 10.0, fps=59.94)                  # an older index line
+        self.assertEqual(daemon.clip_params(Selection([old], 0.0, 10.0, 0.0, 10.0)), "format ? size ? @ 59.94 fps")
+
+
+class CaptureLogTest(unittest.TestCase):
+    """Every capture start logs one line with everything that defines the recording."""
+
+    def setUp(self):
+        import copy
+
+        from momento import codecs, config, pipeline
+        from momento.ringbuffer import RingBuffer
+
+        self.pipeline, self.codecs = pipeline, codecs
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cfg = copy.deepcopy(config.DEFAULTS)
+        self.cfg["capture"].update(source="portal", target="screen", resolution="720p", quality="ultra", fps=120,
+                                   format="av1")
+        self.cfg["buffer"]["dir"] = str(Path(tmp.name) / "buffer")
+        self.ring = RingBuffer(3600)
+        failed = set(codecs.DETECTOR.failed)
+        self.addCleanup(lambda: (codecs.DETECTOR.failed.clear(), codecs.DETECTOR.failed.update(failed)))
+        self.enterContext(mock.patch.object(codecs, "START_GUARD"))              # no start marker on disk
+        self.enterContext(mock.patch.object(pipeline.GLib, "idle_add", side_effect=lambda fn, *a: fn(*a)))
+
+    def recorder(self, variants, known=(1920, 1080), fail=(), **capture):
+        """A Recorder about to build its pipeline for a portal stream of size ``known``;
+        building fails for the encoders in ``fail``. No GStreamer pipeline runs."""
+        self.cfg["capture"].update(capture)
+        rec = self.pipeline.Recorder(self.cfg, self.ring, lambda s, m: None)
+        rec.source_name = "portal"
+        rec.window_mode = rec.target == "window"
+        rec._stop_requested = False
+        rec._known_size = known
+        rec._formats = list(dict.fromkeys(self.codecs.format_of(e) for e, _z in variants))
+        rec._variants = [self.pipeline._Variant(e, z) for e, z in variants]
+        rec._variant_idx = 0
+        Gst = self.pipeline.Gst
+
+        def build(v):
+            rec._prepare_size()
+            rec._stage = None
+            rec._video_chain(v)                     # sets the "size" caps, as _build does
+            if v.encoder in fail:
+                raise RuntimeError(f"{v.encoder} failed")
+            enc = mock.Mock()
+            enc.get_factory.return_value.get_name.return_value = v.encoder
+            fake = mock.Mock()
+            fake.get_by_name.side_effect = lambda name: enc if name == "enc" else None
+            fake.set_state.return_value = Gst.StateChangeReturn.ASYNC
+            return fake
+        rec._build = build
+        self.addCleanup(setattr, rec, "_pipeline", None)
+        return rec
+
+    def lines(self, fn):
+        with self.assertLogs("momento.pipeline", "INFO") as cm:
+            fn()
+        return [r.getMessage() for r in cm.records if r.getMessage().startswith("recording: ")]
+
+    def test_describe_capture(self):
+        self.assertEqual(self.pipeline.describe_capture((1280, 720), 120, "ultra", 22000, "av1", "vaav1enc", True,
+                                                        False, "portal"),
+                         "1280x720 @ 120 fps, ultra, 22000 kbps, AV1 (vaav1enc, zero-copy), full screen, portal")
+        self.assertEqual(self.pipeline.describe_capture(None, 60, "high", 9000, "h264", "x264enc", False, True, "test",
+                                                        kbps_by_hand=True, fallback=("h265", "h264"), stage="vbr"),
+                         "size from the first frame @ 60 fps, high, 9000 kbps (set by hand), "
+                         "H.264 (x264enc, not zero-copy; H.265 didn't start), window, test, debug stage vbr")
+
+    def test_line_at_every_start_has_every_field(self):
+        rec = self.recorder([("vaav1enc", True)])
+        self.assertEqual(self.lines(rec._build_and_play),
+                         ["recording: 1280x720 @ 120 fps, ultra, 22000 kbps, AV1 (vaav1enc, zero-copy), "
+                          "full screen, portal"])
+        rec._pipeline = None
+        self.assertEqual(len(self.lines(rec._build_and_play)), 1)             # a restart logs it again
+
+    def test_window_mode_never_names_the_window(self):
+        rec = self.recorder([("x264enc", False)], known=(1600, 900), target="window", resolution="1080p",
+                            quality="high", fps=60, format="h264")
+        [line] = self.lines(rec._build_and_play)
+        self.assertEqual(line, "recording: 1600x900 @ 60 fps, high, 15000 kbps, H.264 (x264enc, not zero-copy), "
+                               "window, portal")
+
+    def test_format_fallback_logs_the_format_really_recorded(self):
+        rec = self.recorder([("vaav1enc", True), ("vah264enc", True)], fail=("vaav1enc",))
+        self.assertEqual(self.lines(rec._build_and_play),
+                         ["recording: 1280x720 @ 120 fps, ultra, 22000 kbps, H.264 (vah264enc, zero-copy; "
+                          "AV1 didn't start), full screen, portal"])
+        self.assertEqual(rec.format_fallback, ("av1", "h264"))
+
+    def test_first_frame_replan_logs_the_final_values(self):
+        Gst = self.pipeline.Gst
+        rec = self.recorder([("vah264enc", True)], known=None, resolution="native", quality="high", fps=60,
+                            format="h264")
+        self.assertEqual(self.lines(rec._build_and_play),
+                         ["recording: size from the first frame @ 60 fps, high, 15000 kbps, "
+                          "H.264 (vah264enc, zero-copy), full screen, portal"])
+        info = mock.Mock()
+        info.get_event.return_value = Gst.Event.new_caps(Gst.Caps.from_string("video/x-raw,width=1280,height=720"))
+        capsfilter = Gst.ElementFactory.make("capsfilter", None)
+        capsfilter.set_property("caps", Gst.Caps.from_string(rec._output_caps()))
+        with mock.patch.object(rec, "_encoder_settings"):
+            lines = self.lines(lambda: rec._pin_size(None, info, (capsfilter, object(), "vah264enc")))
+        self.assertEqual(lines, ["recording: 1280x720 @ 60 fps, high, 10000 kbps, H.264 (vah264enc, zero-copy), "
+                                 "full screen, portal (set by the first frame)"])
+        rec._source_seen = False                                    # the same size again: nothing new to say
+        with mock.patch.object(rec, "_encoder_settings"), self.assertNoLogs("momento.pipeline", "INFO"):
+            rec._pin_size(None, info, (capsfilter, object(), "vah264enc"))
 
 
 if __name__ == "__main__":

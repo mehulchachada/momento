@@ -3312,7 +3312,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             def work():
                 if online:
                     try:
-                        r = ipc.request({"cmd": "configure", "changes": changes}, timeout=60)
+                        r = ipc.request({"cmd": "configure", "changes": changes, "origin": "bar"},
+                                        timeout=60)
                         r.setdefault("online", True)
                     except ipc.DaemonNotRunning:
                         r = local()

@@ -3,7 +3,7 @@
 The daemon writes ``~/.local/state/momento/logs/momento.log`` and the clip bar
 ``bar.log`` next to it (``$XDG_STATE_HOME``), one line per event::
 
-    2026-09-27 12:30:45 daemon INFO pipeline: starting capture: source=portal ...
+    2026-09-27 12:30:45 daemon INFO pipeline: recording: 1920x1080 @ 60 fps, ...
 
 Each file is rotated at 2 MB and the newest 5 are kept, so they never grow
 without bound. Everything still goes to the journal as well

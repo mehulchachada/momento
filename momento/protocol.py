@@ -185,7 +185,10 @@ holds that controller (EVIOCGRAB) while the chord's other button is down, so
 the game doesn't see the D-pad press. The shortcut is a tap and the open bar
 holds the controller exclusively; ``[controller] hold_ms`` and ``exclusive``
 are config-only escape hatches with no setting.
-``configure`` {changes, force?}
+``configure`` {changes, force?, origin?}
+    ``origin`` (optional, for the daemon's log only): ``"bar"`` (the clip bar)
+    or ``"set"`` (``momento set``); the log line of every change, and of every
+    refused one, names it ("settings changed: fps 60 -> 120 (from the bar)").
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` / ``replay_length`` /
@@ -326,6 +329,9 @@ STOP_REASONS = {
 
 # Values of `pause_reason` (status, and the reply to a `pause` with a reason): null
 # when running or paused by the user.
+# Who sent a ``configure`` (its optional ``origin``): the daemon's log names it.
+CONFIGURE_ORIGINS = ("bar", "set")
+
 PAUSE_REASONS = {
     "gallery": "Full screen mode: the clip bar's gallery is open, so it isn't recorded. `pause` "
                "with reason \"gallery\" (and the bar's pid) pauses only while recording in Full "
@@ -603,6 +609,7 @@ COMMANDS: dict[str, dict] = {
         "request": {
             "changes": ((MapOf("any"),), True),  # non-empty; keys from SETTING_KEYS
             "force": (("boolean",), False),
+            "origin": (("string",), False),      # "bar" | "set": who asked (the log says it)
         },
         "reply": {
             "ok": (("boolean",), True),
@@ -770,4 +777,6 @@ def validate_request(msg, commands: dict | None = None) -> list[str]:
         if not msg["changes"]:
             problems.append("changes must not be empty")
         problems += [f"unknown setting {k!r}" for k in msg["changes"] if k not in SETTING_KEYS]
+    if cmd == "configure" and isinstance(msg.get("origin"), str) and msg["origin"] not in CONFIGURE_ORIGINS:
+        problems.append(f"unknown origin {msg['origin']!r}")
     return problems

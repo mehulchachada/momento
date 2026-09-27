@@ -24,6 +24,40 @@ STORAGE_CHECK_SECONDS = 30
 BAR_BACKOFF_MIN = 1.0
 BAR_BACKOFF_MAX = 60.0
 BAR_STABLE_SECONDS = 30.0
+# Where a settings change came from, as the log says it (``configure``'s ``origin``;
+# anything else a client sends reads as "a client", never its own words).
+ORIGINS = {"bar": "from the bar", "set": "from momento set"}   # protocol.CONFIGURE_ORIGINS
+RELOAD_ORIGIN = "config reload"
+
+
+def origin_label(msg: dict | None) -> str:
+    origin = (msg or {}).get("origin")
+    return ORIGINS.get(origin, "from a client") if isinstance(origin, str) else "from a client"
+
+
+def log_settings_change(before: dict, after: dict, origin: str, skip=()) -> dict:
+    """Log "settings changed: resolution 1080p -> 720p, ... (from the bar)" when a setting differs.
+
+    ``before`` / ``after`` are ``settings.current`` values; keys in ``skip`` were logged
+    already. Returns the logged {key: (old, new)}. Never raises: a log line must not
+    break a settings change.
+    """
+    try:
+        changes = {k: v for k, v in settings.diff(before, after).items() if k not in skip}
+        if changes:
+            log.info("settings changed: %s (%s)", settings.describe_changes(changes), origin)
+        return changes
+    except Exception:  # noqa: BLE001
+        log.debug("settings change not logged", exc_info=True)
+        return {}
+
+
+def _current(cfg: dict) -> dict:
+    """``settings.current``, or {} for a config it can't read (logging only)."""
+    try:
+        return settings.current(cfg)
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def notify(bus, summary: str, body: str = "", icon: str = config.APP_ID) -> None:
@@ -900,7 +934,7 @@ class Daemon:
         elif cmd == "screenshot":
             self.screenshot(reply)
         elif cmd == "reload":
-            self.reload(reply)
+            self.reload(reply, origin=RELOAD_ORIGIN)
         elif cmd == "settings":
             self.settings(reply)
         elif cmd == "configure":
@@ -927,10 +961,12 @@ class Daemon:
     def _cfg_path(self) -> Path | None:
         return Path(self.cfg["_path"]) if self.cfg.get("_path") else None
 
-    def reload(self, reply, interactive: bool = False) -> None:
+    def reload(self, reply, interactive: bool = False, origin: str = RELOAD_ORIGIN, logged=()) -> None:
         """Re-read the config file and restart capture with it (buffered footage is kept).
 
         While paused the new settings are loaded but capture stays off until resume.
+        Every setting that differs from the running one is logged (``origin`` says
+        where the change came from; ``logged``: keys the caller has logged already).
         """
         from .pipeline import Recorder
 
@@ -939,8 +975,12 @@ class Daemon:
             quality.resolution(cfg["capture"])
             quality.bitrate_kbps(cfg["capture"])
         except (OSError, ValueError) as e:
+            log.info("settings not applied (%s): config not applied: %s", origin, e)
             reply({"ok": False, "error": f"config not applied: {e}"})
             return
+        changes = log_settings_change(_current(self.cfg), _current(cfg), origin, skip=logged)
+        if not changes and not logged:
+            log.info("settings unchanged (%s): restarting capture with the same settings", origin)
         if self.recorder is not None:
             self.recorder.stop()
         if config.capture_target(cfg["capture"]) != config.capture_target(self.cfg["capture"]):
@@ -986,7 +1026,9 @@ class Daemon:
     def configure(self, msg: dict, reply) -> None:
         """Validate + save changed settings, then reload the recorder if anything changed."""
         changes = msg.get("changes")
+        origin = origin_label(msg)
         if not isinstance(changes, dict) or not changes:
+            log.info("settings change refused (%s): changes must be a non-empty object", origin)
             reply({"ok": False, "error": "changes must be a non-empty object"})
             return
         try:
@@ -998,6 +1040,7 @@ class Daemon:
                 source = None  # another kind of picture: its size is not known yet
             chk = storage.check(new, storage.dir_bytes(self.buffer_dir), source)
         except (OSError, ValueError) as e:
+            log.info("settings change refused (%s): %s (asked: %s)", origin, e, settings.describe_request(changes))
             reply({"ok": False, "error": str(e)})
             return
         # Refuse settings that need more room than there is. A change that doesn't
@@ -1007,13 +1050,17 @@ class Daemon:
             what = storage.label(new)
             if new["buffer"]["max_seconds"] != saved["buffer"]["max_seconds"]:
                 what = f"{storage.span(new['buffer']['max_seconds'])} at {what}"   # "60 min at 1080p High"
-            reply({"ok": False, "code": "no_storage", "storage": chk,
-                   "error": f"{what} needs {storage.human(chk['required'])} free, "
-                            f"{storage.human(chk['free'] + chk['reclaimable'])} available"})
+            error = (f"{what} needs {storage.human(chk['required'])} free, "
+                     f"{storage.human(chk['free'] + chk['reclaimable'])} available")
+            asked = settings.describe_changes(settings.diff(_current(saved), _current(new))) or "nothing"
+            log.info("settings change refused (%s): %s: not enough disk space: %s", origin, asked, error)
+            reply({"ok": False, "code": "no_storage", "storage": chk, "error": error})
             return
+        before = _current(saved)
         try:
             changed = settings.apply(changes, self._cfg_path())
         except (OSError, ValueError) as e:
+            log.info("settings change refused (%s): %s (asked: %s)", origin, e, settings.describe_request(changes))
             reply({"ok": False, "error": str(e)})
             return
         retry = self._picked_crashed(changes)
@@ -1023,6 +1070,12 @@ class Daemon:
             codecs.DETECTOR.clear_crash(retry)
             self._crash_notice = None
             changed = {**changed, "format": changed.get("format", retry)}
+        if changed:
+            log.info("settings changed: %s (%s)%s",
+                     settings.describe_changes({k: (before.get(k), v) for k, v in changed.items()}), origin,
+                     f"; retrying {codecs.label(retry)}, which had crashed Momento here" if retry else "")
+        else:
+            log.info("settings unchanged (%s): %s", origin, settings.describe_request(changes))
         if not changed or set(changed) <= set(settings.LIVE_KEYS):
             # Controller, history and bar settings take effect without restarting
             # the recording.
@@ -1034,7 +1087,10 @@ class Daemon:
             return
         # Switching what is recorded is the user's choice: in window mode the new
         # session may open the window picker (a new portal session either way).
-        self.reload(lambda r: reply({**r, "changed": changed}), interactive="record" in changed)
+        # The reload logs only what else differs from the running settings (a hand edit
+        # of the config file it picks up along the way).
+        self.reload(lambda r: reply({**r, "changed": changed}), interactive="record" in changed,
+                    origin="from the config file", logged=tuple(changed))
 
     def _apply_live(self, changed: dict) -> None:
         """Take the saved values of settings in settings.LIVE_KEYS into the running config."""
@@ -1333,8 +1389,8 @@ class Daemon:
                 }
                 if sel.note:  # e.g. "earlier footage used a different resolution"
                     result["reason"] = sel.note
-                log.info("clip saved: %s (%.0f s of %d s asked)%s", path, sel.duration, seconds,
-                         f"; {sel.note}" if sel.note else "")
+                log.info("clip saved: %s (%.0f s of %d s asked), %s%s", path, sel.duration, seconds,
+                         clip_params(sel), f"; {sel.note}" if sel.note else "")
             except Exception as e:  # noqa: BLE001
                 log.exception("export failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -1425,6 +1481,20 @@ class Daemon:
         else:
             notify(self.bus, "Momento: save failed", result.get("error", ""), "dialog-error")
         return False
+
+
+def clip_params(sel) -> str:
+    """What a saved clip holds, from its newest segment: "AV1 1280x720 @ 120 fps".
+
+    A save never joins two formats or sizes, so the newest segment speaks for the clip.
+    Footage indexed by an older Momento may not say: those parts read "?".
+    """
+    seg = sel.segments[-1] if getattr(sel, "segments", None) else None
+    fmt = codecs.label(seg.codec) if seg is not None and seg.codec else "format ?"
+    size = f"{seg.width}x{seg.height}" if seg is not None and seg.width and seg.height else "size ?"
+    fps = seg.fps if seg is not None and seg.fps else None
+    fps = "? fps" if fps is None else f"{float(fps):g} fps"
+    return f"{fmt} {size} @ {fps}"
 
 
 def _size(path) -> int:
