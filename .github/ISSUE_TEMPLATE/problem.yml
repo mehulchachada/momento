@@ -1,0 +1,78 @@
+name: Something isn't working
+description: Tell us what went wrong. A report file from Momento helps us fix it fast.
+title: "Problem: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Sorry it's giving you trouble! Plain words are perfect.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      placeholder: e.g. I pressed save and no clip showed up in Videos
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: e.g. a 5 minute clip in Videos/Momento
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen again (optional)
+      placeholder: |
+        1. Open the bar with Super+Shift+G
+        2. Press 5m
+        3. ...
+  - type: textarea
+    id: report
+    attributes:
+      label: Your report file
+      description: >-
+        Drag the file made by Settings → Misc → Make a report (or `momento report`) into this box.
+        Or paste its text.
+      placeholder: Drop Momento-report-….txt here
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines (optional)
+      description: A few lines from `momento logs`, if you looked yourself.
+      render: text
+  - type: input
+    id: device
+    attributes:
+      label: Your PC or handheld
+      placeholder: e.g. ROG Ally, Steam Deck, desktop with RTX 3060
+    validations:
+      required: true
+  - type: dropdown
+    id: graphics
+    attributes:
+      label: Graphics
+      options: [AMD, NVIDIA, Intel, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux system
+      placeholder: e.g. Bazzite, Fedora 44, Ubuntu 26.04, Arch
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop
+      options: [KDE Plasma, GNOME, Hyprland, Steam Game Mode, Other, Not sure]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else? (optional)

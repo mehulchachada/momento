@@ -163,6 +163,7 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | **Controller** | Controller | **PS / Xbox + Down**, Off |
 | **Misc** | Hour warning | **10**, 5 or 3 minutes' notice before your replay is full |
 | | Instant bar | **On**: the bar opens instantly (about 100 MB). Off: saves that memory. |
+| | Problem? | **Make a report** for a [GitHub issue](#something-wrong); **Open logs** shows the log files |
 
 Clips are always MP4. Formats your PC can't record are greyed out.
 
@@ -296,6 +297,14 @@ It writes about 7 GB per hour of play at the default settings, a small part of a
 
 An unrelated tool has the same name. This app lives in `~/.local/bin/momento`: put `~/.local/bin` first in your `PATH`, or use the full path. The shortcut and app menu are not affected.
 </details>
+
+## Something wrong?
+
+1. Make a report: in the bar, **Settings → Misc → Make a report**, or run `momento report`. It saves a file in your Home folder, with nothing personal in it.
+2. [Tell us what happened](https://github.com/mehulchachada/momento/issues/new?template=problem.yml) and attach that file.
+3. To look yourself, run `momento logs`.
+
+Logs are in `~/.local/state/momento/logs/`.
 
 ## Uninstall
 

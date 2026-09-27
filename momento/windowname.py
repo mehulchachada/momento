@@ -31,6 +31,11 @@ import unicodedata
 
 log = logging.getLogger("momento.windowname")
 
+
+def _hidden(title) -> str:
+    """How logs show a title: its length only (see momento.logs.hidden)."""
+    return f"<redacted, {len(str(title))} chars>"
+
 STORE_BUS = "org.freedesktop.impl.portal.PermissionStore"
 STORE_PATH = "/org/freedesktop/impl/portal/PermissionStore"
 STORE_IFACE = "org.freedesktop.impl.portal.PermissionStore"
@@ -65,7 +70,8 @@ def title_for_token(token: str, bus=None) -> str | None:
         _permissions, data = store.Lookup(TABLE, token, dbus_interface=STORE_IFACE, timeout=2)
         backend, version, payload = data
         title = parse_restore_data(str(backend), int(version), payload)
-        log.debug("window title from %s %s restore data: %r", backend, version, title)
+        log.debug("window title from %s %s restore data: %s", backend, version,
+                  "none" if title is None else _hidden(title))
         return title
     except Exception as e:  # noqa: BLE001 - a missing title is never worth an error
         log.debug("no window title for restore token: %s", e)

@@ -80,6 +80,7 @@ IDLE_HIDE_MS = 3_000     # no key, controller or mouse input on the bar for this
 LEAVE_HIDE_MS = 500      # the pointer left the bar (coming back cancels it)
 # After an interaction the result is shown briefly, then the bar hides:
 RESULT_CLOSE_MS = 1_200  # "Saved <file>" or a save error
+REPORT_CLOSE_MS = 8_000  # Settings -> Misc -> Make a report: where the file went stays readable
 STOP_CLOSE_MS = 800      # the Off state after a confirmed Stop
 APPLY_CLOSE_MS = 1_200   # "Saved — recording restarted" after Apply in settings
 # Screenshot: the bar hides, then waits this long before asking for the frame, so
@@ -808,6 +809,13 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(color))
         p.drawEllipse(P(x, y + 3.3), 0.9, 0.9)
+    elif kind == "report":
+        # a page with a folded corner and three lines of text: a report file
+        p.drawPolyline(QPolygonF([P(x + 1.5, y - 7), P(x - 5.5, y - 7), P(x - 5.5, y + 7), P(x + 5.5, y + 7),
+                                  P(x + 5.5, y - 3), P(x + 1.5, y - 7), P(x + 1.5, y - 3), P(x + 5.5, y - 3)]))
+        for dy in (0.0, 2.8):
+            p.drawLine(P(x - 2.8, y + dy), P(x + 2.8, y + dy))
+        p.drawLine(P(x - 2.8, y - 2.8), P(x - 0.5, y - 2.8))
     elif kind == "gallery":
         # a media library: a photo (a mountain and a sun in a frame) on a stack
         # of them; the back frame shows only where the front one leaves room
@@ -850,6 +858,19 @@ ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_histor
               "instant_bar": "Instant bar"}
 ROW_ICONS["format"] = "film"
 ROW_TITLES["format"] = "Format"
+# Settings -> Misc: not a setting, two actions (a report file for GitHub, the logs folder).
+ROW_ICONS["report"] = "report"
+ROW_TITLES["report"] = "Problem?"
+REPORT_IDLE_NOTE = "Makes a file to attach to a GitHub issue"
+
+
+def report_note(path) -> str:
+    """"Saved to Home/Momento-report-… · Attach it to your GitHub issue"."""
+    from .logs import shown_path
+
+    p = Path(path)
+    where = f"Home/{p.name}" if p.parent == Path.home() else shown_path(p)
+    return f"Saved to {where} \u00b7 Attach it to your GitHub issue"
 ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 VALUE_ICONS = {"record": RECORD_ICONS}
@@ -892,6 +913,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         control = Signal(int, str, object)
         started = Signal(int, object)
         shot = Signal(object)          # screenshot reply (the bar is already hidden)
+        reported = Signal(int, object)  # Settings -> Misc -> Make a report: the file (or the error)
 
     def fetch_status(timeout=2.0):
         try:
@@ -1778,6 +1800,38 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.update_note()
             return False
 
+    class ReportRow(SettingRow):
+        """Settings -> Misc -> "Problem?": Make a report · Open logs. Two buttons, not a
+        setting: nothing here goes to Apply (``action``), neither pill shows as chosen, and
+        Enter / a click / the controller's A runs the focused one. The note at the row's
+        end says what the report is for, then where it was saved."""
+
+        action = True
+
+        def __init__(self, bar, avail):
+            super().__init__(bar, "report", ROW_TITLES["report"],
+                             [("report", "Make a report"), ("logs", "Open logs")], "report", avail)
+            self.set_note(REPORT_IDLE_NOTE)
+
+        def refresh(self):
+            for b in self.buttons:
+                b.set_sel(False)
+
+        def select(self, i):
+            self.idx = i
+            self.focus()
+            self.activate()
+
+        def step(self, d):
+            self.idx = max(0, min(len(self.values) - 1, self.idx + d))
+            self.focus()
+
+        def activate(self):
+            if self.values[self.idx] == "logs":
+                self.bar.open_logs(self)
+            else:
+                self.bar.make_report(self)
+
     class Bar(QWidget):
         def __init__(self):
             super().__init__()
@@ -1840,6 +1894,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.bridge.control.connect(self._sig_control)
             self.bridge.started.connect(self._sig_started)
             self.bridge.shot.connect(self.on_shot)
+            self.bridge.reported.connect(self._sig_reported)
+            self.reporting = False    # Make a report runs (the bar doesn't hide meanwhile)
             QApplication.instance().focusChanged.connect(self.on_focus_changed)
             QApplication.instance().aboutToQuit.connect(self.pads_close)  # one-shot bar: let go first
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -2077,6 +2133,61 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def _sig_started(self, gen, st):
             if gen == self.gen:
                 self.on_started(st)
+
+        def _sig_reported(self, gen, r):
+            self.reporting = False
+            if r.get("ok"):
+                from . import logs
+
+                logs.open_folder(Path(r["path"]).parent)     # asked for: shown even if the bar hid
+            if gen == self.gen:
+                self.on_reported(r)
+
+        # ---- Settings -> Misc -> Problem?
+        def make_report(self, row):
+            """The same report as `momento report`, written off the UI thread."""
+            if self.reporting:
+                return
+            self.reporting = True
+            row.set_note("Making the report\u2026", "status")
+            self.idle.stop()
+            gen = self.gen
+
+            def work():
+                from . import report
+
+                try:
+                    r = {"ok": True, "path": str(report.write())}
+                    log.info("report saved: %s", r["path"])
+                except Exception as e:  # noqa: BLE001
+                    log.exception("report failed")
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
+                self.bridge.reported.emit(gen, r)
+            threading.Thread(target=work, name="report", daemon=True).start()
+
+        def on_reported(self, r):
+            row = self.row("report") if self.mode == "settings" else None
+            if row is None:
+                return
+            if r.get("ok"):
+                row.set_note(report_note(r["path"]), "info")
+            else:
+                row.set_note(f"Couldn't make the report: {r.get('error')}", "error")
+            self.idle.setInterval(REPORT_CLOSE_MS)
+            self.idle.start()
+
+        def open_logs(self, row):
+            from . import logs
+
+            folder = logs.log_dir()
+            try:
+                folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except OSError:
+                pass
+            if logs.open_folder(folder):
+                row.set_note(f"Opened {logs.shown_path(folder)}", "info")
+            else:
+                row.set_note(f"Logs are in {logs.shown_path(folder)}", "info")
 
         def after(self, ms, fn):
             """Run ``fn`` in ``ms`` unless the bar was hidden or reopened meanwhile."""
@@ -2789,6 +2900,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     if r is not None:
                         seen.add(k)
                         rows.append(r)
+                if name == "Misc" and rows:
+                    rows.append(ReportRow(self, avail))
                 if rows:
                     tabs.append((name, rows))
 
@@ -2915,7 +3028,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def pending(self):
             """Every value as the rows (on all tabs) now say, over the reply's values."""
-            return {**self.sdata["values"], **{r.key: r.value for r in self.rows}}
+            return {**self.sdata["values"],
+                    **{r.key: r.value for r in self.rows if not getattr(r, "action", False)}}
 
         def changes(self):
             vals = self.sdata["values"]
@@ -3199,6 +3313,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.focus_line(1)          # into the tab
                 elif self.back_btn.hasFocus():
                     self.close_settings()
+                elif pos == "row" and getattr(rows[i], "action", False):
+                    rows[i].activate()          # Make a report / Open logs
                 else:
                     self.apply_settings()       # one Apply for the changes on every tab
             return True
@@ -3490,6 +3606,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             clip plays, and not while a save / apply / stop runs (its result closes the bar)."""
             if self.saving or self.done or not self.isVisible():
                 return
+            if self.reporting:
+                self.idle.stop()                # the report's result shows before the bar hides
+                return
             if self.mode == "gallery" and self.gallery is not None and self.gallery.playing():
                 self.idle.stop()
                 return
@@ -3560,6 +3679,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.gen += 1                       # replies to the previous open are dropped
             self.close_gallery()
             self.gallery_hint = None
+            self.reporting = False              # a report still being written only opens its folder
             self.idle.stop()
             self.leave.stop()
             self.poll.stop()

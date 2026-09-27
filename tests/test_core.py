@@ -4631,6 +4631,15 @@ class TargetNameTest(unittest.TestCase):
         self.assertEqual(self.asked, ["tok-1", "tok-2"])
         self.wait_name("Elden Ring")                        # the name from before stays
 
+    def test_title_never_in_the_log(self):
+        """A window title can be private (a browser tab): the log says only how long it is."""
+        with self.assertLogs("momento.daemon", "INFO") as cm:
+            self.session("tok-1")
+            self.wait_name("Elden Ring")
+        text = "\n".join(cm.output)
+        self.assertNotIn("Elden Ring", text)
+        self.assertIn("recording window (window title: <redacted, 10 chars>)", text)
+
     def test_cleared_on_new_window_and_full_screen(self):
         self.session("tok-1")
         self.wait_name("Elden Ring")

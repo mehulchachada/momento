@@ -1,4 +1,5 @@
-"""Command line: momento daemon | overlay | save 5m | screenshot | status | settings | set KEY VALUE | pause | resume | quit."""
+"""Command line: momento daemon | overlay | save 5m | screenshot | status | settings | set KEY VALUE | pause | resume |
+quit | logs | report."""
 
 from __future__ import annotations
 
@@ -62,7 +63,32 @@ def build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("quit", help="shut down the Momento service completely and clear the replay buffer")
     q.add_argument("--keep-buffer", action="store_true",
                    help="keep the recorded footage on disk; it is saveable again after the next start")
+    lg = sub.add_parser("logs", help="show Momento's recent log (the last 200 lines since the PC started)",
+                        description="Show what Momento logged. Without options: the last 200 lines "
+                                    "since the PC started. The files are in ~/.local/state/momento/logs/.")
+    span = lg.add_mutually_exclusive_group()
+    span.add_argument("--since", metavar="TIME", help="everything from the last TIME, e.g. 30m, 1h or 2d")
+    span.add_argument("--boot", action="store_true", help="everything since the PC started")
+    span.add_argument("--all", action="store_true", help="everything that is kept")
+    lg.add_argument("-n", "--lines", type=_positive, metavar="N", help="only the last N lines")
+    lg.add_argument("-f", "--follow", action="store_true", help="keep showing new lines as they come (Ctrl+C stops)")
+    lg.add_argument("--open", action="store_true", help="open the folder with the log files")
+    sub.add_parser("report", help="make a problem report file to attach to a GitHub issue",
+                   description="Writes ~/Momento-report-<date>.txt: your Momento version and settings, "
+                               "facts about this PC and Momento's recent log. Your home folder, user name, "
+                               "computer name, email and IP addresses and window titles are left out. "
+                               "Nothing is uploaded.")
     return p
+
+
+def _positive(text: str) -> int:
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        raise argparse.ArgumentTypeError(f"not a number of lines: {text!r}")
+    return n
 
 
 def _setup_logging(verbose: int) -> None:
@@ -192,8 +218,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 2
-    # The daemon is long-running; give it INFO by default so the journal is useful.
-    _setup_logging(max(args.verbose, 1) if args.command == "daemon" else args.verbose)
+    # The daemon and the clip bar are long-running; give them INFO by default so the
+    # journal and their log files (see momento/logs.py) are useful.
+    long_running = args.command in ("daemon", "overlay")
+    _setup_logging(max(args.verbose, 1) if long_running else args.verbose)
+    if long_running:
+        from . import logs
+
+        logs.setup("daemon" if args.command == "daemon" else "bar",
+                   logging.DEBUG if args.verbose > 1 else logging.INFO)
+        if args.command == "overlay" and args.verbose < 2:
+            # The bar opens the controllers on every show: their connect lines are the
+            # daemon's to log.
+            logging.getLogger("momento.gamepad").setLevel(logging.WARNING)
+
+    if args.command == "logs":
+        from . import logs
+
+        return logs.main(args)
+
+    if args.command == "report":
+        from . import report
+
+        try:
+            path = report.write(config_path=args.config)
+        except OSError as e:
+            print(f"momento: couldn't write the report: {e}", file=sys.stderr)
+            return 1
+        print(path)
+        print("Attach this file to your issue on GitHub")
+        return 0
 
     if args.command == "overlay":
         from . import overlay
