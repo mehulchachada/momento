@@ -323,6 +323,11 @@ Your saved clips and screenshots are never deleted.
 - 1440p and 4K recording
 - Flatpak
 - Microphone on its own audio track
+- A richer gallery:
+  - Mark favourite clips
+  - Folders and playlists to organise them
+  - Trim long clips to just the good part
+  - Quick share to Discord, YouTube or Steam chat
 
 ## Contributing
 

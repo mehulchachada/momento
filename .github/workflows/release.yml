@@ -186,6 +186,7 @@ jobs:
           - Recording in 1440p and 4K
           - Your microphone on its own audio track
           - Flatpak
+          - A richer gallery: favourites, folders and playlists, trimming long clips, and quick sharing to Discord, YouTube or Steam chat
 
           ## Tell us how it runs
 
