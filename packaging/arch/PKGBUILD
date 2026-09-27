@@ -5,7 +5,7 @@
 pkgname=momento
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Instant replay for Linux gaming - always records, saves the last 15 s to 60 min with one hotkey'
+pkgdesc='Instant replay for Linux games - save the last 15 seconds to 60 minutes with one button'
 arch=('any')
 url='https://github.com/mehulchachada/momento'
 license=('MIT')

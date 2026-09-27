@@ -50,10 +50,12 @@ Recommends:     mesa-va-drivers
 Recommends:     python3-evdev
 
 %description
-Momento is instant replay and screenshots for Linux gaming. It records the
-screen and sound in the background all the time; one hotkey (Super+Shift+G) saves what just happened, from the last
-15 seconds up to the full hour, to your Videos folder. Encoding is done on
-the GPU through VA-API or NVENC, and clips are cut without re-encoding.
+Momento is instant replay and screenshots for Linux games. Press play once
+and it records in the background. When something great happens, press
+Super+Shift+G (or Home + D-pad Down on a controller), pick how far back to
+go, from 15 seconds to 60 minutes, and the clip is in your Videos folder a
+few seconds later. It also takes screenshots and has a gallery to watch
+your clips.
 
 %prep
 %autosetup -n %{name}-%{version}

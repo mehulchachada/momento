@@ -45,10 +45,13 @@ Recommends: mesa-va-drivers,
             xdg-user-dirs,
 Suggests: gstreamer1.0-plugins-ugly,
           intel-media-va-driver-non-free,
-Description: instant replay for Linux gaming
- Momento records the screen and sound in the background all the time. One
- hotkey (Super+Shift+G) saves what just happened, from the last 15 seconds
- up to the full hour, to your Videos folder. Encoding runs on the GPU through
- VA-API or NVENC, and clips are cut without re-encoding.
+Description: instant replay for Linux games
+ Momento is instant replay and screenshots for Linux games. Press play once
+ and it records in the background. When something great happens, press
+ Super+Shift+G (or Home + D-pad Down on a controller), pick how far back to
+ go, from 15 seconds to 60 minutes, and the clip is in your Videos folder a
+ few seconds later. It also takes screenshots and has a gallery to watch
+ your clips.
  .
- Enable the recorder per user with: systemctl --user enable --now momento
+ To start Momento every time you log in, run once:
+ systemctl --user enable --now momento
