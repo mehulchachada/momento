@@ -193,7 +193,7 @@ def screen_line(root: Path) -> str:
 
 def system_section(root: Path = Path("/"), run=run, env=os.environ, detection: dict | None = None) -> list[str]:
     rows = [
-        ("Momento", f"{__version__}, installed with {install_method(env=env)}"),
+        ("Momento", f"{__version__}, install: {install_method(env=env)}"),
         ("Linux", os_release(root)),
         ("Desktop", desktop(env, run)),
         ("Kernel", platform.release()),

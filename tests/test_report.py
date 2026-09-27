@@ -213,7 +213,7 @@ class ReportBuildTest(unittest.TestCase):
         # formats, journal (previous boot first), files, kernel (filtered), crashes
         self.assertIn("AV1:       yes (vaav1enc)", text)
         self.assertIn("Graphics:  AMD\n", text)
-        self.assertIn("Auto:      AV1", text)
+        self.assertIn("Auto:      H.264", text)   # Auto records H.264 (av1-safety)
         self.assertLess(text.index("-- previous boot --"), text.index("previous boot line"))
         self.assertLess(text.index("previous boot line"), text.index("-- this boot --"))
         self.assertLess(text.index("-- this boot --"), text.index("this boot line"))
