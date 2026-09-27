@@ -57,9 +57,10 @@ DEVICES = {
 
 # What a settings reply carries for the keys added with the tabs (used when the
 # settings module in the tree predates them).
-NEW_VALUES = {"keep_history": "off", "hour_warning": 10, "instant_bar": "on", "replay_length": 60}
+NEW_VALUES = {"keep_history": "off", "hour_warning": 10, "instant_bar": "on", "replay_length": 60,
+              "sounds": "on"}
 NEW_CHOICES = {"keep_history": ["off", "on"], "hour_warning": [10, 5, 3], "instant_bar": ["on", "off"],
-               "replay_length": [15, 30, 60]}
+               "replay_length": [15, 30, 60], "sounds": ["on", "off"]}
 
 
 def settings_reply(devices=DEVICES, free=None, source=None, **values):
@@ -456,7 +457,7 @@ class OverlayOffscreen(unittest.TestCase):
                           "resolution": "display",
                           "fps": "gauge", "quality": "sliders", "format": "film", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "hour_warning": "hourglass",
-                          "instant_bar": "bolt", "report": "report"})
+                          "instant_bar": "bolt", "sounds": "note", "report": "report"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
@@ -1572,7 +1573,7 @@ class OverlayOffscreen(unittest.TestCase):
                 "Video": ["resolution", "fps", "quality", "format"],
                 "Audio": ["audio_source", "mic", "mic_device"],
                 "Controller": ["controller"],
-                "Misc": ["hour_warning", "instant_bar", "report"]}
+                "Misc": ["hour_warning", "instant_bar", "sounds", "report"]}
         heights = set()
         for i, name in enumerate(bar.tab_names):
             bar.switch_tab(i, "row")
@@ -1652,7 +1653,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Replay length", "Keep history", "Resolution", "Frame rate", "Quality",
                           "Format", "Sound", "Mic",
-                          "Mic device", "Controller", "Hour warning", "Instant bar", "Problem?"])
+                          "Mic device", "Controller", "Hour warning", "Instant bar", "Sounds", "Problem?"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
             self.assertLessEqual(lbl.fontMetrics().horizontalAdvance(lbl.text()), lbl.width())
@@ -1760,18 +1761,18 @@ class OverlayOffscreen(unittest.TestCase):
         self.enterContext(mock.patch.object(logs, "open_folder", side_effect=lambda p: opened.append(Path(p)) or True))
         for _ in range(6):
             self.key(Qt.Key_PageDown)                                   # Misc
-        self.assertEqual([r.key for r in bar.visible_rows()], ["hour_warning", "instant_bar", "report"])
+        self.assertEqual([r.key for r in bar.visible_rows()], ["hour_warning", "instant_bar", "sounds", "report"])
         row = bar.row("report")
         self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.icon.kind),
                          ("Problem?", ["Make a report", "Open logs"], "report"))
         self.assertFalse(any(b.selected() for b in row.buttons))       # buttons, not a choice
         self.assertEqual(row.note.text(), overlay.REPORT_IDLE_NOTE)
-        self.assertEqual(bar.panel_rows, 4)                             # Video is still the tallest tab
+        self.assertEqual(bar.panel_rows, 4)                             # as tall as Video: nothing grows
         self.assertEqual(bar.height(), h0 + self.PANEL + 1)
         self.assertNotIn("report", bar.pending())
         self.assertEqual(bar.changes(), {})
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)                                           # Problem?: Make a report
+        for _ in range(3):
+            self.key(Qt.Key_Down)                                       # Problem?: Make a report
         self.assertTrue(row.buttons[0].hasFocus())
         self.key(Qt.Key_Return)                                         # runs the report, not Apply
         self.wait_for(lambda: opened)

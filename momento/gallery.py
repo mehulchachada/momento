@@ -1096,7 +1096,7 @@ class Gallery(QObject):
         self.tabs = {}
         for key, name in FILTERS:
             b = W.FilterTab(name)
-            b.clicked.connect(lambda _=False, key=key: self.set_filter(key, focus="filter"))
+            b.clicked.connect(lambda _=False, key=key: self.click_filter(key))
             hl.addWidget(b)
             self.tabs[key] = b
         hl.addStretch(1)
@@ -1152,7 +1152,7 @@ class Gallery(QObject):
         self.footer.back.clicked.connect(self.back)
         self.footer.trash.clicked.connect(self.ask_delete)
         self.footer.yes.clicked.connect(self.confirm_delete)
-        self.footer.no.clicked.connect(self.cancel_delete)
+        self.footer.no.clicked.connect(lambda: self.cancel_delete())
         pl.addWidget(self.footer)
         # Not in the host's layout: pinned to the host's bottom edge, so while the host grows
         # (or folds) the panel rises up from (or sinks back to) the bar instead of squeezing.
@@ -1345,6 +1345,7 @@ class Gallery(QObject):
     def back(self):
         """B / Esc / Backspace: full screen -> the gallery -> the clip view."""
         if self.full is not None:
+            self.bar.sound("select")
             self.exit_full()
             return
         if ANIMATE:
@@ -1542,6 +1543,7 @@ class Gallery(QObject):
             return
         i = max(0, min(len(self.view) - 1, self.index + d))
         if i != self.index:
+            self.bar.sound("move")
             self._begin_switch(1 if i > self.index else -1)
             self.index = i
             self._show()
@@ -1553,10 +1555,16 @@ class Gallery(QObject):
             return
         i = max(0, min(len(self.view) - 1, i))
         if i != self.index:
+            self.bar.sound("move")
             self._begin_switch(1 if i > self.index else -1)
             self.index = i
             self._show()
         self.focus(focus)
+
+    def click_filter(self, key):
+        """A filter tab clicked (keys and the controller move along them: "move")."""
+        self.bar.sound("select")
+        self.set_filter(key, focus="filter")
 
     def set_filter(self, key, focus="filter"):
         """All / Clips / Screenshots, keeping your place in time (media.nearest)."""
@@ -1737,6 +1745,7 @@ class Gallery(QObject):
             return
         if self.state == "error":
             return
+        self.bar.sound("select")
         player = self.player
         if player is None or self.step_timer.isActive():
             self.step_timer.stop()
@@ -1792,6 +1801,7 @@ class Gallery(QObject):
         kept across items and in full screen)."""
         if self.is_shot() or self.current() is None:
             return
+        self.bar.sound("select")
         self.muted = not self.muted
         self._apply_audio()
         self.badge_tween.run(self.badge_t, 1.0 if self.muted else 0.0)
@@ -2233,6 +2243,7 @@ class Gallery(QObject):
         item = self.current()
         if item is None or not self.active or self.full is not None or self.footer.asking:
             return
+        self.bar.sound("select")
         if self.player is not None and self.state in ("playing", "loading"):
             self.player.pause()          # nothing plays under the question (the idle rule runs)
             self.state = "paused"
@@ -2249,10 +2260,12 @@ class Gallery(QObject):
     def asking(self):
         return self.footer.asking
 
-    def cancel_delete(self):
-        """Cancel, B / Esc, or the idle timeout while the question is up."""
+    def cancel_delete(self, sound=True):
+        """Cancel, B / Esc, or the idle timeout while the question is up (``sound`` False)."""
         if not self.footer.asking:
             return
+        if sound:
+            self.bar.sound("select")
         self.footer.unask()
         self.ask_item = None
         self.foot_btn = "trash"
@@ -2282,11 +2295,13 @@ class Gallery(QObject):
             media.delete(item.path, folder, to_trash=not final)
         except (OSError, ValueError) as e:
             log.warning("cannot delete %s: %s", item.path, e)
+            self.bar.sound("error")
             self._show(immediate=True)
             self.footer.meta.setText(DELETE_FAILED)
             self.set_row("footer")
             return
         log.info("%s %s", "deleted" if final else "moved to the Trash:", item.path)
+        self.bar.sound("delete")
         key = str(item.path)
         for cache in (self.durations,):
             for k in [k for k in cache if k[0] == key]:
@@ -2300,6 +2315,8 @@ class Gallery(QObject):
 
     # ------------------------------------------------------------------ full screen
     def toggle_full(self):
+        if self.current() is not None:
+            self.bar.sound("select")
         if self.full is not None:
             self.exit_full()
         else:

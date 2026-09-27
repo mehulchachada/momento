@@ -47,6 +47,10 @@ Issues = "https://github.com/mehulchachada/momento/issues"
 packages = { find = { include = ["momento*"] } }
 # The .desktop file and systemd user unit are installed by install.sh, not pip.
 
+[tool.setuptools.package-data]
+# The clip bar's UI sounds (made by tools/make_sounds.py).
+momento = ["sounds/*.wav"]
+
 [tool.setuptools.dynamic]
 version = { attr = "momento.__version__" }
 

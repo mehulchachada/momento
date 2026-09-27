@@ -30,6 +30,12 @@ screenshots, browsed and played in a panel that opens right above the bar
 part lives in ``momento.gallery`` and is imported on the first open only, so a
 resident bar that never shows it never loads QtMultimedia.
 
+Sounds (Settings -> Misc -> Sounds, ``[ui] sounds``): soft UI sounds from
+``momento.sfx`` for moving the focus, choosing, open / close, save, screenshot,
+play / pause / stop, refusals and deletes. Only for what the user did: one
+input plays at most one of them (``Bar.with_sounds``), automatic changes (the
+idle hide, a window closing) play none.
+
 Window mode (settings: Record -> Window): while stopped (the picked window
 closed, or nothing picked yet) the bar says "Press play to pick a window";
 play sends ``resume`` and the daemon opens the window picker itself. The bar
@@ -172,6 +178,8 @@ def bar_background(behind: str = "#FFFFFF") -> str:
 
 # Builds the bar's controller hub (momento.gamepad.Gamepads); tests swap in fakes.
 PAD_FACTORY = None
+# Makes the bar's sound player (momento.sfx.Sounds); tests swap in one that plays nothing.
+SOUND_FACTORY = None
 # Returns the largest connected screen's size in physical pixels, (w, h) or None:
 # what caps the Resolution choices until the daemon knows the recorded picture's
 # size. None here means "ask the kernel" (drm_screen_size); tests swap in a fake.
@@ -219,7 +227,7 @@ DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
                 ("Audio", ("audio_source", "mic", "mic_device")),
                 ("Controller", ("controller",)),
-                ("Misc", ("hour_warning", "instant_bar")))
+                ("Misc", ("hour_warning", "instant_bar", "sounds")))
 
 
 def _gb(n) -> str:
@@ -795,6 +803,15 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "bolt":
         p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
                                  P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
+    elif kind == "note":
+        # an eighth note: the bar's sounds
+        p.drawLine(P(x + 0.8, y + 4.2), P(x + 0.8, y - 7.2))
+        flag = QPainterPath(P(x + 0.8, y - 7.2))
+        flag.quadTo(x + 1.6, y - 3.6, x + 5.6, y - 2.6)
+        p.drawPath(flag)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QRectF(x - 5.4, y + 1.8, 6.6, 5.0))
     elif kind == "info":
         # a thin "i" in a circle (~12 px, a note's size): information
         p.drawEllipse(P(x, y), 5.8, 5.8)
@@ -849,13 +866,13 @@ ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "q
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
              "keep_history": "history",
              "replay_length": "timer",
-             "hour_warning": "hourglass", "instant_bar": "bolt"}
+             "hour_warning": "hourglass", "instant_bar": "bolt", "sounds": "note"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
 ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_history": "Keep history",
               "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
               "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
-              "instant_bar": "Instant bar"}
+              "instant_bar": "Instant bar", "sounds": "Sounds"}
 ROW_ICONS["format"] = "film"
 ROW_TITLES["format"] = "Format"
 # Settings -> Misc: not a setting, two actions (a report file for GitHub, the logs folder).
@@ -871,12 +888,12 @@ def report_note(path) -> str:
     p = Path(path)
     where = f"Home/{p.name}" if p.parent == Path.home() else shown_path(p)
     return f"Saved to {where} \u00b7 Attach it to your GitHub issue"
-ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
+ON_OFF_KEYS = ("mic", "keep_history", "instant_bar", "sounds")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 VALUE_ICONS = {"record": RECORD_ICONS}
 # Settings the daemon applies without restarting the recording (settings.LIVE_KEYS
 # wins; this is for an older settings module).
-LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar")
+LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar", "sounds")
 REPLAY_MINUTES = (15, 30, 60)   # the Replay length row, when the reply has no choices for it
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
@@ -901,7 +918,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
                                    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
-    from . import config, gamepad, ipc, quality, settings
+    from . import config, gamepad, ipc, quality, settings, sfx
 
     class Bridge(QObject):
         # Every result carries the open it belongs to (Bar.gen): a resident bar
@@ -1684,6 +1701,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.focus()
             if changed:
                 self.bar.on_row_changed(self)
+                self.bar.sound("select")     # after: Sounds -> On is heard at once
 
         def step(self, d):
             n = len(self.values)
@@ -1753,6 +1771,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.refresh()
                 self.focus()
                 self.bar.on_row_changed(self)
+                self.bar.sound("select")
                 return
             super().select(i)
 
@@ -1827,6 +1846,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.focus()
 
         def activate(self):
+            self.bar.sound("select")
             if self.values[self.idx] == "logs":
                 self.bar.open_logs(self)
             else:
@@ -1896,6 +1916,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.bridge.shot.connect(self.on_shot)
             self.bridge.reported.connect(self._sig_reported)
             self.reporting = False    # Make a report runs (the bar doesn't hide meanwhile)
+            self.sounds = None        # momento.sfx.Sounds, made on the first show
+            self.sounds_on = True     # [ui] sounds, read on every show
+            self._sound_batch = None  # the sounds the input being handled asked for
             QApplication.instance().focusChanged.connect(self.on_focus_changed)
             QApplication.instance().aboutToQuit.connect(self.pads_close)  # one-shot bar: let go first
             self.setAttribute(Qt.WA_TranslucentBackground)
@@ -2193,6 +2216,75 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Run ``fn`` in ``ms`` unless the bar was hidden or reopened meanwhile."""
             gen = self.gen
             QTimer.singleShot(ms, lambda: fn() if gen == self.gen else None)
+
+        # ---------------- sounds (momento.sfx; Settings -> Misc -> Sounds)
+        def sounds_start(self):
+            """On every show: read [ui] sounds; the first show makes the player, which
+            loads its sounds in the background (never on this thread)."""
+            self.sounds_on = config.load_bar_sounds()
+            if self.sounds is not None:
+                return
+            try:
+                self.sounds = (SOUND_FACTORY or sfx.Sounds)()
+                self.sounds.warm()
+            except Exception:  # noqa: BLE001 - sounds never break the bar
+                log.exception("bar sounds unavailable")
+                self.sounds = None
+
+        def sounds_close(self):
+            """Before the process exits (recycle, quit): a sound playing may finish, then
+            the player and its sounds are freed."""
+            s, self.sounds = self.sounds, None
+            if s is not None:
+                try:
+                    s.wait()
+                    s.free()
+                except Exception:  # noqa: BLE001
+                    log.exception("bar sounds: cleanup failed")
+
+        def sounds_wanted(self):
+            """The Sounds setting; in settings, what its row says right now, so turning it
+            on is heard at once and off is silent at once (Back returns to the saved one)."""
+            row = self.row("sounds") if self.mode == "settings" else None
+            return row.value == "on" if row is not None else self.sounds_on
+
+        def sound(self, name):
+            """Play one of momento.sfx.NAMES for something the user did. Inside
+            ``with_sounds`` it is collected instead, and one sound plays at the end."""
+            if self._sound_batch is not None:
+                self._sound_batch.append(name)
+                return
+            s = self.sounds
+            if s is None:
+                return
+            try:
+                s.enabled = self.sounds_wanted()
+                s.play(name)
+            except Exception:  # noqa: BLE001 - sounds never break the bar
+                log.exception("bar sound %s failed", name)
+
+        def with_sounds(self, fn, *args):
+            """Handle one input (a key, a controller action): of the sounds it asked for
+            the most telling plays (sfx.first); none, and the focus moved: "move"."""
+            if self._sound_batch is not None:
+                return fn(*args)
+            self._sound_batch = []
+            before = QApplication.focusWidget()
+            try:
+                return fn(*args)
+            finally:
+                asked, self._sound_batch = self._sound_batch or [], None
+                name = sfx.first(asked)
+                w = QApplication.focusWidget()
+                if name is None and w is not before and w is not None and w is not self and w.isVisible():
+                    name = "move"
+                if name is not None:
+                    self.sound(name)
+
+        def click_tab(self, i):
+            """A settings tab clicked."""
+            self.sound("select")
+            self.switch_tab(i, None)
 
         # The control buttons, left to right (also the keyboard / controller order).
         CONTROL_ORDER = ("pause", "stop", "shot", "gear")
@@ -2527,9 +2619,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             super().hideEvent(ev)
 
         def choose(self, opt):
-            if (self.saving or self.done or not self.online or not opt.isEnabled()
-                    or self.control_busy or not self.gallery_yield()):
+            if self.saving or self.done or self.control_busy:
                 return
+            if not self.online or not opt.isEnabled():
+                self.sound("error")             # nothing to save, or longer than the replay
+                return
+            if not self.gallery_yield():
+                return
+            self.sound("select")
             self.saving = True
             self.idle.stop()
             _store_choice(opt.seconds)
@@ -2555,6 +2652,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.relayout()
             fm = self.line.fontMetrics()
             room = max(120, self.line.width())
+            self.sound("save" if r.get("ok") else "error")    # the result, not the press
             if r.get("ok"):
                 name = Path(str(r.get("path", ""))).name or "clip"
                 name = fm.elidedText(name, Qt.ElideMiddle, room - fm.horizontalAdvance("Saved    "))
@@ -2596,6 +2694,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             QTimer.singleShot(SHOT_DELAY_MS, lambda: threading.Thread(target=work, daemon=True).start())
 
         def on_shot(self, r):
+            # the bar is already hidden; the sound says it worked (a one-shot bar lets it finish)
+            self.sound("shot" if r.get("ok") else "error")
             if r.get("ok"):
                 log.info("screenshot saved: %s", r.get("path"))
             else:
@@ -2618,9 +2718,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.start_recorder()
                 return
             if self.view == "lowstorage" or (self.paused and _storage_short(self.last_status) is not None):
+                self.sound("error")
                 self.show_storage_warning()  # resuming would fail: say why instead
                 return
             cmd = "resume" if self.paused or self.stopped else "pause"
+            self.sound("record" if cmd == "resume" else "pause")
             # From stopped in window mode the daemon opens the window picker on resume.
             self.resume_picks = cmd == "resume" and self.stopped and self.target == "window"
             self.control_busy = True
@@ -2642,6 +2744,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if (not self.running or self.stopped or self.control_busy or self.saving or self.done
                     or not self.gallery_yield()):
                 return
+            self.sound("select")
             self.confirm.setText(self.confirm_text())
             self.mode = "confirm"
             self.stack.setCurrentIndex(3)
@@ -2651,6 +2754,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def cancel_confirm(self):
             if self.mode != "confirm" or self.control_busy:
                 return
+            self.sound("select")
             self.mode = "clip"
             self.back_to_clip("stop")
             self.idle.setInterval(IDLE_HIDE_MS)
@@ -2659,6 +2763,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def confirm_stop(self):
             if self.mode != "confirm" or self.control_busy:
                 return
+            self.sound("stop")
             self.control_busy = True
             self.mode = "clip"
             self.warn = None
@@ -2695,6 +2800,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.close_bar()
                 return
             if not r.get("ok"):
+                self.sound("error")
                 if r.get("code") == "no_storage":
                     self.show_storage_warning(_storage_warning(r.get("storage") or {}, r.get("error")))
                     self.status_inflight = False
@@ -2727,6 +2833,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def start_recorder(self):
             if self.running or self.control_busy or self.saving or self.done:
                 return
+            self.sound("record")
             self.control_busy = True
             self.warn = None
             if self.stack.currentIndex() != 0:
@@ -2760,6 +2867,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             threading.Thread(target=work, daemon=True).start()
 
         def on_started(self, st):
+            if not st.get("ok"):
+                self.sound("error")
             self.control_busy = False
             self.online = None
             self.apply_status(st)
@@ -2780,6 +2889,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def open_settings(self):
             if self.saving or self.done or self.loading_settings or self.control_busy or not self.gallery_yield():
                 return
+            self.sound("select")
             self.loading_settings = True
             gen = self.gen
 
@@ -2792,6 +2902,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode != "clip" or self.saving or self.done:
                 return
             if not data.get("ok"):
+                self.sound("error")
                 self.show_line(f"<span style='color:{RED}'>{_esc(data.get('error') or 'Cannot read settings')}</span>")
                 return
             self.sdata = data
@@ -2913,7 +3024,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             hl.setSpacing(0)
             for i, (name, _rows) in enumerate(tabs):
                 b = TabButton(name)
-                b.clicked.connect(lambda _=False, i=i: self.switch_tab(i, None))
+                b.clicked.connect(lambda _=False, i=i: self.click_tab(i))
                 hl.addWidget(b)
                 self.tab_btns.append(b)
             hl.addStretch(1)
@@ -3160,8 +3271,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.update_foot()
 
         def close_settings(self, focus_key="gear"):
+            """Back (Esc, B, the Back button; ``focus_key`` None: after Apply, no sound)."""
             if self.mode != "settings" or self.apply_state == "busy":
                 return
+            if focus_key is not None:
+                self.sound("select")
             self.apply_state = None
             self.idle.setInterval(IDLE_HIDE_MS)
             self.idle.start()
@@ -3174,11 +3288,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode != "settings" or self.apply_state in ("busy", "done"):
                 return
             if not self.apply_btn.isEnabled():
+                self.sound("error")
                 return  # the chosen combination needs more space than is free
             changes = self.changes()
             if not changes:
                 self.close_settings()
                 return
+            self.sound("select")
             self.apply_state = "busy"
             self.applied = dict(changes)
             self.idle.stop()
@@ -3211,11 +3327,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode != "settings":
                 return
             if not r.get("ok"):
+                self.sound("error")
                 self.apply_state = "error"
                 self.foot.set(str(r.get("error") or "Could not save"), "error")
                 self.idle.start()
                 return
             self.apply_state = "done"
+            if "sounds" in (self.applied or {}):
+                self.sounds_on = self.applied["sounds"] == "on"   # the bar follows its own Apply
             if r.get("warning") or r.get("state") == "no_storage":
                 # saved, but even the new settings do not fit yet
                 msg = str(r.get("warning") or "Not enough free space")
@@ -3386,6 +3505,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_pad_action(self, action, repeat=False):
             if not self.isVisible():
                 return
+            self.with_sounds(self._pad_action, action)
+
+        def _pad_action(self, action):
             self.touch_idle()         # like a key press: restart the auto-hide
             self.set_focus_visible(True)
             if self.mode == "gallery" and self.gallery is not None:
@@ -3466,6 +3588,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if hub is None or not self.isVisible():
                 return
             if hub.is_grabbed(hub.last_chord_key) or not self.running:
+                self.sound("close")
                 self.close_bar()
 
         # ---------------- gallery
@@ -3492,6 +3615,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def gallery_empty(self):
             """Nothing saved yet: one line above the bar, for a moment."""
+            self.sound("select")
             self.gallery_hint = GALLERY_EMPTY
             self.relayout()
             self.gallery_btn.setFocus(Qt.OtherFocusReason)
@@ -3503,6 +3627,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def enter_gallery(self):
             """Called by the gallery once it has something to show."""
+            self.sound("gallery_open")
             self.mode = "gallery"
             self.gallery_hint = None
             self.recycle = True       # its video libraries stay loaded: start over once hidden
@@ -3515,6 +3640,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def leave_gallery(self):
             """Back from the gallery to the clip view, on the gallery button."""
+            self.sound("gallery_close")
             self.pad_renew.stop()
             self.mode = "clip"
             self.gallery_btn.set_on(False)
@@ -3640,7 +3766,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             g = self.gallery
             if self.mode == "gallery" and g is not None and g.asking():
-                g.cancel_delete()               # the delete question times out to Cancel, the bar stays
+                g.cancel_delete(sound=False)    # the delete question times out to Cancel, the bar stays
                 self.idle.start()
                 return
             self.request_close()
@@ -3655,6 +3781,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.resident:
                 self.dismiss()
             else:
+                if self.sounds is not None and self.sounds.busy():
+                    self.hide()               # gone now; the sound finishes before the exit
                 QApplication.instance().quit()
 
         # ---------------- resident: show / hide
@@ -3678,6 +3806,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Put the bar back in the state a freshly started one opens in."""
             self.gen += 1                       # replies to the previous open are dropped
             self.close_gallery()
+            self._sound_batch = None
             self.gallery_hint = None
             self.reporting = False              # a report still being written only opens its folder
             self.idle.stop()
@@ -3750,6 +3879,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.idle.start()
             self.poll.start()
             self.refresh_async()                # the cached status painted first; this corrects it
+            self.sounds_start()
+            self.sound("open")
 
         def dismiss(self):
             """Hide the resident bar. It lets go of the keyboard and stops polling."""
@@ -3774,6 +3905,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if not self.resident or not self.recycle or self.isVisible():
                 return
             log.info("recycling the clip bar after the gallery")
+            self.sounds_close()                 # the close sound finishes, then it's freed
             self.request_exit(BAR_RECYCLE_EXIT)
 
         def request_exit(self, code):
@@ -3809,6 +3941,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.mode == "gallery" and self.gallery is not None:
                 return self.gallery.key(k)
             if k in (Qt.Key_Escape, Qt.Key_Backspace, Qt.Key_Back):
+                if not self.saving:               # (a save in flight keeps the bar up)
+                    self.sound("close")
                 self.request_close()
                 return True
             if self.saving or self.done or self.control_busy:
@@ -3828,6 +3962,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 if idx < len(self.options) and self.online and self.options[idx].isEnabled():
                     self.options[idx].setFocus(Qt.ShortcutFocusReason)
                     self.choose(self.options[idx])
+                elif idx < len(self.options):
+                    self.sound("error")           # a greyed length
             elif k == Qt.Key_S:
                 self.open_settings()
             elif k == Qt.Key_G:
@@ -3874,9 +4010,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     self.leave.stop()           # ...and came back
             if t in (QEvent.MouseButtonPress, QEvent.TouchBegin) and self.isVisible():
                 self.set_focus_visible(False)
+                if (t == QEvent.MouseButtonPress and isinstance(obj, Pill) and not obj.isEnabled()
+                        and obj.isVisible()):
+                    self.sound("error")         # a greyed pill (Qt drops the click itself)
             if t == QEvent.KeyPress and self.isVisible():
                 self.set_focus_visible(True)
-                return self.handle_key(ev)
+                return self.with_sounds(self.handle_key, ev)
             return False
 
     return Bar, fetch_status
@@ -3961,6 +4100,8 @@ def main(argv=None) -> int:
     bar.focus_default()
     bar.idle.start()
     bar.poll.start()
+    bar.sounds_start()
+    bar.sound("open")
 
     auto = os.environ.get("MOMENTO_OVERLAY_AUTOCLOSE")
     if auto:
@@ -3974,6 +4115,7 @@ def main(argv=None) -> int:
     try:
         return app.exec()
     finally:
+        bar.sounds_close()   # a closing sound finishes (the bar is hidden by then)
         _remove_pidfile()
 
 
@@ -4123,6 +4265,7 @@ def start_resident(app, use_layer_shell: bool = False, path=None):
         cmd = msg.get("cmd")
         if cmd == "toggle":
             if bar.isVisible():
+                bar.sound("close")      # the hotkey or the controller shortcut again
                 bar.dismiss()
             else:
                 bar.present()
@@ -4205,6 +4348,7 @@ def run_resident(argv=None) -> int:
         except (ValueError, OSError):
             pass
         server.close()
+        bar.sounds_close()
 
 
 if __name__ == "__main__":

@@ -36,6 +36,10 @@ contents:
     type: dir
     file_info:
       mode: 0755
+  - dst: /usr/share/momento/momento/sounds
+    type: dir
+    file_info:
+      mode: 0755
   - dst: /usr/share/doc/momento
     type: dir
     file_info:
@@ -53,6 +57,11 @@ contents:
   # Python package, outside site-packages (see packaging/nfpm/momento.sh).
   - src: ./momento/*.py
     dst: /usr/share/momento/momento/
+    file_info:
+      mode: 0644
+  # The clip bar's UI sounds.
+  - src: ./momento/sounds/*.wav
+    dst: /usr/share/momento/momento/sounds/
     file_info:
       mode: 0644
   - src: ./packaging/nfpm/momento.sh

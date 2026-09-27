@@ -39,12 +39,13 @@ KEYS = {
                     "length to your clips folder)",
     "hour_warning": "10, 5, 3 (minutes before the replay is full to warn; any whole number 3-10)",
     "instant_bar": "on, off (keep the clip bar loaded so it opens instantly; uses ~80-120 MB)",
+    "sounds": "on, off (the clip bar's soft sounds when you move around it, save, pause or stop)",
 }
 
 # Settings that only concern the controller: changing them never restarts recording.
 CONTROLLER_KEYS = ("controller",)
 # Every setting that takes effect without restarting the recording.
-LIVE_KEYS = CONTROLLER_KEYS + ("replay_length", "keep_history", "hour_warning", "instant_bar")
+LIVE_KEYS = CONTROLLER_KEYS + ("replay_length", "keep_history", "hour_warning", "instant_bar", "sounds")
 
 # How a settings UI groups the keys: (tab name, keys in display order). "bitrate"
 # is left out on purpose (terminal only: `momento set bitrate`).
@@ -53,7 +54,7 @@ TABS = (
     ("Video", ("resolution", "fps", "quality", "format")),
     ("Audio", ("audio_source", "mic", "mic_device")),
     ("Controller", ("controller",)),
-    ("Misc", ("hour_warning", "instant_bar")),
+    ("Misc", ("hour_warning", "instant_bar", "sounds")),
 )
 
 # What gets recorded: user-facing value -> label (the bar, `momento settings`).
@@ -191,7 +192,7 @@ def normalize(key: str, value):
         if v.lower() == "off":
             return "off"
         return _device(v)
-    if key in ("mic", "keep_history", "instant_bar"):
+    if key in ("mic", "keep_history", "instant_bar", "sounds"):
         return _on_off(value)
     if key == "hour_warning":
         return _warn_minutes(value)
@@ -328,6 +329,8 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
         return [("buffer", "max_seconds", int(value) * 60)]
     if key == "instant_bar":
         return [("ui", "keep_bar_loaded", value == "on")]
+    if key == "sounds":
+        return [("ui", "sounds", value == "on")]
     raise ValueError(f"unknown setting {key!r}")
 
 
@@ -353,6 +356,7 @@ def current(cfg: dict) -> dict:
         "keep_history": "on" if config.keep_history(cfg) else "off",
         "hour_warning": config.warn_minutes(cfg),
         "instant_bar": "on" if (cfg.get("ui") or {}).get("keep_bar_loaded", True) else "off",
+        "sounds": "on" if config.bar_sounds(cfg) else "off",
     }
 
 
@@ -434,7 +438,7 @@ def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
                     "format": list(codecs.CHOICES),
                     "controller": ["off", *gamepad.CHORD_OFFERED],
                     "keep_history": ["off", "on"], "hour_warning": list(config.WARN_MINUTES),
-                    "instant_bar": ["on", "off"]},
+                    "instant_bar": ["on", "off"], "sounds": ["on", "off"]},
         "tabs": [[name, list(keys)] for name, keys in TABS],
         # python-evdev importable: without it the controller settings are saved but unused
         "controller_available": gamepad.available(),

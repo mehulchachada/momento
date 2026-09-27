@@ -189,7 +189,7 @@ are config-only escape hatches with no setting.
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
     = nothing to do). Changes that only touch ``controller`` / ``replay_length`` /
-    ``keep_history`` / ``hour_warning`` / ``instant_bar`` apply without a
+    ``keep_history`` / ``hour_warning`` / ``instant_bar`` / ``sounds`` apply without a
     reload (``restarted: false``). A shorter ``replay_length`` drops the
     oldest footage beyond it at once (the newest is kept); a longer one fills
     up from what is there;
@@ -403,6 +403,7 @@ SETTING_VALUES = {
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
     "hour_warning": (("integer",), False),  # minutes before the replay is full to warn: 3-10 (UI: 10, 5, 3)
     "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
+    "sounds": (("string",), False),         # "on" | "off": the clip bar's UI sounds ([ui] sounds)
 }
 
 SETTING_CHOICES = {
@@ -416,6 +417,7 @@ SETTING_CHOICES = {
     "keep_history": (("array",), False),   # ["off", "on"]
     "hour_warning": (("array",), False),   # [10, 5, 3]
     "instant_bar": (("array",), False),    # ["on", "off"]
+    "sounds": (("array",), False),         # ["on", "off"]
 }
 
 AUDIO_DEVICES = {
