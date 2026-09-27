@@ -88,7 +88,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
     if [ -n "$SELF" ] && [ -f "$SELF" ]; then
-        sed -n '2,38p' "$SELF" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^[^#]/{/^#/p;}' "$SELF" | sed 's/^# \{0,1\}//'
     else
         echo "Momento installer. Options: --yes --no-deps --deps-only --no-enable --update --dev --check --uninstall --purge"
         echo "Full help: $REPO_URL#install"
