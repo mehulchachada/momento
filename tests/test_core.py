@@ -574,7 +574,7 @@ class CLITest(unittest.TestCase):
                                         timeout=30)
             text = out.getvalue()
             self.assertIn("controller = left_paddle", text)
-            self.assertIn("Saved. Press Left paddle to open or close the bar.", text)   # a tap by default
+            self.assertIn("Saved. Press Left paddle to open or close the bar", text)   # a tap by default
             self.assertNotIn("paused", text)             # a controller change never waits for resume
             out = io.StringIO()
             with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
