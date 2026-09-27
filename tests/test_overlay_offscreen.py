@@ -493,7 +493,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.y() + bar.height(), bottom0)  # grew upward
         self.assertEqual(bar.stack.currentIndex(), 2)
         self.assertIn("60 fps", bar.foot.text())
-        self.assertIn("6.8 GB for 60 min", bar.foot.text())
+        self.assertIn("4.5 GB for 60 min", bar.foot.text())
         self.assertTrue(bar.row("mic_device").isHidden())
         self.assertEqual({r.key: r.icon.kind for r in bar.rows},
                          {"record": "window", "replay_length": "timer", "keep_history": "history",
@@ -519,10 +519,11 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual([b.text() for b in bar.row("resolution").buttons],
                          ["480p", "720p", "1080p", "Native"])  # up to 1080p for now
         self.key(Qt.Key_Left)                    # 720p
-        self.assertIn("4.5 GB for 60 min", bar.foot.text())
+        self.assertIn("2.7 GB for 60 min", bar.foot.text())
         self.key(Qt.Key_Down)                    # frame rate row (stays Auto)
         self.assertTrue(bar.row("fps").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
+        self.key(Qt.Key_Right)                   # high
         self.key(Qt.Key_Right)                   # ultra
         self.key(Qt.Key_PageDown)                # Audio, on its first row
         self.assertEqual(bar.tab_names[bar.tab], "Audio")
@@ -577,9 +578,9 @@ class OverlayOffscreen(unittest.TestCase):
         self.open_settings(bar)
         self.assertIn("your replay is kept", bar.note.text())
         self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
-        bar.row("quality").buttons[0].click()   # touch / click
-        self.assertEqual(bar.row("quality").value, "standard")
-        self.assertEqual(bar.changes(), {"quality": "standard"})
+        bar.row("quality").buttons[1].click()   # touch / click
+        self.assertEqual(bar.row("quality").value, "high")
+        self.assertEqual(bar.changes(), {"quality": "high"})
         self.key(Qt.Key_Escape)                  # back to clips, nothing written
         self.assertEqual(bar.mode, "clip")
         self.assertEqual(bar.idle.interval(), overlay.IDLE_HIDE_MS)
@@ -899,7 +900,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertFalse(bar.hintbar.isHidden())
 
     def test_settings_storage_blocks_apply(self):
-        daemon = FakeDaemon(True, free=6e9, values={"resolution": "720p"})
+        daemon = FakeDaemon(True, free=6e9, values={"resolution": "720p", "quality": "high"})
         bar = self.make(daemon)
         self.open_settings(bar)
         res = bar.row("resolution")
@@ -993,13 +994,13 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual((fps.value, fps.note.text(), fps.note.kind), ("auto", "Matching your 120 Hz screen", "info"))
         self.assertIs(type(fps.note), type(bar.row("resolution").note))   # the same style
         self.assert_note_fits(fps)
-        self.assertIn("120 fps \u00b7 ~9.9 GB for 60 min", bar.foot.text())   # 22 Mbps at 1080p High
+        self.assertIn("120 fps \u00b7 ~6.8 GB for 60 min", bar.foot.text())   # 15 Mbps at 1080p Standard
         pump(self.app, 0.05)
         self.shot(bar, "settings-video-auto-fps", "v7")
         self.key(Qt.Key_Down)                           # the Frame rate row
         self.key(Qt.Key_Right)                          # 60 fps: no note
         self.assertEqual((fps.value, fps.note.text()), (60, ""))
-        self.assertIn("60 fps \u00b7 ~6.8 GB for 60 min", bar.foot.text())
+        self.assertIn("60 fps \u00b7 ~4.5 GB for 60 min", bar.foot.text())
         self.key(Qt.Key_Right)                          # 120 fps on a 120 Hz screen: nothing to warn about
         self.assertEqual((fps.value, fps.note.text()), (120, ""))
         self.key(Qt.Key_Left)
@@ -1012,7 +1013,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar, _res = self.open_video(FakeDaemon(True, refresh=60.0))
         fps = bar.row("fps")
         self.assertEqual(fps.note.text(), "Matching your 60 Hz screen")
-        self.assertIn("60 fps \u00b7 ~6.8 GB", bar.foot.text())
+        self.assertIn("60 fps \u00b7 ~4.5 GB", bar.foot.text())
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Right)
         self.key(Qt.Key_Right)                          # 120 fps
@@ -1040,7 +1041,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.refresh(120.0)                              # Qt says the bar's screen runs at 120 Hz
         bar, _res = self.open_video(FakeDaemon(True, free=100e9))
         self.assertEqual(bar.row("fps").note.text(), "Matching your 120 Hz screen")
-        self.assertIn("120 fps \u00b7 ~9.9 GB for 60 min", bar.foot.text())
+        self.assertIn("120 fps \u00b7 ~6.8 GB for 60 min", bar.foot.text())
         # the fit check counts Auto like the estimate: at 120 fps
         v = bar.pending()
         self.assertEqual(bar.storage_need(v), bar.storage_need({**v, "fps": 120}))
@@ -1073,7 +1074,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(res.disabled, {"1080p"})
         self.assertEqual(res.note.text(), "Your screen is 720p")
         self.assertTrue(res.buttons[1].hasFocus())     # 720p, the saved value
-        self.assertIn("4.5 GB for 60 min", bar.foot.text())
+        self.assertIn("2.7 GB for 60 min", bar.foot.text())
         pump(self.app, 0.05)
         self.shot(bar, "resolution-720p-screen", "rescap")
         self.key(Qt.Key_Right)                          # 1080p is skipped
@@ -1085,7 +1086,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(res.value, "720p")
         self.key(Qt.Key_Left)                           # 480p fits any real screen
         self.assertEqual(res.value, "480p")
-        self.assertIn("2.2 GB for 60 min", bar.foot.text())
+        self.assertIn("1.4 GB for 60 min", bar.foot.text())
         self.key(Qt.Key_Left)                           # the start: stays
         self.assertEqual(res.value, "480p")
         self.key(Qt.Key_Right)
@@ -1115,7 +1116,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.shot(bar, "resolution-4k-screen", "rescap")
         self.key(Qt.Key_Right)
         self.assertEqual(res.value, "native")
-        self.assertIn("6.8 GB for 60 min", bar.foot.text())   # native records 1080 lines here
+        self.assertIn("4.5 GB for 60 min", bar.foot.text())   # native records 1080 lines here
 
     def test_daemon_source_wins_over_the_screen(self):
         self.screen((1280, 720))
@@ -1137,7 +1138,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(full_hd.visual_state, "capped")  # still shown as chosen, dimmed
         self.assertEqual(res.note.text(), "Recording at 720p (your screen)")
         self.assertTrue(res.buttons[1].hasFocus())      # the nearest choice that applies: 720p
-        self.assertIn("4.5 GB for 60 min", bar.foot.text())   # what is really recorded, not 1080p's 6.8 GB
+        self.assertIn("2.7 GB for 60 min", bar.foot.text())   # what is really recorded, not 1080p's 4.5 GB
         self.assertEqual(bar.changes(), {})
         pump(self.app, 0.05)
         self.shot(bar, "resolution-1080p-saved-720p-screen", "rescap")
@@ -1580,7 +1581,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(daemon)
         bar.resident = True
         self.open_settings(bar)
-        bar.row("quality").buttons[0].click()
+        bar.row("quality").buttons[1].click()
         bar.apply_settings()
         self.wait_for(lambda: bar.apply_state == "done")
         self.assertTrue(bar.isVisible())

@@ -56,7 +56,7 @@ _MBPS = {
 }
 
 DEFAULT_RESOLUTION = "1080p"
-DEFAULT_QUALITY = "high"
+DEFAULT_QUALITY = "standard"
 
 # A preset is offered only when the recorded picture (the screen, or the picked
 # window) is at least that tall, give or take this much: recording a 720p
