@@ -927,8 +927,8 @@ class DpadChord(Base):
     def test_hat_mode_first(self):
         hub = self.daemon()
         d = self.pad(hub)
-        self.assertEqual(d.mask, KEY_MASK)
-        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)          # D-pad alone: masked, never wakes us
+        self.assertEqual(d.mask, HAT_MASK)                # keys and the hat (to tell the order)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)          # D-pad alone: fires nothing
         self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
         self.assertEqual(self.chords, [])
         self.push(hub, d, EV_KEY, MODE, 1)
@@ -946,7 +946,7 @@ class DpadChord(Base):
         self.assertTrue(d.grabbed)                        # held until mode is let go
         self.push(hub, d, EV_KEY, MODE, 0)
         self.assertFalse(d.grabbed)
-        self.assertEqual(d.mask, KEY_MASK)
+        self.assertEqual(d.mask, HAT_MASK)
         self.assertIsNone(hub.next_timeout())             # no timer left behind
         self.push(hub, d, EV_KEY, MODE, 1)                # again: fires again
         self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
@@ -966,13 +966,13 @@ class DpadChord(Base):
         self.push(hub, d, EV_KEY, BTN_START, 1)
         self.assertEqual(self.chords, [])
 
-    def test_hat_down_first_still_counts(self):
+    def test_hat_down_together_still_counts(self):
         hub = self.daemon()
         d = self.pad(hub)
-        d.push(EV_ABS, ABS_HAT0Y, 1)                      # masked: only the device state changes
-        self.assertEqual(d._queue, [])
-        self.push(hub, d, EV_KEY, MODE, 1)                # the hat is read when the mask widens
+        d.push(EV_ABS, ABS_HAT0Y, 1)                      # Down a hair first, in the same read as PS
+        self.push(hub, d, EV_KEY, MODE, 1)
         self.assertEqual(self.chords, [100.0])
+        self.assertFalse(d.grabbed)                       # the game saw Down: don't hide its release
 
     def test_btn_dpad_pad(self):
         """Pads that send BTN_DPAD_* (no hat): key events suffice, the mask never widens."""
@@ -987,6 +987,8 @@ class DpadChord(Base):
         self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 1)
         self.assertEqual(self.chords, [100.0])
         self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertTrue(d.grabbed)                        # Down still held: kept until it is let go
+        self.push(hub, d, EV_KEY, BTN_DPAD_DOWN, 0)
         self.assertFalse(d.grabbed)
 
     def test_xpad_dpad_as_buttons(self):
@@ -1019,10 +1021,10 @@ class DpadChord(Base):
         self.assertEqual(d.grab_calls, 1)                  # not taken again for the same press
         self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
         self.push(hub, d, EV_KEY, MODE, 0)
-        self.assertEqual(d.mask, KEY_MASK)
+        self.assertIsNone(hub.next_timeout())
 
     def test_missed_release_is_noticed(self):
-        """Mode let go while someone else held the pad: the 2 s re-read narrows the mask."""
+        """Mode let go while someone else held the pad: the 2 s re-read notices."""
         hub = self.daemon(chord_grab=False)
         d = self.pad(hub)
         self.push(hub, d, EV_KEY, MODE, 1)
@@ -1030,9 +1032,9 @@ class DpadChord(Base):
         d.grabbed_by_other = True                          # the bar took it
         d.push(EV_KEY, MODE, 0)                            # unseen
         self.at(hub, 102.0)
-        self.assertEqual(d.mask, KEY_MASK)
+        self.assertFalse(hub.pads[d.path].mod_held)
         d.grabbed_by_other = False
-        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)            # masked again: a plain D-pad does nothing
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)            # a plain D-pad does nothing
         self.assertEqual(self.chords, [])
         self.assertIsNone(hub.next_timeout())
 
@@ -1207,6 +1209,221 @@ class DpadChord(Base):
         self.assertEqual(d.grab_calls, calls)                # no more tries
         self.push(hub, d, EV_KEY, BTN_SOUTH, 1)
         self.assertEqual(self.actions[-1], ("accept", False))
+
+
+class ChordOrder(Base):
+    """PS + Down leaking into the game: the order rule (PS first, Down up to 30 ms
+    before it still counts), the grab kept until Down is let go, a Down that already
+    reached the game (same read as PS, or an earlier kernel time) and the one log
+    line per use that says which of these happened."""
+
+    daemon = DpadChord.daemon
+
+    def pad(self, hub, **kw):
+        d = dualsense(**kw) if "DualSense" in kw.get("name", "DualSense") else FakeDevice(**kw)
+        self.devs.append(d)
+        d.mask_honoured = True
+        hub.add_device(d)
+        return d
+
+    def use_lines(self, cm):
+        return [r.getMessage() for r in cm.records if r.getMessage().startswith("shortcut")]
+
+    def test_ps_then_down(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_KEY, MODE, 1)
+            self.assertTrue(d.grabbed)
+            self.clock.t = 100.04
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+            self.assertEqual(self.chords, [100.04])
+            self.assertEqual(self.use_lines(cm), [])           # logged once the grab is over
+            self.clock.t = 100.1
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+            self.assertTrue(d.grabbed)
+            self.clock.t = 100.18
+            self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertFalse(d.grabbed)
+        self.assertEqual(self.use_lines(cm), [
+            "shortcut: DualSense (/fake/ds), order PS->Down (Down 40 ms after PS), "
+            "grabbed before Down: yes, grab held 180 ms"])
+
+    def test_down_just_before_ps_counts_but_leaked(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+            self.clock.t = 100.025
+            self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertEqual(self.chords, [100.025])               # meant as the shortcut
+        self.assertFalse(d.grabbed)                            # the game saw Down: no stuck Down
+        self.assertEqual(self.use_lines(cm), [
+            "shortcut: DualSense (/fake/ds), order Down->PS (Down 25 ms before PS, within 30 ms: "
+            "counted as together), grabbed before Down: no (pressed before PS): Down reached other apps"])
+        self.clock.t = 100.1
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)                # Down let go, PS still held:
+        self.assertTrue(d.grabbed)                             # the next Down is hidden
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertFalse(d.grabbed)
+
+    def test_down_clearly_before_ps_is_a_game_press(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+            self.clock.t = 100.031
+            self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertEqual(self.chords, [])
+        self.assertFalse(d.grabbed)
+        self.assertEqual(d.grab_calls, 0)
+        self.assertEqual(self.use_lines(cm), [
+            "shortcut ignored: DualSense (/fake/ds), order Down->PS (Down 31 ms before PS): "
+            "a game press, the bar stays closed"])
+        self.clock.t = 100.2                                   # still ignored while held
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 1)
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 0)
+        self.assertEqual(self.chords, [])
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)                # let go, then Down again: PS first now
+        self.assertTrue(d.grabbed)
+        self.clock.t = 100.3
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.3])
+
+    def test_down_held_when_opened_is_a_game_press(self):
+        hub = self.daemon()
+        d = dualsense(path="/fake/ds")
+        self.devs.append(d)
+        d.axes[ABS_HAT0Y].value = 1
+        hub.add_device(d)
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_KEY, MODE, 1)
+        self.assertEqual(self.chords, [])
+        self.assertIn("Down already held before PS", self.use_lines(cm)[0])
+
+    def test_ps_and_down_in_one_read(self):
+        """The grab is taken while handling PS, but Down was already queued for every
+        reader: it leaked, so the grab is let go at once (the game sees the release)."""
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        d.push(EV_KEY, MODE, 1, syn=False)
+        d.push(EV_ABS, ABS_HAT0Y, 1)                           # one report: PS, Down, SYN
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            hub.process(d.fileno())
+        self.assertEqual(self.chords, [100.0])
+        self.assertEqual(d.grab_calls, 1)
+        self.assertFalse(d.grabbed)
+        self.assertEqual(self.use_lines(cm), [
+            "shortcut: DualSense (/fake/ds), order PS->Down (Down 0 ms after PS), grabbed before Down: "
+            "no (it came in the same read as PS, queued before the grab): Down reached other apps, "
+            "grab held 0 ms (let go at once, so the game also sees the release)"])
+
+    def test_down_queued_before_the_grab_by_kernel_time(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        self.push(hub, d, EV_KEY, MODE, 1)                     # grab taken at 100.0
+        self.clock.t = 100.004
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            d.push(EV_ABS, ABS_HAT0Y, 1, ts=99.999)            # next read, but queued before it
+            hub.process(d.fileno())
+        self.assertFalse(d.grabbed)
+        self.assertIn("grabbed before Down: no (its kernel time is before the grab)", self.use_lines(cm)[0])
+        hub2 = self.daemon()
+        d2 = self.pad(hub2, path="/fake/2")
+        self.push(hub2, d2, EV_KEY, MODE, 1, )
+        d2.push(EV_ABS, ABS_HAT0Y, 1, ts=100.01)               # after the grab: hidden
+        hub2.process(d2.fileno())
+        self.assertTrue(d2.grabbed)
+
+    def test_down_held_past_ps_release(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.clock.t = 100.1
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertTrue(d.grabbed)                             # the game never saw Down: hide its release
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 1)                # other directions don't end it
+        self.assertTrue(d.grabbed)
+        self.push(hub, d, EV_ABS, ABS_HAT0X, 0)
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.clock.t = 100.3
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.assertFalse(d.grabbed)
+        self.assertTrue(self.use_lines(cm)[0].endswith("grabbed before Down: yes, grab held 300 ms"))
+        self.assertIsNone(hub.next_timeout())
+
+    def test_down_held_forever_is_capped_by_the_watchdog(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        self.push(hub, d, EV_KEY, MODE, 1)
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+        self.clock.t = 100.5
+        self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertAlmostEqual(hub.next_timeout(), 1.5)        # 2 s from the grab, not from PS's release
+        self.at(hub, 101.9)
+        self.assertTrue(d.grabbed)
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.at(hub, 102.0)
+        self.assertFalse(d.grabbed)
+        self.assertIn("grab held 2000 ms (let go by the 2 s watchdog)", self.use_lines(cm)[0])
+        self.assertIsNone(hub.next_timeout())
+        self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+        self.assertEqual(d.ungrab_calls, 1)
+
+    def test_grab_failure_is_logged_once_with_path_and_origin(self):
+        hub = self.daemon()
+        d = self.pad(hub, name="InputPlumber Gamepad", path="/fake/ip", grab_error=errno.EBUSY)
+        g._warned.discard(("modgrab", "/fake/ip", "InputPlumber Gamepad"))
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            for t in (100.0, 100.5):
+                self.clock.t = t
+                self.push(hub, d, EV_KEY, MODE, 1)
+                self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+                self.push(hub, d, EV_ABS, ABS_HAT0Y, 0)
+                self.push(hub, d, EV_KEY, MODE, 0)
+        msgs = [r.getMessage() for r in cm.records]
+        fails = [m for m in msgs if m.startswith("can't hold")]
+        self.assertEqual(fails, ["can't hold InputPlumber Gamepad (/fake/ip, InputPlumber virtual pad) for the "
+                                 "controller shortcut: Device or resource busy (another program holds it, "
+                                 "e.g. InputPlumber or Steam); the game will also see the D-pad press"])
+        self.assertEqual(len(self.chords), 2)                  # the shortcut still works
+        self.assertEqual(len(self.use_lines(cm)), 2)
+        self.assertIn("grabbed before Down: no (grab failed: Device or resource busy)", self.use_lines(cm)[0])
+
+    def test_exclusive_off_and_mirrored_pad(self):
+        hub = self.daemon(chord_grab=False)
+        d = self.pad(hub, name="DualSense", path="/fake/ds")
+        v = self.pad(hub, name="Steam Virtual Gamepad", path="/fake/steam")
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.push(hub, d, EV_KEY, MODE, 1)
+            self.push(hub, v, EV_KEY, MODE, 1)
+            self.clock.t = 100.02
+            self.push(hub, d, EV_ABS, ABS_HAT0Y, 1)
+            self.push(hub, v, EV_ABS, ABS_HAT0Y, 1)
+        self.assertEqual(self.chords, [100.02])                # counted once
+        lines = self.use_lines(cm)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("grabbed before Down: no (exclusive is off)", lines[0])
+        self.assertIn("(/fake/steam, Steam Input virtual pad)", lines[1])
+        self.assertTrue(lines[1].endswith("[the same press as on another controller: counted once]"))
+
+    def test_ps_alone_logs_nothing(self):
+        hub = self.daemon()
+        d = self.pad(hub)
+        with self.assertNoLogs("momento.gamepad", logging.INFO):
+            self.push(hub, d, EV_KEY, MODE, 1)
+            self.push(hub, d, EV_KEY, MODE, 0)
+        self.assertFalse(d.grabbed)
+
+    def test_device_origin(self):
+        self.assertEqual(g.device_origin("/fake/x", "InputPlumber Gamepad"), "InputPlumber virtual pad")
+        self.assertEqual(g.device_origin("/fake/x", "Microsoft X-Box 360 pad 0", vendor=0x28de,
+                                         product=0x11ff), "Steam Input virtual pad")
+        self.assertEqual(g.device_origin("/fake/x", "DualSense Wireless Controller"), "")          # no sysfs: unknown
+        with self.assertLogs("momento.gamepad", logging.INFO) as cm:
+            self.pad(self.daemon(), name="InputPlumber Gamepad", path="/fake/ip2")
+        self.assertIn("InputPlumber virtual pad)", cm.output[0])
 
 
 class Hotplug(Base):

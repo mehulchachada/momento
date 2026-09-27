@@ -3947,32 +3947,32 @@ class DaemonControllerTest(unittest.TestCase):
         self.assertTrue(dev.closed)
 
     def test_default_ps_down_holds_the_pad_while_mode_is_down(self):
-        """PS/Xbox/Home + D-pad Down: the pad is held from the mode press to its release,
-        so the game never sees the D-pad; the mask widens to the hat only meanwhile."""
+        """PS/Xbox/Home + D-pad Down: the pad is held from the mode press until mode and
+        Down are both let go, so the game never sees the D-pad; the mask is keys + hat."""
         g = self.gamepad
         self.d._sync_controller()
         self.assertEqual(self.made[-1]["chord"], ("mode", "dpad_down"))
         self.assertIs(self.made[-1]["chord_grab"], True)                 # [controller] exclusive
         hub, dev = self.d.pads, self.devs[-1]
         dev.mask_honoured = True
-        self.assertEqual(dev.mask, (g.EV_KEY,))
-        dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)                                # D-pad alone: not even seen
+        self.assertEqual(dev.mask, (g.EV_KEY, g.EV_ABS))                 # the hat, never the sticks
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)                                # D-pad alone: opens nothing
         dev.push(g.EV_ABS, g.ABS_HAT0Y, 0)
         hub.process(dev.fileno())
         self.assertEqual(self.opened, [])
         dev.push(g.EV_KEY, g.BTN_MODE, 1)
         hub.process(dev.fileno())
         self.assertTrue(dev.grabbed)
-        self.assertEqual(dev.mask, (g.EV_KEY, g.EV_ABS))
         dev.push(g.EV_ABS, g.ABS_HAT0Y, 1)
         hub.process(dev.fileno())
         self.assertEqual(self.opened, [100.0])
         self.assertTrue(dev.grabbed)                                      # until mode is let go
-        dev.push(g.EV_ABS, g.ABS_HAT0Y, 0)
         dev.push(g.EV_KEY, g.BTN_MODE, 0)
         hub.process(dev.fileno())
+        self.assertTrue(dev.grabbed)                                      # ...and Down
+        dev.push(g.EV_ABS, g.ABS_HAT0Y, 0)
+        hub.process(dev.fileno())
         self.assertFalse(dev.grabbed)
-        self.assertEqual(dev.mask, (g.EV_KEY,))
         self.assertFalse(hub.grabbing)                                   # never the bar's grab
 
     def test_exclusive_off_shares_the_pad(self):
