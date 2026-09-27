@@ -17,7 +17,9 @@
 #   --no-deps        skip the system-package step
 #   --deps-only      only install missing system packages, then check (may run as root)
 #   --no-enable      install, but don't start the recorder or add it to login
-#   --update         download the latest Momento (main, or MOMENTO_REF) and reinstall
+#   --update         download the latest Momento release and reinstall
+#   --dev            download and install the newest test version (the main
+#                    branch) instead of the latest release; for testers
 #   --check          only report what's installed and what's missing
 #   --uninstall      remove Momento (keeps settings, replay buffer and clips)
 #   --purge          remove Momento, its settings and its replay buffer
@@ -33,7 +35,7 @@
 #   ~/.config/momento/config.toml    only if it doesn't exist yet
 #
 # Environment: MOMENTO_REF=<branch|tag|commit> (what --update / curl downloads,
-# default main), MOMENTO_PYTHON=/path/to/python3, XDG_DATA_HOME,
+# default the latest release), MOMENTO_PYTHON=/path/to/python3, XDG_DATA_HOME,
 # XDG_CONFIG_HOME, MOMENTO_NO_SYSTEMD=1 (never call systemctl; for testing).
 set -euo pipefail
 
@@ -88,7 +90,7 @@ usage() {
     if [ -n "$SELF" ] && [ -f "$SELF" ]; then
         sed -n '2,38p' "$SELF" | sed 's/^# \{0,1\}//'
     else
-        echo "Momento installer. Options: --yes --no-deps --deps-only --no-enable --update --check --uninstall --purge"
+        echo "Momento installer. Options: --yes --no-deps --deps-only --no-enable --update --dev --check --uninstall --purge"
         echo "Full help: $REPO_URL#install"
     fi
 }
@@ -597,17 +599,52 @@ pyside_venv() {
 }
 
 # ============================================================ bootstrap ==
+# The tag of the latest published release (drafts don't count), from where
+# github.com/<repo>/releases/latest redirects to. Prints nothing when there is
+# no release yet; fails when GitHub can't be reached.
+latest_release() {
+    local where="" out
+    if have curl; then
+        where="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest")" || return 1
+    elif have wget; then
+        # GNU wget, wget2 and busybox all print the redirect target somewhere.
+        out="$(wget -S --spider "$REPO_URL/releases/latest" 2>&1)" || return 1
+        where="$(printf '%s\n' "$out" | tr -d '\r' | grep -o 'https://[^][ ]*/releases/tag/v[0-9][^][ ]*' | tail -n 1)" || true
+    else
+        return 1
+    fi
+    case "$where" in
+        */releases/tag/v[0-9]*) echo "${where##*/releases/tag/}" ;;
+    esac
+}
+
 # Running without the source tree next to us (curl | bash) or with --update:
 # fetch the source tarball, then hand over to the install.sh inside it.
 bootstrap() {
-    local ref="${MOMENTO_REF:-main}" url tmp
+    local ref="${MOMENTO_REF:-}" url tmp label
+    if [ -z "$ref" ] && [ -z "${MOMENTO_TARBALL_URL:-}" ]; then
+        if [ "$DEV" = 1 ]; then
+            ref=main
+        elif ! ref="$(latest_release)"; then
+            die "couldn't reach GitHub to find the latest Momento. Check your internet connection and try again."
+        elif [ -z "$ref" ]; then
+            warn "No Momento release is out yet, so the newest test version is installed instead."
+            ref=main
+        fi
+    fi
+    ref="${ref:-main}"
     if [ -n "${MOMENTO_TARBALL_URL:-}" ]; then url="$MOMENTO_TARBALL_URL"
     elif [ "$ref" = main ]; then url="$REPO_URL/archive/refs/heads/main.tar.gz"
     else url="$REPO_URL/archive/$ref.tar.gz"
     fi
+    case "$ref" in
+        main) label="the newest test version of Momento" ;;
+        v[0-9]*) label="Momento ${ref#v}" ;;
+        *) label="Momento ($ref)" ;;
+    esac
     have tar || die "tar is required"
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/momento-install.XXXXXX")"
-    say "Downloading Momento ($ref)"
+    say "Downloading $label"
     note "$url"
     if have curl; then
         curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1 || { rm -rf "$tmp"; die "download failed: $url"; }
@@ -778,7 +815,7 @@ do_uninstall() {
 
 # ================================================================= main ==
 main() {
-    MODE=install; YES=0; DEPS=1; ENABLE=1; UPDATE=0
+    MODE=install; YES=0; DEPS=1; ENABLE=1; UPDATE=0; DEV=0
     local args=() a
     for a in "$@"; do
         case "$a" in
@@ -789,6 +826,7 @@ main() {
             --no-enable)  ENABLE=0 ;;
             --no-check)   ;;  # accepted for compatibility
             --update)     UPDATE=1; continue ;;
+            --dev)        DEV=1; UPDATE=1; continue ;;
             --check)      MODE=check ;;
             --uninstall)  MODE=uninstall ;;
             --purge)      MODE=purge ;;
