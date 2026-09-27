@@ -1081,6 +1081,7 @@ class Gallery(QObject):
         self.clock.setInterval(CLOCK_MS)
         self.clock.timeout.connect(self._tick_clock)
         self.pacer = FramePacer()             # new frames repaint at most at the screen's rate
+        self.video_ask = None                 # the device size last asked of a GStreamer player
         self.pace_timer = QTimer(self)
         self.pace_timer.setSingleShot(True)
         self.pace_timer.setTimerType(Qt.PreciseTimer)
@@ -1782,9 +1783,25 @@ class Gallery(QObject):
         player = self.player
         if player is None or not hasattr(player, "set_video_size"):
             return
-        dpr = view.devicePixelRatioF() or 1.0
-        player.set_video_size(round(view.width() * dpr), round(view.height() * dpr))
+        self.video_ask = self._device_size(view)
+        player.set_video_size(*self.video_ask)
         player.set_max_rate(hz)
+
+    @staticmethod
+    def _device_size(view):
+        dpr = view.devicePixelRatioF() or 1.0
+        return round(view.width() * dpr), round(view.height() * dpr)
+
+    def _follow_size(self, view):
+        """Painting ``view`` (the stage, or the full screen view): when its device size is no
+        longer what the player was asked for, ask again. A new surface's size and scale settle
+        only after it is shown (full screen is a layer surface whose fractional scale comes
+        later), and a frame of the wrong size can't be blitted 1:1: it would be resampled on
+        the CPU on every frame."""
+        if view is not (self.full if self.full is not None else self.stage):
+            return
+        if self._device_size(view) != self.video_ask and hasattr(self.player, "set_video_size"):
+            self._video_target()
 
     def _release_frame(self):
         """Let go of the picture on the stage, including the sink's own last video frame."""
@@ -2005,6 +2022,7 @@ class Gallery(QObject):
     # ------------------------------------------------------------------ painting
     def paint_picture(self, p, r, radius, badge):
         """The stage: the frame letterboxed on black, or a message; badges on top."""
+        self._follow_size(p.device())
         clip = QPainterPath()
         clip.addRoundedRect(r, radius, radius)
         p.save()
