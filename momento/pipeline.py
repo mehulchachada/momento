@@ -1,4 +1,12 @@
-"""GStreamer capture pipeline: screen + audio -> H.264/AAC -> MPEG-TS segments.
+"""GStreamer capture pipeline: screen + audio -> H.264/H.265/AV1 + AAC -> segments.
+
+The video format (``[capture] format``: auto, h264, h265, av1) picks the
+encoder, parser and segment container (``codecs.CONTAINERS``: MPEG-TS for
+H.264/H.265, Matroska for AV1). Auto asks ``codecs.DETECTOR`` what this machine
+records well; a start waits for that detection (cached on disk, so only the
+first start after a driver change runs the test encodes). If the format's
+encoder fails before the first segment, the next format of ``codecs.FALLBACK``
+that works is used (``format_fallback`` says so; the daemon notifies once).
 
 Segments are written by splitmuxsink into the buffer directory; every
 fragment open/close is reported to the RingBuffer with wall-clock times, the
@@ -56,17 +64,19 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 from gi.repository import GLib, Gst, GstVideo  # noqa: E402
 
-from . import config, quality  # noqa: E402
-from .ringbuffer import RingBuffer  # noqa: E402
+from . import codecs, config, quality  # noqa: E402
+from .ringbuffer import RingBuffer, segment_number  # noqa: E402
 
 log = logging.getLogger("momento.pipeline")
 
 Gst.init(None)
 
-ENCODER_ORDER = ["vah264enc", "vah264lpenc", "vaapih264enc", "nvh264enc", "qsvh264enc", "x264enc", "openh264enc"]
-# Encoders that take VAMemory NV12 straight from vapostproc (GPU colour conversion).
-# vah265enc and vaav1enc are only used by the h265/av1 debug stages.
-VA_ENCODERS = {"vah264enc", "vah264lpenc", "vah265enc", "vaav1enc"}
+# H.264: every hardware encoder, then software as the last resort (never for H.265/AV1).
+ENCODER_ORDER = list(codecs.HW_ENCODERS["h264"] + codecs.SW_ENCODERS["h264"])
+# Encoders that take VAMemory NV12 straight from vapostproc (GPU colour conversion):
+# the "va" plugin's (vah264enc, vah265enc, vaav1enc, their low-power twins).
+VA_ENCODERS = {n for names in codecs.HW_ENCODERS.values() for n in names
+               if n.startswith("va") and not n.startswith("vaapi")}
 RETRY_SECONDS = 3
 STOP_TIMEOUT = 3.0
 # A fragment that closes up to this long before a flush request still counts as
@@ -102,8 +112,8 @@ CAPTURE_ONLY_ENV = "MOMENTO_DEBUG_CAPTURE_ONLY"
 #   encode    ... -> the encoder, same settings -> fakesink; nothing is written
 #   noaudio   the normal recording without the audio branch
 #   lowpower  the normal recording with the encoder at its cheapest (LOWPOWER_VA)
-#   h265      the normal recording with vah265enc (CODEC_STAGES) in place of vah264enc
-#   av1       the normal recording with vaav1enc, muxed as Matroska (AV1_MUXER)
+#   h265      the normal recording in H.265: the same as [capture] format = "h265"
+#   av1       the normal recording in AV1 (Matroska segments): format = "av1"
 #   lowbitrate  the normal recording at LOWBITRATE_SHARE of the bitrate
 #   vbr       the normal recording with QVBR (or VBR) rate control, same target bitrate
 #   lowprio   the normal recording with the encoder made to yield (LOWPRIO_QUEUE)
@@ -122,23 +132,17 @@ STAGES = ("capture", "convert", "encode", "noaudio", "lowpower", "h265", "av1", 
 # rate control stays CBR at the same bitrate, so the written bytes compare.
 LOWPOWER_VA = {"target_usage": 2, "ref_frames": 1, "dct8x8": False}
 
-# h265 / av1: the VA encoder that stands in for vah264enc (vah264lpenc), with the
-# same bitrate, GOP and no B-frames (AV1 has none: no future references instead),
-# and the parser + caps that go where h264parse is.
-CODEC_STAGES = {"h265": "vah265enc", "av1": "vaav1enc"}
+# h265 / av1 debug stages: they force that format (as [capture] format would).
+CODEC_STAGES = {"h265": "h265", "av1": "av1"}
+# The parser + caps after the encoder, per format. Every format gets the same
+# bitrate table, a 1 s GOP and no B-frames (AV1 has none: no future references
+# instead, see _encoder_settings).
 H264_PARSE = "h264parse name=parse config-interval=-1 ! video/x-h264,stream-format=byte-stream"
 PARSERS = {
-    "vah265enc": "h265parse name=parse config-interval=-1 ! video/x-h265,stream-format=byte-stream",
-    "vaav1enc": "av1parse name=parse ! video/x-av1,stream-format=obu-stream,alignment=tu",
+    "h264": H264_PARSE,
+    "h265": "h265parse name=parse config-interval=-1 ! video/x-h265,stream-format=byte-stream",
+    "av1": "av1parse name=parse ! video/x-av1,stream-format=obu-stream,alignment=tu",
 }
-# The ring buffer's "codec" of what an encoder writes (anything else: h264).
-CODECS = {"vah265enc": "h265", "vaav1enc": "av1"}
-# av1 only: mpegtsmux lists video/x-av1, but in GStreamer 1.28 it is a
-# non-standard mapping (refused unless enable-custom-mappings=true) that ffmpeg
-# 8.1 reads as a data stream, so a save would have no video. Matroska carries
-# AV1 properly, and ffmpeg reads byte-joined Matroska segments; the files keep
-# their .ts names (the ring buffer's), ffmpeg goes by content.
-AV1_MUXER = "matroskamux"
 
 # lowbitrate: the share of the normal bitrate (10 Mbps Standard 1080p60 -> 6 Mbps).
 LOWBITRATE_SHARE = 0.6
@@ -314,6 +318,16 @@ class Recorder:
         self.resolution_effective: str | None = None
         self.target = config.capture_target(cfg["capture"])
         self.window_mode = False  # target "window" on a source that can do it (set by start())
+        # The video format: the setting ("auto" | "h264" | "h265" | "av1"), the one
+        # the current (or last) pipeline records in, and (wanted, got) when the
+        # wanted one failed to start and a fallback records instead.
+        self.format = codecs.configured(cfg["capture"])
+        self.format_effective: str | None = None
+        self.format_fallback: tuple[str, str] | None = None
+        self._formats: list[str] = []            # the plan: the format to record in, then fallbacks
+        self._detection: codecs.Detection | None = None
+        self._awaiting_formats = False           # start() waits for codecs.DETECTOR
+        self._start_gen = 0
 
         self._pipeline: Gst.Pipeline | None = None
         self._bus_watch = None
@@ -355,6 +369,8 @@ class Recorder:
         """
         if self._pipeline is not None or (self._portal is not None and not self._stop_requested):
             return
+        if self._awaiting_formats:
+            return  # already starting: waiting for the format detection
         self._stop_requested = False
         self._cancel_retry()
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
@@ -367,22 +383,70 @@ class Recorder:
         if self.target == "window" and not self.window_mode:
             log.warning("window capture needs the screen-share portal; recording the whole %s source",
                         self.source_name)
-        self._variants = self._plan_variants()
-        self._variant_idx = 0
-        if not self._variants:
-            self._fatal("no usable H.264 encoder found (tried: %s)" % ", ".join(ENCODER_ORDER))
-            return
         if (self.window_mode and self.source_name == "portal" and not interactive
                 and not config.portal_token_path("window").exists()):
             # Nothing to restore and nobody asked: don't pop the picker on our own.
             self._stop_requested = True
             self._set_state("no_window", WINDOW_NOT_PICKED)
             return
+        det = self._formats_known()
+        if det is None:
+            # What this machine records isn't known yet (the first start after a
+            # driver change): the test encodes run in a thread, then capture starts.
+            self._awaiting_formats = True
+            self._start_gen += 1
+            gen = self._start_gen
+            self._set_state("starting")
+            codecs.DETECTOR.ensure(lambda _det: GLib.idle_add(self._formats_detected, gen))
+            return
+        self._start_capture(det)
+
+    def _formats_known(self) -> codecs.Detection | None:
+        """The detection to plan with; None while it is still running.
+
+        Not needed (UNKNOWN is enough) for a named encoder or plain H.264, whose
+        encoders are all tried in order anyway.
+        """
+        encoder = self.cfg["capture"].get("encoder", "auto")
+        if encoder not in ("", "auto") or self._wanted_format() == "h264":
+            return codecs.DETECTOR.ready() or codecs.UNKNOWN
+        return codecs.DETECTOR.ready()
+
+    def _formats_detected(self, gen: int) -> bool:
+        if gen != self._start_gen or not self._awaiting_formats:
+            return False  # stopped (and maybe started again) meanwhile
+        self._awaiting_formats = False
+        if self._stop_requested or self._pipeline is not None:
+            return False
+        self._start_capture(codecs.DETECTOR.ready() or codecs.UNKNOWN)
+        return False
+
+    def _wanted_format(self) -> str:
+        """The format setting, or the h265/av1 debug stage's."""
+        stage = debug_stage()
+        return CODEC_STAGES.get(stage, self.format)
+
+    def _start_capture(self, det: codecs.Detection) -> None:
+        self._detection = det
+        wanted = self._wanted_format()
+        if wanted != self.format:
+            log.warning("%s=%s: debug A/B. Recording in %s, as [capture] format = \"%s\" would",
+                        STAGE_ENV, wanted, codecs.label(wanted), wanted)
+        self._formats = codecs.plan(wanted, det, codecs.DETECTOR.failed)
+        self.format_fallback = None
+        self._variants = self._plan_variants()
+        self._variant_idx = 0
+        if not self._variants:
+            self._fatal("no usable video encoder found (tried: %s)" % ", ".join(
+                n for f in self._formats for n in self._format_encoders(f)))
+            return
         self._set_state("starting")
         self._begin()
 
     def stop(self) -> None:
         self._stop_requested = True
+        self._awaiting_formats = False
+        self._start_gen += 1
         self._cancel_retry()
         self._teardown(graceful=True)
         self._close_portal()
@@ -479,9 +543,19 @@ class Recorder:
 
     # --- startup ------------------------------------------------------------------
 
+    def _format_encoders(self, fmt: str) -> list[str]:
+        """The encoders to try for one format: H.264 all of ENCODER_ORDER (hardware,
+        then software); H.265 / AV1 the hardware ones whose test encode passed."""
+        if fmt == "h264":
+            return list(ENCODER_ORDER)
+        return (self._detection or codecs.UNKNOWN).encoders(fmt)
+
     def _plan_variants(self) -> list[_Variant]:
         wanted = self.cfg["capture"].get("encoder", "auto")
-        names = ENCODER_ORDER if wanted in ("", "auto") else [wanted]
+        if wanted not in ("", "auto"):
+            names = [wanted]   # one named encoder: its format, whatever [capture] format says
+        else:
+            names = [n for fmt in (self._formats or ["h264"]) for n in self._format_encoders(fmt)]
         out = []
         for name in names:
             if not _have(name):
@@ -591,10 +665,10 @@ class Recorder:
             self._next_variant_or_fail(str(e))
             return
         enc = pipeline.get_by_name("enc")
-        # A debug stage may have swapped the encoder (h265, av1).
         self.encoder_name = enc.get_factory().get_name() if enc is not None else variant.encoder
-        log.info("starting capture: source=%s encoder=%s", self.source_name,
-                 variant if self.encoder_name == variant.encoder else self.encoder_name)
+        self.format_effective = codecs.format_of(self.encoder_name)
+        log.info("starting capture: source=%s encoder=%s format=%s", self.source_name, variant,
+                 codecs.label(self.format_effective))
         self._pipeline = pipeline
         self._session = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
         self._params = None
@@ -609,9 +683,26 @@ class Recorder:
             self._teardown(graceful=False)
             self._next_variant_or_fail(f"{variant}: failed to enter PLAYING")
 
-    def _next_variant_or_fail(self, message: str) -> None:
-        """Before any footage exists, fall back to the next encoder/conversion path."""
+    def _next_variant_or_fail(self, message: str, source_lost: bool = False) -> None:
+        """Before any footage exists, fall back to the next encoder/conversion path.
+
+        Moving on to another format (AV1 -> H.265 -> H.264) means the format failed
+        to start: it is remembered for this process (codecs.DETECTOR.failed, so
+        later starts skip it) and reported in ``format_fallback``. A failure of
+        the video source is not the encoder's: it never changes the format.
+        """
         if self._variant_idx + 1 < len(self._variants):
+            cur = codecs.format_of(self._variants[self._variant_idx].encoder)
+            nxt = codecs.format_of(self._variants[self._variant_idx + 1].encoder)
+            if nxt != cur:
+                if source_lost:
+                    self._error_and_retry(message)
+                    return
+                codecs.DETECTOR.failed.add(cur)
+                wanted = self._formats[0] if self._formats else cur
+                self.format_fallback = (wanted, nxt)
+                log.warning("%s didn't start (%s): recording in %s instead",
+                            codecs.label(cur), message, codecs.label(nxt))
             self._variant_idx += 1
             log.info("falling back to %s", self._variants[self._variant_idx])
             GLib.idle_add(self._retry_build)
@@ -709,6 +800,10 @@ class Recorder:
             self._size_caps = "video/x-raw(memory:VAMemory),format=NV12"
         elif v.encoder in ("x264enc", "openh264enc"):
             self._size_caps = f"video/x-raw,format=I420,framerate={fps}"
+        elif codecs.format_of(v.encoder) != "h264":
+            # NVENC / Quick Sync H.265 and AV1 also take 10-bit input; keep them 8-bit
+            # (a 10-bit stream may not play everywhere; the VA paths are NV12 as well).
+            self._size_caps = f"video/x-raw,format=NV12,framerate={fps}"
         else:
             self._size_caps = f"video/x-raw,framerate={fps}"
         sized = f'capsfilter name=size caps="{self._output_caps()}"'
@@ -728,7 +823,7 @@ class Recorder:
 
     def _encoder_tail(self, v: _Variant) -> str:
         first = f"{LOWPRIO_QUEUE} ! " if self._stage == "lowprio" else ""
-        return f"{first}{v.encoder} name=enc ! {PARSERS.get(v.encoder, H264_PARSE)} ! queue ! mux.video"
+        return f"{first}{v.encoder} name=enc ! {PARSERS[codecs.format_of(v.encoder)]} ! queue ! mux.video"
 
     def _audio_chain(self) -> str | None:
         a = self.cfg["audio"]
@@ -782,8 +877,6 @@ class Recorder:
                      if v.encoder in VA_ENCODERS else f"nothing to change on {v.encoder}")
             log.warning("%s=lowpower: debug A/B. Recording normally with the encoder at its cheapest (%s)",
                         STAGE_ENV, cheap)
-        elif stage in CODEC_STAGES:
-            v = self._codec_variant(v, stage)
         elif stage == "lowbitrate":
             log.warning("%s=lowbitrate: debug A/B. Recording normally at %d%% of the bitrate "
                         "(%s at %d kbps instead of %d)", STAGE_ENV, round(LOWBITRATE_SHARE * 100),
@@ -793,9 +886,11 @@ class Recorder:
                         "2-frame queue before %s (frames drop instead of piling up) and its streaming thread at "
                         "SCHED_IDLE, nice %d (radeonsi's VA encoder has no lower-priority context)",
                         STAGE_ENV, v.encoder, LOWPRIO_NICE)
-        muxer = AV1_MUXER if v.encoder == "vaav1enc" else "mpegtsmux"
+        # MPEG-TS for H.264 / H.265, Matroska for AV1 (codecs.CONTAINERS).
+        muxer, suffix = codecs.container(codecs.format_of(v.encoder))
         parts = [
-            f"splitmuxsink name=mux muxer={muxer} send-keyframe-requests=true max-files=0 max-size-bytes=0",
+            f'splitmuxsink name=mux muxer="{codecs.muxer_description(muxer)}" send-keyframe-requests=true '
+            "max-files=0 max-size-bytes=0",
             f"{self._video_source()} ! {self._video_chain(v)}",
         ]
         audio = None if stage == "noaudio" else self._audio_chain()
@@ -808,7 +903,7 @@ class Recorder:
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
         mux = pipeline.get_by_name("mux")
         mux.set_property("max-size-time", seg_ns)
-        mux.set_property("location", str(self.buffer_dir / "seg%08d.ts"))
+        mux.set_property("location", str(self.buffer_dir / f"seg%08d{suffix}"))
         mux.set_property("start-index", self._next_index)
 
         self._setup_source(pipeline, v)
@@ -838,22 +933,6 @@ class Recorder:
         # fixed offset (audio devices would otherwise provide a drifting clock).
         pipeline.use_clock(Gst.SystemClock.obtain())
         return pipeline
-
-    def _codec_variant(self, v: _Variant, stage: str) -> _Variant:
-        """h265 / av1: ``v`` with CODEC_STAGES' encoder in place of its VA H.264 one (logs the stage)."""
-        encoder = CODEC_STAGES[stage]
-        if v.encoder not in VA_ENCODERS or not _have(encoder):
-            log.warning("%s=%s: debug A/B, but %s can't stand in for %s here: recording normally",
-                        STAGE_ENV, stage, encoder, v.encoder)
-            return v
-        if encoder == "vaav1enc":
-            mux = (f"muxed by {AV1_MUXER}, not mpegtsmux (its AV1 mapping is non-standard and ffmpeg can't "
-                   "read it); segments keep .ts names, ffmpeg saves them by content")
-        else:
-            mux = "in MPEG-TS as usual"
-        log.warning("%s=%s: debug A/B. Recording normally with %s in place of %s (same bitrate %d kbps, "
-                    "GOP %d, no B-frames), %s", STAGE_ENV, stage, encoder, v.encoder, self._kbps, self.fps, mux)
-        return _Variant(encoder, v.zero_copy)
 
     def _setup_source(self, pipeline: Gst.Pipeline, v: _Variant) -> None:
         src = pipeline.get_by_name("src")
@@ -932,9 +1011,10 @@ class Recorder:
             _set(enc, bitrate=kbps, key_int_max=gop, b_frames=0)
             if name == "vaav1enc":
                 _set(enc, hierarchical_level=1)  # AV1's "no B-frames": no future references, no reordering
-        elif name == "vaapih264enc":
+        elif name in ("vaapih264enc", "vaapih265enc"):
             _set(enc, bitrate=kbps, keyframe_period=gop, max_bframes=0)
-        elif name in ("nvh264enc", "qsvh264enc"):
+        elif name.startswith(("nv", "qsv")):
+            # NVENC / Quick Sync, any format (a property the element lacks is skipped)
             _set(enc, bitrate=kbps, gop_size=gop, bframes=0, b_frames=0)
         elif name == "x264enc":
             _set(enc, bitrate=kbps, key_int_max=gop, tune="zerolatency", speed_preset="veryfast", bframes=0)
@@ -1062,9 +1142,9 @@ class Recorder:
             return
         wall = self._wall(rt)
         if name == "splitmuxsink-fragment-opened":
-            m = re.search(r"(\d+)\.ts$", location)
-            if m:
-                self._next_index = int(m.group(1)) + 1
+            n = segment_number(location)
+            if n is not None:
+                self._next_index = n + 1
             self._open[location] = wall
             self.ring.opened(location, wall, session=self._session, **self._stream_params())
             log.debug("segment opened %s at %.3f", location, wall)
@@ -1109,7 +1189,7 @@ class Recorder:
         if fps is None:
             fps = self.fps
         enc = pipeline.get_by_name("enc") if pipeline is not None else None
-        codec = CODECS.get(enc.get_factory().get_name(), "h264") if enc is not None else "h264"
+        codec = codecs.format_of(enc.get_factory().get_name()) if enc is not None else "h264"
         params = {"width": width, "height": height, "fps": fps, "codec": codec,
                   "audio": pipeline is not None and pipeline.get_by_name("aenc") is not None}
         if width is not None:
@@ -1167,7 +1247,7 @@ class Recorder:
             # Never produced footage: most likely caps negotiation or encoder
             # init failed. Try the next path before calling it an error.
             if self._variant_idx + 1 < len(self._variants):
-                self._next_variant_or_fail(message)
+                self._next_variant_or_fail(message, source_lost=source_lost)
                 return
         if self.source_name == "portal":
             # The screencast session is probably gone; get a fresh one.
@@ -1289,10 +1369,9 @@ class Recorder:
         if self._stop_requested or self._pipeline is not None:
             return False
         log.info("retrying capture")
-        # Earlier footage stays; the new pipeline starts a new session.
-        self._variant_idx = 0
-        self._set_state("starting")
-        self._begin()
+        # Earlier footage stays; the new pipeline starts a new session. Planned
+        # again, so a format that failed to start meanwhile is skipped.
+        self._start_capture(self._detection or codecs.UNKNOWN)
         return False
 
     def _cancel_retry(self) -> None:

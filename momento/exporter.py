@@ -21,6 +21,13 @@ is cut as above into a temporary MP4 piece, and the pieces are joined with the
 between sessions is skipped and each piece keeps its own A/V sync. Pieces must
 share resolution, frame rate, codec and audio layout; the ring buffer only
 selects such runs.
+
+Per codec (``Segment.codec``): H.264 and H.265 segments are MPEG-TS, AV1 ones
+Matroska written "streamable" (unknown sizes: ffmpeg reads byte-joined ones
+through to the last, where sized ones stop after the first); the same
+byte-concatenation and cut work for both. H.265 gets the
+``hvc1`` sample entry in the MP4 (what Apple devices and browsers expect; ffmpeg
+would write ``hev1``). Every clip is MP4 with the video and AAC audio copied.
 """
 
 from __future__ import annotations
@@ -39,6 +46,9 @@ log = logging.getLogger(__name__)
 
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
+
+# Extra ffmpeg output options per codec, for the MP4.
+MP4_OPTIONS = {"h265": ["-tag:v", "hvc1"]}
 
 
 class ExportError(RuntimeError):
@@ -129,6 +139,12 @@ def snap_offset(offset: float, keyframes: list[float]) -> float:
     return max(0.0, min(keyframes, key=lambda k: abs(k - offset)))
 
 
+def codec_options(segments) -> list[str]:
+    """MP4_OPTIONS for the codec of ``segments`` (all one codec; unknown: H.264)."""
+    codec = next((s.codec for s in segments if getattr(s, "codec", None)), None) or "h264"
+    return list(MP4_OPTIONS.get(codec, []))
+
+
 def _cut(segments, offset: float, duration: float, out: Path, fmt: str, list_path: Path) -> None:
     """One session's segments -> out (stream copy), starting on the keyframe nearest offset."""
     end = offset + duration
@@ -147,12 +163,12 @@ def _cut(segments, offset: float, duration: float, out: Path, fmt: str, list_pat
             "-map", "0:v?", "-map", "0:a?", "-dn", "-sn",
             "-c", "copy", "-avoid_negative_ts", "make_zero"]
     if fmt == "mp4":
-        cmd += ["-movflags", "+faststart"]
+        cmd += codec_options(segments) + ["-movflags", "+faststart"]
     cmd += ["-f", fmt, str(out)]
     _run(cmd, out)
 
 
-def _join(pieces: list[Path], out: Path, list_path: Path) -> None:
+def _join(pieces: list[Path], out: Path, list_path: Path, options=()) -> None:
     """Concatenate MP4 pieces (each starting at 0) back to back; the gaps between them vanish.
 
     The concat demuxer shifts every piece by the summed durations of the pieces
@@ -170,7 +186,7 @@ def _join(pieces: list[Path], out: Path, list_path: Path) -> None:
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
            "-f", "concat", "-safe", "0", "-i", str(list_path),
            "-map", "0:v?", "-map", "0:a?", "-dn", "-sn",
-           "-c", "copy", "-avoid_negative_ts", "make_zero",
+           "-c", "copy", "-avoid_negative_ts", "make_zero", *options,
            "-movflags", "+faststart", "-f", "mp4", str(out)]
     _run(cmd, out)
 
@@ -229,7 +245,7 @@ def export(selection, out_path: Path) -> Path:
             if len(pieces) == 1:
                 os.replace(pieces[0], tmp)
             else:
-                _join(pieces, tmp, list_path)
+                _join(pieces, tmp, list_path, codec_options(selection.segments))
         os.replace(tmp, out_path)
         return out_path
     finally:

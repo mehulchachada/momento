@@ -1,4 +1,8 @@
-"""On-disk ring buffer of short, keyframe-aligned MPEG-TS segments.
+"""On-disk ring buffer of short, keyframe-aligned segments.
+
+Segments are MPEG-TS (``segNNNNNNNN.ts``) for H.264 and H.265 and Matroska
+(``segNNNNNNNN.mkv``) for AV1 (see ``codecs.CONTAINERS``); both kinds share one
+numbering, and each records its codec, so footage of two formats is never joined.
 
 The encoder writes a new segment every few seconds. Each closed segment is
 appended to ``<buffer>/index.jsonl`` (file, wall-clock span, capture session and
@@ -31,7 +35,9 @@ log = logging.getLogger(__name__)
 INDEX_NAME = "index.jsonl"
 # Stream parameters that must match for two sessions to be joined by stream copy.
 PARAMS = ("width", "height", "fps", "codec", "audio")
-_NUM_RE = re.compile(r"(\d+)\.ts$")
+# Every segment file suffix the recorder writes (codecs.CONTAINERS).
+SEGMENT_SUFFIXES = (".ts", ".mkv")
+_NUM_RE = re.compile(r"(\d+)\.(?:ts|mkv)$")
 # Segments that closed at least this long before the newest one are dropped from
 # the page cache (their dirty pages have been written back by then, so the
 # advice takes effect without forcing an fsync).
@@ -114,6 +120,19 @@ def _index_of(path: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def segment_number(path) -> int | None:
+    """"…/seg00000123.ts" or ".mkv" -> 123; None for any other name."""
+    return _index_of(Path(path))
+
+
+def segment_files(directory: Path) -> list[Path]:
+    """The segment files (any SEGMENT_SUFFIXES) directly in ``directory``."""
+    try:
+        return [p for p in directory.iterdir() if p.suffix in SEGMENT_SUFFIXES and p.is_file()]
+    except OSError:
+        return []
+
+
 def _mismatch_reason(old: tuple, new: tuple) -> str:
     o = dict(zip(PARAMS, old))
     n = dict(zip(PARAMS, new))
@@ -162,7 +181,7 @@ class RingBuffer:
 
         Loads the index on first use, drops entries whose file is gone or empty,
         forgets segments that were never closed (the capture died mid-write) and
-        deletes any *.ts file the index does not know about, then rewrites the
+        deletes any segment file the index does not know about, then rewrites the
         index. Call it while no pipeline is writing.
         """
         with self._lock:
@@ -188,7 +207,7 @@ class RingBuffer:
             self._segments = keep
             known = {s.path.name for s in keep}
             highest = max([n for n in (_index_of(s.path) for s in keep) if n is not None], default=-1)
-            for p in self.directory.glob("*.ts"):
+            for p in segment_files(self.directory):
                 if p.name in known:
                     continue
                 log.info("removing stray segment %s", p.name)
@@ -295,7 +314,7 @@ class RingBuffer:
             for seg in doomed:
                 _unlink(seg.path)
             if self.directory is not None:
-                for p in self.directory.glob("*.ts"):
+                for p in segment_files(self.directory):
                     if p not in {s.path for s in self._segments}:
                         _unlink(p)
                 if self._segments:
