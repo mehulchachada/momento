@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import config, durations, protocol, quality, settings, storage
+from . import codecs, config, durations, protocol, quality, settings, storage
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +240,8 @@ class Daemon:
         self.pads = None
         self._pads_handle = None
         self._pads_managed = False  # set by start(), like the bar
+        # Video format fallbacks already notified, (wanted, got): one notification each.
+        self._fallbacks_told: set[tuple[str, str]] = set()
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -248,6 +250,9 @@ class Daemon:
         from .pipeline import Recorder
 
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
+        # What this machine records (H.264 / H.265 / AV1): cached per GPU and driver,
+        # else a few tiny test encodes in a thread. A start that needs it waits for it.
+        codecs.DETECTOR.ensure()
         # Pick up footage from before a restart/reboot (drops strays and the
         # unfinished last segment); saveable even if capture cannot start.
         self.ring.recover()
@@ -490,6 +495,8 @@ class Daemon:
             if size is not None and size != self.source_size:
                 self.source_size = size
                 log.info("recording a %dx%d picture", *size)
+        if state == "recording":
+            self._tell_format_fallback()
         if state == "recording" and self._window_target():
             self._look_up_target_name()
         if state != "no_window":
@@ -514,6 +521,29 @@ class Daemon:
         self.paused = True
         self.stopped = self.hours.footage == 0
         log.info("no window to record; %s", "stopped" if self.stopped else "paused")
+
+    def _tell_format_fallback(self) -> None:
+        """The format picked failed to start and another one records: say so, once per pair."""
+        fallback = getattr(self.recorder, "format_fallback", None)
+        if not fallback or tuple(fallback) in self._fallbacks_told:
+            return
+        self._fallbacks_told.add(tuple(fallback))
+        wanted, got = (codecs.label(f) for f in fallback)
+        notify(self.bus, f"Momento: recording in {got}",
+               f"{wanted} didn't start on this PC, so your replay is recorded in {got}.", "dialog-information")
+
+    def format_effective(self, cfg: dict | None = None) -> str | None:
+        """The format recording is (or would be) in: the running recorder's, else the plan
+        from the machine's detection; None while Auto's pick is still unknown."""
+        cfg = cfg or self.cfg
+        fmt = getattr(self.recorder, "format_effective", None) if cfg is self.cfg else None
+        if isinstance(fmt, str):
+            return fmt
+        setting = codecs.configured(cfg["capture"])
+        det = codecs.DETECTOR.ready()
+        if det is None and setting == "auto":
+            return None
+        return codecs.effective(setting, det, codecs.DETECTOR.failed)
 
     def _window_target(self) -> bool:
         return config.capture_target(self.cfg["capture"]) == "window"
@@ -872,7 +902,9 @@ class Daemon:
                     cfg = config.load(path)  # what is saved, which the UI edits
                 except (OSError, ValueError):
                     cfg = fallback
-                result = settings.describe(cfg, source=source)
+                # the format detection runs at start; wait for it here (a worker thread)
+                det = codecs.DETECTOR.wait(timeout=30) or codecs.UNKNOWN
+                result = settings.describe(cfg, source=source, formats=det, failed=codecs.DETECTOR.failed)
                 result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source)
             except Exception as e:  # noqa: BLE001
                 log.exception("settings failed")
@@ -1046,6 +1078,10 @@ class Daemon:
             "quality": self.cfg["capture"]["quality"],
             "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"], self.source_size),
             "fps": quality.fps(self.cfg["capture"]),
+            # The format setting, and what is really recorded (a fallback when the
+            # one picked failed to start); null while Auto's pick is unknown.
+            "format": codecs.configured(self.cfg["capture"]),
+            "format_effective": self.format_effective(),
             "storage": self._storage_status(),
         }
         if self.state == "no_storage" and not self.paused and self.storage_error:
@@ -1226,11 +1262,13 @@ def _size(path) -> int:
 
 
 def _clean_dir(path: Path) -> None:
-    """Remove leftover segments. Only touches *.ts files in our own buffer dir."""
+    """Remove leftover segments. Only touches segment (.ts / .mkv) and .tmp files in our own buffer dir."""
+    from .ringbuffer import SEGMENT_SUFFIXES
+
     if not path.is_dir():
         return
     for p in path.iterdir():
-        if p.is_file() and p.suffix in (".ts", ".tmp"):
+        if p.is_file() and p.suffix in SEGMENT_SUFFIXES + (".tmp",):
             try:
                 p.unlink()
             except OSError:

@@ -100,6 +100,9 @@ Commands (fields are in ``COMMANDS``)
     changes). ``resolution_effective`` is what is really recorded: ``resolution``,
     or ``"native"`` when that preset is taller than the source (see Resolution
     cap below); ``bitrate_kbps`` is the bitrate of what is really recorded.
+    ``format`` is the video format setting (``FORMAT_CHOICES``) and
+    ``format_effective`` the one really recorded (see Video formats below),
+    null while Auto's pick is not known yet.
 ``save`` {seconds}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
@@ -165,7 +168,10 @@ Commands (fields are in ``COMMANDS``)
     ``choices.resolution`` worth offering for that source, in the same order;
     all of them while it is unknown) and ``resolution_effective`` (what the
     saved ``resolution`` would record at). The ``storage.required`` bytes count
-    what would really be recorded.
+    what would really be recorded. ``format_allowed`` (the
+    ``choices.format`` this machine can record, ``"auto"`` always),
+    ``format_auto`` (what Auto records in here, null while unknown) and
+    ``format_effective`` (what the saved ``format`` records in).
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
@@ -210,6 +216,21 @@ the smallest preset at least as tall as what is really recorded, for
 ``source_size`` yet MAY apply the rule to the largest screen it can see (in
 physical pixels), which is what the clip bar does to grey out choices.
 
+Video formats: ``FORMAT_CHOICES`` (auto, h264, h265, av1; default auto).
+Clips are MP4 in every format. The daemon test-encodes a few frames with each
+hardware encoder once per GPU + driver (cached); formats with no working
+hardware encoder are left out of ``format_allowed`` (H.264 is always allowed:
+software is its last resort). Auto records in AV1 on AMD GPUs whose AV1 test
+encode works (VCN 4 and newer), else H.264 (else the first of AV1, H.265 with
+working hardware). A format that fails to start falls back to the next one
+that works in the order AV1 -> H.265 -> H.264 (``format_effective`` says which;
+the daemon sends one desktop notification). A ``format`` this machine can't
+record is saved as asked and records in that fallback. Changing ``format``
+restarts capture like ``resolution``; earlier footage in another format stays
+saveable, but a save never joins two formats (the newest run is kept, with
+``reason`` "earlier footage used a different video format"). The bitrate and
+storage math are the same for every format.
+
 Storage math: full buffer = (video kbps + audio kbps, audio counted only when
 desktop sound or the mic is on) * 1000 / 8 * max_seconds * 1.05; required =
 full buffer + 1 GiB reserve; a start fits when free + reclaimable >= required,
@@ -227,12 +248,13 @@ Files other implementations must stay compatible with
 -----------------------------------------------------
 * ``$XDG_CONFIG_HOME/momento/config.toml``: keys and defaults in
   ``momento/config.py`` ``DEFAULTS``; edits replace single lines, keep comments.
-* Buffer dir (``buffer.dir``): segments ``seg%08d.ts`` (MPEG-TS, H.264 GOP 1 s,
-  each decodable alone), numbering continues after the highest kept one;
+* Buffer dir (``buffer.dir``): segments ``seg%08d.ts`` (MPEG-TS: H.264, H.265)
+  or ``seg%08d.mkv`` (Matroska: AV1), GOP 1 s, each decodable alone; one
+  numbering for both, continuing after the highest kept one;
   ``index.jsonl`` holds one object per closed segment,
   ``INDEX_RECORD`` fields, appended on close, rewritten atomically via
   ``.index.jsonl.tmp`` on prune; readers skip unparsable lines, missing/empty
-  files and duplicates; unindexed ``*.ts`` are deleted on start.
+  files and duplicates; unindexed ``*.ts`` / ``*.mkv`` are deleted on start.
 * Clips: ``output.filename`` template with ``{date}`` (YYYY-MM-DD), ``{time}``
   (HH-MM-SS), ``{length}`` (``15s``/``5m``/``3m20s``); ``/`` -> ``_``, ``.mp4``
   appended if missing, ``_2``, ``_3``... on collision.
@@ -263,6 +285,8 @@ RESOLUTION_TOLERANCE = 0.02
 # quality.MAX_HEIGHT. Additive: 1440p/2160p come back by raising MAX_HEIGHT.
 RESOLUTION_CHOICES = ("720p", "1080p", "native")
 MAX_HEIGHT = 1080
+# The video formats (settings choices.format, in order). Same as codecs.CHOICES.
+FORMAT_CHOICES = ("auto", "h264", "h265", "av1")
 MAX_REQUEST_BYTES = 1 << 20  # daemon socket; the clip-bar socket allows 64 KiB
 CLIP_BAR_MAX_REQUEST_BYTES = 1 << 16
 
@@ -342,6 +366,7 @@ SETTING_VALUES = {
     "quality": (("string",), True),
     "fps": (("integer",), True),
     "bitrate": (("integer",), True),       # video kbps, 0 = automatic
+    "format": (("string",), False),        # one of choices.format: "auto" (default) | "h264" | "h265" | "av1"
     "audio_source": (("string",), True),   # "default" | "off" | monitor source name
     "mic": (("string",), True),            # "on" | "off"
     "mic_device": (("string",), True),     # "default" | source name
@@ -363,6 +388,7 @@ SETTING_CHOICES = {
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),
+    "format": (("array",), False),         # ["auto", "h264", "h265", "av1"]
     "controller": (("array",), False),     # ["off", <preset keys>]
     "controller_open": (("array",), False),  # ["hold", "tap"]
     "keep_history": (("array",), False),   # ["off", "on"]
@@ -418,6 +444,9 @@ COMMANDS: dict[str, dict] = {
             "quality": (("string",), True),
             "bitrate_kbps": (("integer",), True),   # effective video bitrate
             "fps": (("integer",), True),
+            # The reference daemon always sends these two (absent on older daemons):
+            "format": (("string",), False),                # the setting (FORMAT_CHOICES)
+            "format_effective": (("string", "null"), False),  # "h264" | "h265" | "av1" really recorded
             "storage": ((STORAGE_CHECK,), True),
             "error": (("string",), False),          # with state error / no_storage (/ no_window, older)
             "protocol": (("integer",), False),      # REQUIRED by the spec; see Pending implementation
@@ -529,6 +558,9 @@ COMMANDS: dict[str, dict] = {
             "source_size": (("array", "null"), False),      # as in status
             "resolution_allowed": (("array",), False),      # choices.resolution that fit the source
             "resolution_effective": (("string",), False),   # what the saved resolution records at
+            "format_allowed": (("array",), False),          # choices.format this machine can record
+            "format_auto": (("string", "null"), False),     # what Auto records in here (null: unknown)
+            "format_effective": (("string", "null"), False),  # what the saved format records in
         },
         "error": {},
     },
@@ -562,7 +594,7 @@ INDEX_RECORD = {
     "width": (("integer", "null"), True),
     "height": (("integer", "null"), True),
     "fps": (("number", "null"), True),
-    "codec": (("string", "null"), True),      # "h264"
+    "codec": (("string", "null"), True),      # "h264" | "h265" | "av1"
     "audio": (("boolean", "null"), True),
 }
 
@@ -636,6 +668,11 @@ def _check_enums(obj: dict) -> list[str]:
         problems.append(f"unknown error code {obj['code']!r}")
     if isinstance(obj.get("stop_reason"), str) and obj["stop_reason"] not in STOP_REASONS:
         problems.append(f"unknown stop_reason {obj['stop_reason']!r}")
+    if isinstance(obj.get("format"), str) and obj["format"] not in FORMAT_CHOICES:
+        problems.append(f"unknown format {obj['format']!r}")
+    for name in ("format_effective", "format_auto"):
+        if isinstance(obj.get(name), str) and obj[name] not in FORMAT_CHOICES[1:]:
+            problems.append(f"{name}: expected one of {', '.join(FORMAT_CHOICES[1:])}, got {obj[name]!r}")
     size = obj.get("source_size")
     if isinstance(size, list) and not (len(size) == 2 and all(_PY["integer"](v) and v > 0 for v in size)):
         problems.append("source_size: expected [width, height] (positive integers) or null")
