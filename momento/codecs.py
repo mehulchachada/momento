@@ -19,6 +19,10 @@ Detection (``Detector``), done once per machine and cached:
    version). When the key changes (new GPU, driver or GStreamer), the test
    encodes run again.
 
+A format whose start kills the daemon (a driver abort, which no GStreamer
+fallback can catch) is caught by ``START_GUARD`` at the next daemon start and
+skipped on this GPU and driver until picked again (see "the crash guard").
+
 Software encoders (x264, openh264) are never tested and never make Auto pick a
 format: they cost the game far more CPU than any hardware encoder. H.264 still
 falls back to them, as the last resort when no hardware H.264 works.
@@ -98,24 +102,48 @@ PCI_VENDORS = {"0x1002": "amd", "0x8086": "intel", "0x10de": "nvidia"}
 # Auto picks, first match wins:
 #   1. AUTO_RULES: (GPU vendor, encoder whose test encode passed, format). Add rows
 #      here from tester reports (a format measured smoother than H.264 in real games
-#      on that hardware).
-#   2. H.264, when a hardware H.264 encoder works (plays everywhere).
+#      on that hardware, and stable there).
+#   2. H.264, when a hardware H.264 encoder works (plays everywhere). With the table
+#      empty, this is what Auto records in on every PC that has one.
 #   3. Otherwise the first format of FALLBACK with a working hardware encoder (stock
 #      Fedora Mesa: no H.264/H.265 VA encode, but AV1 is royalty-free and works).
 #   4. H.264 (software, the last resort; nothing else can record at all).
 #
-# AMD + vaav1enc -> AV1. Only VCN 4.0 and newer encode AV1: RDNA3 dGPUs (RX 7000),
-# and the Phoenix / Hawk Point / Strix APUs (Ryzen 7040/8040/AI 300, Z1 / Z2 in the
-# ROG Ally and Legion Go). VCN 3 (RDNA2, the Steam Deck's Van Gogh, Rembrandt)
-# decodes AV1 but has no AV1 encoder, and Mesa then doesn't expose an AV1 encode
-# entry point, so vaav1enc's test encode fails there. A working test encode on an
-# AMD GPU is therefore itself the "VCN 4 or newer" check, without a list of PCI
-# ids that goes stale with every new chip. Why AV1 there: in real-game A/B runs on
-# the ROG Ally (Z1 Extreme, 1080p60), AV1 had fewer frame-time spikes than H.264
-# in all three runs, with H.265 in between.
+# AMD + vaav1enc -> AV1 is switched off for now. On 2026-09-27 a ROG Ally (Z1
+# Extreme, Mesa 26.2.1 radeonsi, VCN 4) recording Full screen 1080p60 at Ultra
+# (25 Mbps) in AV1 hung the video engine ("ring vcn_unified_0 timeout") 3-5 s after
+# every start, and radeonsi then called abort(): the service crashed four times in
+# a row. Earlier AV1 runs at Standard (10 Mbps) on the same machine were fine.
+# Put the row back once AV1 is proven stable there (see START_GUARD for the crash
+# guard that catches a format killing the process).
+#
+# Why the row existed: only VCN 4.0 and newer encode AV1 (RDNA3 dGPUs, the Phoenix /
+# Hawk Point / Strix APUs, Z1 / Z2 in the ROG Ally and Legion Go); VCN 3 has no AV1
+# encoder, so vaav1enc's test encode fails there and a passing one is itself the
+# "VCN 4 or newer" check. In real-game A/B runs on the ROG Ally (1080p60, 10 Mbps),
+# AV1 had fewer frame-time spikes than H.264 in all three runs.
 AUTO_RULES = (
-    ("amd", "vaav1enc", "av1"),
+    # ("amd", "vaav1enc", "av1"),   # off since the 2026-09-27 VCN hang, see above
 )
+
+# --- the crash guard --------------------------------------------------------------
+#
+# The fallback above only catches GStreamer errors. A driver that aborts (radeonsi
+# called abort() after the VCN hang of 2026-09-27) kills the whole process, so
+# nothing in it can fall back, and systemd restarts it straight into the same
+# crash. START_GUARD leaves a marker (GUARD_NAME, in the cache dir) just before a
+# pipeline starts in a GUARDED format, and removes it once that recording has run
+# STABLE_SECONDS or on any clean stop (Stop, pause, a settings change, SIGTERM from
+# a service restart, logout or shutdown). A marker still there when the daemon
+# starts means the last process died while that format was starting: the crash is
+# counted in formats.json under the GPU/driver key it ran with, and from
+# CRASH_LIMIT crashes on, Auto and a manual pick of that format skip it (the next
+# format of FALLBACK records instead) until the key changes (new driver or GPU:
+# detection runs again) or the user picks the format again (Detector.clear_crash).
+GUARD_NAME = "format-start.json"
+GUARDED = ("av1", "h265")   # H.264 is the last resort: there is nothing to fall back to
+STABLE_SECONDS = 45         # the 2026-09-27 hangs came 3-5 s after each start
+CRASH_LIMIT = 1
 
 PROBE_FRAMES = 10
 PROBE_SIZE = (320, 240)
@@ -166,6 +194,28 @@ def label(fmt: str | None) -> str:
     return LABELS.get(str(fmt), str(fmt))
 
 
+def _names(formats) -> str:
+    """"AV1" / "H.265 and AV1" ("" for none)."""
+    names = [LABELS[f] for f in FORMATS if f in set(formats)]
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def crash_message(fmt: str, got: str | None) -> str:
+    """"AV1 stopped working on this PC, so Momento switched to H.264" (the notification, status)."""
+    text = f"{label(fmt)} stopped working on this PC"
+    return f"{text}, so Momento switched to {label(got)}" if got and got != fmt else text
+
+
+def crashed_note(formats) -> str:
+    """The clip bar's note for crashed formats: "AV1 stopped working here. Pick it again to retry"."""
+    what = _names(formats)
+    if not what:
+        return ""
+    return f"{what} stopped working here. Pick {'it' if ' and ' not in what else 'one'} again to retry"
+
+
 def unavailable_message(formats) -> str:
     """"Your graphics chip can't record AV1" / "... H.265 or AV1" ("" for none)."""
     names = [LABELS[f] for f in FORMATS if f in set(formats)]
@@ -185,6 +235,8 @@ class Detection:
     present: tuple[str, ...] = ()                      # hardware encoders GStreamer has
     known: bool = True
     key: dict | None = None
+    # format -> starts in it that crashed the process (START_GUARD), for this key
+    crashes: dict[str, int] = field(default_factory=dict)
 
     def encoders(self, fmt: str) -> list[str]:
         """The hardware encoders of ``fmt`` to use, in order (only those that passed, when known)."""
@@ -197,32 +249,48 @@ class Detection:
         return bool(self.encoders(fmt))
 
     def available(self, fmt: str) -> bool:
-        """Can this machine record ``fmt``? H.264 always (software is its last resort)."""
+        """Can this machine record ``fmt``? H.264 always (software is its last resort).
+
+        A format that crashed is still available (the user may pick it again to
+        retry); ``plan`` skips it."""
         return fmt == "h264" or not self.known or self.hardware(fmt)
 
-    def auto(self) -> str:
-        """The format Auto records in here (see AUTO_RULES)."""
+    def is_crashed(self, fmt: str) -> bool:
+        """Did starts in ``fmt`` kill the process here (START_GUARD) often enough to skip it?"""
+        return fmt in GUARDED and self.crashes.get(fmt, 0) >= CRASH_LIMIT
+
+    def crashed(self) -> list[str]:
+        return [f for f in FORMATS if self.is_crashed(f)]
+
+    def auto(self, skip_crashed: bool = True) -> str:
+        """The format Auto records in here (see AUTO_RULES); a format that crashed is skipped."""
         if not self.known:
             return "h264"
+
+        def ok(fmt):
+            return not (skip_crashed and self.is_crashed(fmt))
         for vendor, encoder, fmt in AUTO_RULES:
-            if self.vendor == vendor and self.works.get(encoder):
+            if self.vendor == vendor and self.works.get(encoder) and ok(fmt):
                 return fmt
         if self.hardware("h264"):
             return "h264"
         for fmt in FALLBACK:
-            if self.hardware(fmt):
+            if self.hardware(fmt) and ok(fmt):
                 return fmt
         return "h264"
 
     def to_json(self) -> dict:
         return {"version": PROBE_VERSION, "key": self.key, "vendor": self.vendor,
-                "present": list(self.present), "works": dict(self.works), "checked": round(time.time())}
+                "present": list(self.present), "works": dict(self.works),
+                "crashes": {f: n for f, n in self.crashes.items() if n}, "checked": round(time.time())}
 
     @classmethod
     def from_json(cls, data: dict) -> Detection:
         works = data.get("works") or {}
+        crashes = data.get("crashes") or {}
         return cls(vendor=data.get("vendor"), works={str(k): bool(v) for k, v in works.items()},
-                   present=tuple(str(n) for n in data.get("present") or ()), known=True, key=data.get("key"))
+                   present=tuple(str(n) for n in data.get("present") or ()), known=True, key=data.get("key"),
+                   crashes={str(k): int(v) for k, v in crashes.items() if str(k) in GUARDED})
 
 
 UNKNOWN = Detection(known=False)
@@ -232,7 +300,8 @@ def plan(setting: str, det: Detection | None, failed=()) -> list[str]:
     """The formats to try, in order: the one to record in, then its fallbacks.
 
     ``setting`` is the configured format ("auto" -> what Auto picks here);
-    ``failed`` the formats that failed to start in this process (skipped).
+    ``failed`` the formats that failed to start in this process (skipped), and
+    formats that crashed the process here (``Detection.is_crashed``) are skipped too.
     Formats this machine can't record are left out; H.264 is always last.
     """
     det = det or UNKNOWN
@@ -244,13 +313,27 @@ def plan(setting: str, det: Detection | None, failed=()) -> list[str]:
     if first not in FALLBACK:
         first = "h264"
     order = FALLBACK[FALLBACK.index(first):]
-    out = [f for f in order if f == "h264" or (det.available(f) and f not in failed)]
+    out = [f for f in order if f == "h264"
+           or (det.available(f) and f not in failed and not det.is_crashed(f))]
     return out
 
 
 def effective(setting: str, det: Detection | None, failed=()) -> str:
     """The format a recording with ``setting`` starts in here."""
     return plan(setting, det, failed)[0]
+
+
+def crash_blocked(setting: str, det: Detection | None) -> str | None:
+    """The format ``setting`` would record in here but that crashed the process (so it
+    is skipped and another records); None when that isn't so."""
+    if det is None:
+        return None
+    try:
+        setting = normalize(setting)
+    except ValueError:
+        setting = DEFAULT
+    first = det.auto(skip_crashed=False) if setting == "auto" else setting
+    return first if det.is_crashed(first) else None
 
 
 def allowed(det: Detection | None) -> list[str]:
@@ -505,6 +588,10 @@ class Detector:
 
     Under the test sandbox a Detector made without ``probe``/``key`` never runs a
     test encode: it reports an empty (known) detection, so Auto is H.264.
+
+    ``record_crash`` counts a format start that killed the last process (see
+    START_GUARD); it is applied before the detection is handed to anyone, so the
+    first start already skips the format. ``clear_crash`` forgets it (a retry).
     """
 
     def __init__(self, probe=None, key=None, path: Path | None = None):
@@ -512,16 +599,23 @@ class Detector:
         self._key = key
         self._path = path
         self._fake = probe is None and key is None and _sandboxed()
+        self._fake_det: Detection | None = None
         self._lock = threading.Lock()
         self._done = threading.Event()
         self._result: Detection | None = None
         self._running = False
         self._callbacks: list = []
+        self._crash_reports: list[tuple[str, dict | None]] = []   # waiting for the detection
         self.failed: set[str] = set()
+        # Formats that crashed the last process while the detection was unknown: in
+        # ``failed`` too (skipped for this process), kept apart for the words.
+        self.crashed_unknown: set[str] = set()
 
     def ready(self) -> Detection | None:
         if self._fake:
-            return Detection(known=True)
+            if self._fake_det is None:
+                self._fake_det = Detection(known=True)
+            return self._fake_det
         return self._result
 
     def ensure(self, callback=None) -> None:
@@ -558,8 +652,66 @@ class Detector:
         with self._lock:
             if not self._running:
                 self._result = None
+                self._fake_det = None
                 self._done.clear()
                 self.failed.clear()
+                self.crashed_unknown.clear()
+
+    # --- crashes (START_GUARD) ---
+
+    def record_crash(self, fmt: str, key: dict | None) -> None:
+        """The last process died starting ``fmt`` with the detection ``key``: count it.
+
+        Applied now when the detection is ready, else as soon as it is (before
+        anyone gets it). Counted in formats.json only when ``key`` is this
+        detection's (the same GPU and driver); a crash with an unknown detection
+        skips the format for this process only.
+        """
+        if fmt not in GUARDED:
+            return
+        with self._lock:
+            det = self.ready()
+            if det is None:
+                self._crash_reports.append((fmt, key))
+                return
+            self._count_crash(det, fmt, key)
+
+    def _count_crash(self, det: Detection, fmt: str, key: dict | None) -> None:
+        """(holds _lock) One crash of ``fmt`` into ``det``, saved with it."""
+        if not det.known or key is None and not self._fake:
+            self.failed.add(fmt)
+            self.crashed_unknown.add(fmt)
+            log.warning("%s crashed Momento while starting; skipping it until Momento restarts "
+                        "(what this PC records isn't known)", LABELS[fmt])
+            return
+        if det.key != key:
+            log.info("%s crashed Momento while starting, but with another driver or GPU: not counted",
+                     LABELS[fmt])
+            return
+        det.crashes[fmt] = det.crashes.get(fmt, 0) + 1
+        log.warning("%s crashed Momento while starting (%d time%s on this driver)%s", LABELS[fmt],
+                    det.crashes[fmt], "" if det.crashes[fmt] == 1 else "s",
+                    "; skipping it until the driver changes or it is picked again" if det.is_crashed(fmt) else "")
+        if not self._fake:
+            save_cache(self._path or cache_path(), det)
+
+    def clear_crash(self, fmt: str) -> bool:
+        """Forget that ``fmt`` crashed (the user picked it again); True if it had."""
+        with self._lock:
+            had = fmt in self.crashed_unknown
+            if had:
+                self.failed.discard(fmt)
+                self.crashed_unknown.discard(fmt)
+            self._crash_reports = [r for r in self._crash_reports if r[0] != fmt]
+            det = self.ready()
+            if det is not None and det.crashes.get(fmt):
+                had = True
+                del det.crashes[fmt]
+                if not self._fake and det.known:
+                    save_cache(self._path or cache_path(), det)
+        if had:
+            log.info("%s picked again: trying it", LABELS.get(fmt, fmt))
+        return had
 
     def _compute_key(self):
         if self._key is not None:
@@ -585,6 +737,9 @@ class Detector:
             log.exception("video format detection failed; every format is tried as it comes")
             det = Detection(known=False)
         with self._lock:
+            reports, self._crash_reports = self._crash_reports, []
+            for fmt, key in reports:
+                self._count_crash(det, fmt, key)
             self._result = det
             self._running = False
             callbacks, self._callbacks = self._callbacks, []
@@ -597,6 +752,81 @@ class Detector:
 
 
 DETECTOR = Detector()
+
+
+class StartGuard:
+    """The marker of a format start that hasn't proven stable yet (see GUARD_NAME).
+
+    ``begin`` writes it (a GUARDED format; any other clears it), ``clear`` removes
+    it (stable, or a clean stop), ``recover`` (daemon start) returns and removes
+    the one a dead process left behind.
+    """
+
+    def __init__(self, path: Path | None = None):
+        self._path = path
+
+    @property
+    def path(self) -> Path:
+        return self._path or config.CACHE_DIR / GUARD_NAME
+
+    def read(self) -> dict | None:
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def begin(self, fmt: str, encoder: str = "", key: dict | None = None) -> None:
+        if fmt not in GUARDED:
+            self.clear()
+            return
+        data = {"format": fmt, "encoder": encoder, "key": key, "pid": os.getpid(), "started": round(time.time(), 3)}
+        path = self.path
+        tmp = path.with_name(f".{path.name}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data) + "\n")
+            os.replace(tmp, path)
+        except OSError as e:
+            log.warning("cannot write %s: %s", path, e)
+
+    def clear(self) -> None:
+        """Remove this process's marker (another live process's is left alone)."""
+        data = self.read()
+        if data is None or data.get("pid") in (None, os.getpid()) or not _momento_alive(data.get("pid")):
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+
+    def recover(self) -> dict | None:
+        """At daemon start: the marker a process that died while starting a format left
+        (removed now); None if there is none, or its process is still running."""
+        data = self.read()
+        if data is None:
+            return None
+        pid = data.get("pid")
+        if pid != os.getpid() and _momento_alive(pid):
+            return None
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
+        return data if data.get("format") in GUARDED else None
+
+
+def _momento_alive(pid) -> bool:
+    """Is ``pid`` a running Momento (python) process?"""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return False
+    return b"momento" in cmd
+
+
+START_GUARD = StartGuard()
 
 
 def _main(argv: list[str]) -> int:

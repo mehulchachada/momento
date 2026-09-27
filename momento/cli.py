@@ -284,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
             ("output", r.get("output_dir") or "-"),
         ]
         if r.get("format"):
-            rows.insert(4, ("format", format_line(r["format"], r.get("format_effective"))))
+            # A format that crashed Momento here: the reason says what records instead.
+            line = r.get("format_reason") or format_line(r["format"], r.get("format_effective"))
+            rows.insert(4, ("format", line))
         if isinstance(r.get("keep_history"), bool):
             rows.insert(3, ("history", history_line(r["keep_history"], r.get("max_seconds"))))
         if isinstance(r.get("storage"), dict):

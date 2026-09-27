@@ -154,7 +154,7 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | **Video** | Resolution | 720p, **1080p**, Native (your screen's shape, up to 1080p) |
 | | Frame rate | **60 fps**, 120 fps. 120 only helps if your game runs above 100 fps. |
 | | Quality | Standard, **High**, Ultra. Higher is sharper and takes more space. |
-| | Format | **Auto** picks the smoothest one your PC handles well. |
+| | Format | **Auto** picks one your PC records well: H.264 on most PCs. |
 | | | H.264: plays everywhere. |
 | | | H.265: smaller files. Some older devices can't play it. |
 | | | AV1: smoothest on newer hardware. Some older devices can't play it. |
@@ -209,7 +209,7 @@ Momento 1.0 was tested on this setup:
 | What we checked | Result |
 |---|---|
 | Game FPS while recording | A few frames lower: about 5–10 FPS on average in this game |
-| Stutters | Noticeably fewer with AV1 (what Auto picks here) than with H.264, in every run |
+| Stutters | Noticeably fewer with AV1 than with H.264, in every run |
 | Momento's memory | About 150 MB while recording |
 | Steam Gaming Mode | Works |
 

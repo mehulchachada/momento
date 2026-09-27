@@ -26,7 +26,7 @@ KEYS = {
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
-    "format": "auto, h264, h265, av1 (auto picks the smoothest one your PC handles well; "
+    "format": "auto, h264, h265, av1 (auto picks a format your PC records well, H.264 on most PCs; "
               "h264 plays everywhere; h265 and av1 some older devices can't play)",
     "bitrate": "video kbps; 0 = automatic",
     "audio_source": "default, off, or an output's monitor source name",
@@ -408,6 +408,8 @@ def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
     Auto records in, ``format_effective`` what the saved format records in.
     ``failed``: formats that failed to start in the daemon (skipped like
     unavailable ones for Auto and the fallback, still selectable).
+    ``format_crashed``: formats whose start crashed Momento here (skipped the
+    same way; picking one again retries it).
     """
     from . import gamepad
 
@@ -424,6 +426,7 @@ def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
         "format_auto": codecs.effective("auto", det, failed) if det is not None else None,
         "format_effective": (codecs.effective(values["format"], det, failed)
                              if det is not None or values["format"] != "auto" else None),
+        "format_crashed": det.crashed() if det is not None else [],
         "choices": {"record": list(config.CAPTURE_TARGETS), "replay_length": list(config.REPLAY_MINUTES),
                     "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),

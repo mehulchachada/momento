@@ -172,8 +172,10 @@ Commands (fields are in ``COMMANDS``)
     saved ``resolution`` would record at). The ``storage.required`` bytes count
     what would really be recorded. ``format_allowed`` (the
     ``choices.format`` this machine can record, ``"auto"`` always),
-    ``format_auto`` (what Auto records in here, null while unknown) and
-    ``format_effective`` (what the saved ``format`` records in).
+    ``format_auto`` (what Auto records in here, null while unknown),
+    ``format_effective`` (what the saved ``format`` records in) and
+    ``format_crashed`` (formats whose start crashed Momento here, skipped
+    until picked again).
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
@@ -223,9 +225,9 @@ Video formats: ``FORMAT_CHOICES`` (auto, h264, h265, av1; default auto).
 Clips are MP4 in every format. The daemon test-encodes a few frames with each
 hardware encoder once per GPU + driver (cached); formats with no working
 hardware encoder are left out of ``format_allowed`` (H.264 is always allowed:
-software is its last resort). Auto records in AV1 on AMD GPUs whose AV1 test
-encode works (VCN 4 and newer), else H.264 (else the first of AV1, H.265 with
-working hardware). A format that fails to start falls back to the next one
+software is its last resort). Auto records in H.264 when a hardware H.264
+encoder works, else the first of AV1, H.265 with working hardware (the AMD ->
+AV1 rule is off for now: ``codecs.AUTO_RULES``). A format that fails to start falls back to the next one
 that works in the order AV1 -> H.265 -> H.264 (``format_effective`` says which;
 the daemon sends one desktop notification). A ``format`` this machine can't
 record is saved as asked and records in that fallback. Changing ``format``
@@ -233,6 +235,15 @@ restarts capture like ``resolution``; earlier footage in another format stays
 saveable, but a save never joins two formats (the newest run is kept, with
 ``reason`` "earlier footage used a different video format"). The bitrate and
 storage math are the same for every format.
+
+A driver that kills the daemon while an AV1 or H.265 recording starts (it
+never ran ``codecs.STABLE_SECONDS``, and no clean stop came) is caught at the
+next daemon start: that format is skipped here like one that failed to start,
+for this GPU and driver (``settings.format_crashed``), with one desktop
+notification and ``status.format_reason`` ("AV1 stopped working on this PC, so
+Momento switched to H.264"). A ``configure`` that picks it again retries it
+(recording restarts in it even when it was already the saved format; the
+reply's ``changed`` then holds ``format``).
 
 Storage math: full buffer = (video kbps + audio kbps, audio counted only when
 desktop sound or the mic is on) * 1000 / 8 * max_seconds * 1.05; required =
@@ -458,6 +469,8 @@ COMMANDS: dict[str, dict] = {
             # The reference daemon always sends these two (absent on older daemons):
             "format": (("string",), False),                # the setting (FORMAT_CHOICES)
             "format_effective": (("string", "null"), False),  # "h264" | "h265" | "av1" really recorded
+            # why format_effective isn't the format asked for, when a format crashed Momento here
+            "format_reason": (("string", "null"), False),
             "storage": ((STORAGE_CHECK,), True),
             "error": (("string",), False),          # with state error / no_storage (/ no_window, older)
             "protocol": (("integer",), False),      # REQUIRED by the spec; see Pending implementation
@@ -579,6 +592,7 @@ COMMANDS: dict[str, dict] = {
             "format_allowed": (("array",), False),          # choices.format this machine can record
             "format_auto": (("string", "null"), False),     # what Auto records in here (null: unknown)
             "format_effective": (("string", "null"), False),  # what the saved format records in
+            "format_crashed": (("array",), False),          # formats that crashed Momento here (skipped)
         },
         "error": {},
     },
@@ -691,6 +705,9 @@ def _check_enums(obj: dict) -> list[str]:
     for name in ("format_effective", "format_auto"):
         if isinstance(obj.get(name), str) and obj[name] not in FORMAT_CHOICES[1:]:
             problems.append(f"{name}: expected one of {', '.join(FORMAT_CHOICES[1:])}, got {obj[name]!r}")
+    crashed = obj.get("format_crashed")
+    if isinstance(crashed, list) and not all(f in FORMAT_CHOICES[1:] for f in crashed):
+        problems.append(f"format_crashed: expected formats of {', '.join(FORMAT_CHOICES[1:])}, got {crashed!r}")
     if isinstance(obj.get("pause_reason"), str) and obj["pause_reason"] not in PAUSE_REASONS:
         problems.append(f"unknown pause_reason {obj['pause_reason']!r}")
     size = obj.get("source_size")

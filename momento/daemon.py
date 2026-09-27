@@ -248,6 +248,9 @@ class Daemon:
         self._pads_managed = False  # set by start(), like the bar
         # Video format fallbacks already notified, (wanted, got): one notification each.
         self._fallbacks_told: set[tuple[str, str]] = set()
+        # A format whose start killed the last process (codecs.START_GUARD): told once,
+        # when recording in another one.
+        self._crash_notice: str | None = None
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -256,6 +259,9 @@ class Daemon:
         from .pipeline import Recorder
 
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
+        # Did the last process die while a format was starting (a driver abort)? Counted
+        # before the detection is handed out, so this start already skips that format.
+        self._check_last_start()
         # What this machine records (H.264 / H.265 / AV1): cached per GPU and driver,
         # else a few tiny test encodes in a thread. A start that needs it waits for it.
         codecs.DETECTOR.ensure()
@@ -303,6 +309,9 @@ class Daemon:
         if self._stopping:
             return
         self._stopping = True
+        # A clean stop (quit, SIGTERM: service restart, logout, shutdown) is never
+        # counted as a crash: the start marker goes first, before any slow teardown.
+        codecs.START_GUARD.clear()
         log.info("shutting down%s", " and clearing the replay buffer" if clear_buffer else "")
         if self._storage_timer:
             from gi.repository import GLib
@@ -507,6 +516,7 @@ class Daemon:
                 log.info("recording a %dx%d picture", *size)
         if state == "recording":
             self._tell_format_fallback()
+            self._tell_format_crash()
         if state == "recording" and self._window_target():
             self._look_up_target_name()
         if state != "no_window":
@@ -541,6 +551,52 @@ class Daemon:
         wanted, got = (codecs.label(f) for f in fallback)
         notify(self.bus, f"Momento: recording in {got}",
                f"{wanted} didn't start on this PC, so your replay is recorded in {got}.", "dialog-information")
+
+    def _check_last_start(self) -> None:
+        """At daemon start: a start marker left behind means the last process died while
+        starting that format (a clean stop removes it; see codecs.START_GUARD)."""
+        crash = codecs.START_GUARD.recover()
+        if crash:
+            self._format_crashed(crash)
+
+    def _format_crashed(self, crash: dict) -> None:
+        """The last process died within codecs.STABLE_SECONDS of starting ``crash["format"]``."""
+        fmt = crash.get("format")
+        log.warning("Momento stopped within %d s of starting to record in %s (%s), without a clean stop: "
+                    "a driver crash?", codecs.STABLE_SECONDS, codecs.label(fmt), crash.get("encoder") or "?")
+        codecs.DETECTOR.record_crash(fmt, crash.get("key"))
+        self._crash_notice = fmt
+
+    def _crashed(self, fmt: str | None) -> bool:
+        det = codecs.DETECTOR.ready()
+        return fmt in codecs.GUARDED and (fmt in codecs.DETECTOR.crashed_unknown
+                                          or (det is not None and det.is_crashed(fmt)))
+
+    def _tell_format_crash(self) -> None:
+        """Recording in another format than the one that crashed: say so, once."""
+        fmt, self._crash_notice = self._crash_notice, None
+        got = getattr(self.recorder, "format_effective", None)
+        if not fmt or not got or got == fmt or not self._crashed(fmt):
+            return
+        notify(self.bus, f"Momento: recording in {codecs.label(got)}",
+               codecs.crash_message(fmt, got) + ".", "dialog-warning")
+
+    def format_reason(self) -> str | None:
+        """Why format_effective isn't the format asked for, when a crash is why."""
+        setting = codecs.configured(self.cfg["capture"])
+        det = codecs.DETECTOR.ready()
+        fmt = codecs.crash_blocked(setting, det)
+        if fmt is None and setting in codecs.DETECTOR.crashed_unknown:
+            fmt = setting
+        return codecs.crash_message(fmt, self.format_effective()) if fmt else None
+
+    def _picked_crashed(self, changes: dict) -> str | None:
+        """``configure`` picks a format that crashed here: the user retries it."""
+        try:
+            fmt = codecs.normalize(changes["format"])
+        except (KeyError, ValueError):
+            return None
+        return fmt if self._crashed(fmt) else None
 
     def format_effective(self, cfg: dict | None = None) -> str | None:
         """The format recording is (or would be) in: the running recorder's, else the plan
@@ -957,6 +1013,13 @@ class Daemon:
         except (OSError, ValueError) as e:
             reply({"ok": False, "error": str(e)})
             return
+        retry = self._picked_crashed(changes)
+        if retry:
+            # Picking a format that crashed here again means: try it again. Recording
+            # restarts in it even when it was already the saved format.
+            codecs.DETECTOR.clear_crash(retry)
+            self._crash_notice = None
+            changed = {**changed, "format": changed.get("format", retry)}
         if not changed or set(changed) <= set(settings.LIVE_KEYS):
             # Controller, history and bar settings take effect without restarting
             # the recording.
@@ -1180,6 +1243,9 @@ class Daemon:
             # one picked failed to start); null while Auto's pick is unknown.
             "format": codecs.configured(self.cfg["capture"]),
             "format_effective": self.format_effective(),
+            # Why format_effective differs from what was asked, when a format crashed
+            # Momento here: "AV1 stopped working on this PC, so Momento switched to H.264".
+            "format_reason": self.format_reason(),
             "storage": self._storage_status(),
         }
         if self.state == "no_storage" and not self.paused and self.storage_error:
