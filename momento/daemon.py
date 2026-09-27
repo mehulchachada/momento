@@ -1055,6 +1055,9 @@ class Daemon:
         if "instant_bar" in changed:
             self.cfg.setdefault("ui", {})["keep_bar_loaded"] = saved["ui"].get("keep_bar_loaded", True)
             self._sync_bar()
+        if "sounds" in changed:
+            # the bar reads it on every open (and follows its own Apply at once)
+            self.cfg.setdefault("ui", {})["sounds"] = config.bar_sounds(saved)
 
     def pause(self, reply, msg: dict | None = None) -> None:
         """Stop capturing but keep what is buffered; saves keep working on it.

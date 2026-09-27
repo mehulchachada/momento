@@ -403,6 +403,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"{storage.span(cfg['buffer']['max_seconds'])} replay is full"),
             ("clip bar", "kept loaded (opens instantly)" if cur["instant_bar"] == "on"
                          else "started on every press"),
+            ("sounds", "on (the clip bar's sounds)" if cur["sounds"] == "on" else "off"),
             ("clips", cfg["output"]["dir"]),
             ("config", cfg["_path"]),
         ]

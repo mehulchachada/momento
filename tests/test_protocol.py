@@ -458,7 +458,7 @@ class DaemonContractTest(_DaemonCase):
 
     def test_keep_history(self):
         r = self.check({"cmd": "configure", "changes": {"keep_history": "on", "hour_warning": 5,
-                                                        "instant_bar": "off"}}, ok=True)
+                                                        "instant_bar": "off", "sounds": "off"}}, ok=True)
         self.assertEqual((r["restarted"], r["state"]), (False, "recording"))  # none of them restarts
         self.fill(2)
         r = self.check({"cmd": "stop"}, ok=True)
@@ -471,8 +471,9 @@ class DaemonContractTest(_DaemonCase):
         with mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out)):
             self.check({"cmd": "save", "seconds": 15}, ok=True)          # saving works while stopped
         r = self.check({"cmd": "settings"}, ok=True)
-        self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"]),
-                         ("on", 5, "off"))
+        self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"],
+                          r["values"]["sounds"], r["choices"]["sounds"]), ("on", 5, "off", "off", ["on", "off"]))
+        self.assertIs(self.d.cfg["ui"]["sounds"], False)          # applied live, like instant_bar
 
     def test_video_format(self):
         from momento import codecs

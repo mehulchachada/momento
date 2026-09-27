@@ -219,7 +219,7 @@ DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
                 ("Audio", ("audio_source", "mic", "mic_device")),
                 ("Controller", ("controller",)),
-                ("Misc", ("hour_warning", "instant_bar")))
+                ("Misc", ("hour_warning", "instant_bar", "sounds")))
 
 
 def _gb(n) -> str:
@@ -795,6 +795,15 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "bolt":
         p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
                                  P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
+    elif kind == "note":
+        # an eighth note: the bar's sounds
+        p.drawLine(P(x + 0.8, y + 4.2), P(x + 0.8, y - 7.2))
+        flag = QPainterPath(P(x + 0.8, y - 7.2))
+        flag.quadTo(x + 1.6, y - 3.6, x + 5.6, y - 2.6)
+        p.drawPath(flag)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QRectF(x - 5.4, y + 1.8, 6.6, 5.0))
     elif kind == "info":
         # a thin "i" in a circle (~12 px, a note's size): information
         p.drawEllipse(P(x, y), 5.8, 5.8)
@@ -849,13 +858,13 @@ ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "q
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
              "keep_history": "history",
              "replay_length": "timer",
-             "hour_warning": "hourglass", "instant_bar": "bolt"}
+             "hour_warning": "hourglass", "instant_bar": "bolt", "sounds": "note"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
 ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_history": "Keep history",
               "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
               "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
-              "instant_bar": "Instant bar"}
+              "instant_bar": "Instant bar", "sounds": "Sounds"}
 ROW_ICONS["format"] = "film"
 ROW_TITLES["format"] = "Format"
 # Settings -> Misc: not a setting, two actions (a report file for GitHub, the logs folder).
@@ -871,12 +880,12 @@ def report_note(path) -> str:
     p = Path(path)
     where = f"Home/{p.name}" if p.parent == Path.home() else shown_path(p)
     return f"Saved to {where} \u00b7 Attach it to your GitHub issue"
-ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
+ON_OFF_KEYS = ("mic", "keep_history", "instant_bar", "sounds")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 VALUE_ICONS = {"record": RECORD_ICONS}
 # Settings the daemon applies without restarting the recording (settings.LIVE_KEYS
 # wins; this is for an older settings module).
-LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar")
+LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar", "sounds")
 REPLAY_MINUTES = (15, 30, 60)   # the Replay length row, when the reply has no choices for it
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10

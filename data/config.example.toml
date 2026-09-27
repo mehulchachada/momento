@@ -158,6 +158,11 @@ trigger = "LOGO+SHIFT+g"
 # Change it with:  momento set instant_bar off    (or Settings -> Misc -> Instant bar)
 keep_bar_loaded = true
 
+# Soft sounds in the clip bar: moving around it, saving, pause, play and stop.
+# Momento records your desktop's sound, so a clip saved right then may have them.
+# Change it with:  momento set sounds off    (or Settings -> Misc -> Sounds)
+sounds = true
+
 [controller]
 # Use a game controller with the clip bar (needs python-evdev, which Bazzite,
 # SteamOS-likes and most gaming distros already have).

@@ -3961,7 +3961,7 @@ class HistorySettingsTest(unittest.TestCase):
                                      ["Video", ["resolution", "fps", "quality", "format"]],
                                      ["Audio", ["audio_source", "mic", "mic_device"]],
                                      ["Controller", ["controller"]],
-                                     ["Misc", ["hour_warning", "instant_bar"]]])
+                                     ["Misc", ["hour_warning", "instant_bar", "sounds"]]])
         for _name, keys in self.settings.TABS:
             for key in keys:
                 self.assertIn(key, d["values"])
@@ -4060,7 +4060,56 @@ class HistorySettingsTest(unittest.TestCase):
 
     def test_live_keys(self):
         self.assertEqual(set(self.settings.LIVE_KEYS),
-                         {"controller", "replay_length", "keep_history", "hour_warning", "instant_bar"})
+                         {"controller", "replay_length", "keep_history", "hour_warning", "instant_bar",
+                          "sounds"})
+
+    def test_sounds_setting(self):
+        """Settings -> Misc -> Sounds: [ui] sounds, on by default, live, read by the bar."""
+        cfg = self.config.load(self.path)
+        self.assertIs(self.config.DEFAULTS["ui"]["sounds"], True)
+        self.assertEqual(self.settings.current(cfg)["sounds"], "on")
+        self.assertTrue(self.config.load_bar_sounds(self.path))
+        d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual(d["choices"]["sounds"], ["on", "off"])
+        self.assertIn("sounds", self.settings.LIVE_KEYS)
+        self.assertEqual(self.settings.validate({"sounds": False}), {"sounds": "off"})
+        with self.assertRaises(ValueError):
+            self.settings.validate({"sounds": "loud"})
+        self.assertEqual(self.settings.apply({"sounds": "off"}, self.path), {"sounds": "off"})
+        self.assertIn("# mine", self.path.read_text())
+        self.assertIs(self.config.load(self.path)["ui"]["sounds"], False)
+        self.assertFalse(self.config.load_bar_sounds(self.path))
+        self.assertEqual(self.settings.current(self.config.load(self.path))["sounds"], "off")
+        # a hand-broken value or file reads as the default (on)
+        self.path.write_text("[ui]\nsounds = \"maybe\"\n")
+        self.assertTrue(self.config.load_bar_sounds(self.path))
+        self.path.write_text("[ui\n")
+        self.assertTrue(self.config.load_bar_sounds(self.path))
+        self.assertTrue(self.config.load_bar_sounds(self.path.with_name("missing.toml")))
+
+    def test_cli_sets_sounds(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from momento import cli, ipc
+
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                mock.patch.object(self.settings, "list_audio_devices", return_value={"outputs": [], "inputs": []}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "sounds", "off"]), 0)
+            self.assertEqual(cli.main(["--config", str(self.path), "settings"]), 0)
+        self.assertIn("sounds = off", out.getvalue())
+        self.assertIn("sounds: off", out.getvalue())
+        self.assertIs(self.config.load(self.path)["ui"]["sounds"], False)
+        self.assertEqual(cli.main(["--config", str(self.path), "set", "sounds", "loud"]), 1)
+        out = io.StringIO()
+        reply = {"ok": True, "changed": {"sounds": "on"}, "restarted": False, "paused": False}
+        with mock.patch.object(ipc, "request", return_value=reply) as req, contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["--config", str(self.path), "set", "sounds", "on"]), 0)
+        self.assertEqual(req.call_args[0][0], {"cmd": "configure", "changes": {"sounds": "on"}})
+        self.assertIn("applies right away", out.getvalue())
 
     def test_example_config_documents_them(self):
         import tomllib

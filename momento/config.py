@@ -101,6 +101,8 @@ DEFAULTS = {
         # instantly. Costs ~80-120 MB of RAM; false = start a new bar on every press
         # (about 0.3-0.5 s until it appears).
         "keep_bar_loaded": True,
+        # The clip bar's soft UI sounds (moving around it, saving, pause, stop...).
+        "sounds": True,
     },
     "controller": {
         # Game controllers (needs python-evdev): press the shortcut to open or close
@@ -218,9 +220,9 @@ def controller(cfg: dict) -> dict:
     return out
 
 
-def load_controller(path: Path | None = None) -> dict:
-    """``controller()`` of the saved file, without the rest of ``load()`` (the bar reads
-    this on every open, so it skips the Videos-folder lookup)."""
+def _saved_table(name: str, path: Path | None = None) -> dict:
+    """One table of the saved file as written (no defaults), without the rest of
+    ``load()``: the bar reads these on every open, so it skips the Videos-folder lookup."""
     data = {}
     try:
         with open(path or default_path(), "rb") as f:
@@ -229,8 +231,24 @@ def load_controller(path: Path | None = None) -> dict:
         pass
     except (OSError, tomllib.TOMLDecodeError):
         data = {}  # a broken file: the defaults (load() reports the error elsewhere)
-    table = data.get("controller")
-    return controller({"controller": table if isinstance(table, dict) else {}})
+    table = data.get(name)
+    return table if isinstance(table, dict) else {}
+
+
+def load_controller(path: Path | None = None) -> dict:
+    """``controller()`` of the saved file (see ``_saved_table``)."""
+    return controller({"controller": _saved_table("controller", path)})
+
+
+def bar_sounds(cfg: dict) -> bool:
+    """``[ui] sounds``: the clip bar's UI sounds (on unless set to false)."""
+    value = (cfg.get("ui") or {}).get("sounds", True)
+    return value if isinstance(value, bool) else True
+
+
+def load_bar_sounds(path: Path | None = None) -> bool:
+    """``bar_sounds()`` of the saved file (see ``_saved_table``)."""
+    return bar_sounds({"ui": _saved_table("ui", path)})
 
 
 def _merge(base: dict, over: dict) -> dict:
