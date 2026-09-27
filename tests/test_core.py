@@ -505,7 +505,7 @@ class CLITest(unittest.TestCase):
             cfg = config.load(path)
             self.assertFalse(cfg["audio"]["desktop"])
             self.assertEqual(cfg["capture"]["resolution"], "720p")
-            self.assertEqual(cfg["capture"]["quality"], "high")
+            self.assertEqual(cfg["capture"]["quality"], "standard")
 
     def test_set_storage(self):
         import contextlib
@@ -762,7 +762,7 @@ class SettingsTest(unittest.TestCase):
             d = self.settings.describe(cfg, devices={"outputs": [], "inputs": []}, source=(3840, 2160))
             self.assertEqual((d["values"]["resolution"], d["resolution_effective"]), ("1080p", "1080p"))
             self.assertEqual(self.quality.resolution(cfg["capture"]), (1920, 1080))
-            self.assertEqual(self.quality.bitrate_kbps(cfg["capture"]), 15_000)
+            self.assertEqual(self.quality.bitrate_kbps(cfg["capture"]), 10_000)
             # another setting changed: the resolution line stays as it was
             self.assertEqual(self.settings.apply({"mic": "on"}, self.path), {"mic": "on"})
             self.assertIn(f'resolution = "{saved}"', self.path.read_text())
@@ -1230,7 +1230,7 @@ class DaemonControlTest(unittest.TestCase):
         self.free = need - (1 << 30)                  # a restart wouldn't fit; capture keeps going
         self.d._storage_tick()
         self.assertEqual(self.notes, ["Momento: low storage"])
-        self.assertEqual(self.bodies, [(f"15 min at 1080p High needs {storage.human(need)}, "
+        self.assertEqual(self.bodies, [(f"15 min at 1080p Standard needs {storage.human(need)}, "
                                         f"{storage.human(need - (1 << 30))} free. Free up space.", "dialog-warning")])
         st = self.d.status()
         self.assertEqual((st["state"], st["storage"]["low"], st["storage"]["ok"]), ("recording", True, False))
@@ -1304,7 +1304,7 @@ class DaemonControlTest(unittest.TestCase):
     def test_settings_change_raising_the_need_warns(self):
         from momento import storage
 
-        # Keep history on and room for 1080p High (buffer + hour), not for 1080p High 120 fps
+        # Keep history on and room for 1080p Standard (buffer + hour), not for 1080p Standard 120 fps
         self.call({"cmd": "configure", "changes": {"keep_history": "on"}})
         with mock.patch.object(storage, "same_disk", return_value=True):
             self.free = self._full() + (1 << 30)
@@ -1314,7 +1314,7 @@ class DaemonControlTest(unittest.TestCase):
             self.assertEqual((r["ok"], r["restarted"]), (True, True))   # a restart still fits
             self.assertEqual(self.d.status()["state"], "recording")
             self.assertEqual(self.notes, ["Momento: low storage"])
-            self.assertEqual(r["storage"]["label"], "1080p High 120 fps")
+            self.assertEqual(r["storage"]["label"], "1080p Standard 120 fps")
             self.assertTrue(r["storage"]["low"])
             self.d._storage_tick()
         self.assertEqual(self.notes, ["Momento: low storage"])
@@ -1443,10 +1443,10 @@ class DaemonControlTest(unittest.TestCase):
             r = self.call({"cmd": "settings"})
         st = r["storage"]
         self.assertEqual(st["free"], self.free)
-        self.assertEqual(st["current"], "1080p/high/auto")     # fps auto, the default
+        self.assertEqual(st["current"], "1080p/standard/auto")     # fps auto, the default
         self.assertEqual(len(st["required"]), 4 * 3 * 3)       # 480p, 720p, 1080p, native x auto, 60, 120
-        self.assertEqual(st["required"]["1080p/high/auto"], storage.required_bytes(self.d.cfg))
-        self.assertEqual(st["required"]["1080p/high/auto"], st["required"]["1080p/high/60"])  # refresh unknown
+        self.assertEqual(st["required"]["1080p/standard/auto"], storage.required_bytes(self.d.cfg))
+        self.assertEqual(st["required"]["1080p/standard/auto"], st["required"]["1080p/standard/60"])  # refresh unknown
 
 
 class SizedRecorder(FakeRecorder):
@@ -1488,7 +1488,7 @@ class DaemonResolutionCapTest(unittest.TestCase):
 
     def test_unknown_source_changes_nothing(self):
         st = self.d.status()
-        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]), (None, "1080p", 15000))
+        self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]), (None, "1080p", 10000))
         r = self.settings_reply()
         self.assertEqual(r["resolution_allowed"], ["480p", "720p", "1080p", "native"])
         self.assertIsNone(r["source_size"])
@@ -1509,7 +1509,7 @@ class DaemonResolutionCapTest(unittest.TestCase):
         st = self.d.status()
         self.assertEqual((st["resolution"], st["resolution_effective"], st["source_size"]),
                          ("1080p", "native", [1280, 720]))
-        self.assertEqual(st["bitrate_kbps"], 10000)
+        self.assertEqual(st["bitrate_kbps"], 6000)
         self.assertEqual(st["storage"]["required"], self.need(resolution="720p"))
         self.assertTrue(st["storage"]["ok"])
         r = self.settings_reply()
@@ -1535,15 +1535,15 @@ class DaemonResolutionCapTest(unittest.TestCase):
         self.call({"cmd": "reload"})
         st = self.d.status()
         self.assertEqual((st["resolution"], st["resolution_effective"], st["bitrate_kbps"]),
-                         ("1080p", "1080p", 15000))
+                         ("1080p", "1080p", 10000))
         self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
-        self.assertEqual(st["storage"]["label"], "1080p High")
+        self.assertEqual(st["storage"]["label"], "1080p Standard")
         self.assertEqual(config.load(self.path)["capture"]["resolution"], "2160p")   # file left alone
         r = self.settings_reply()
         self.assertEqual(r["choices"]["resolution"], ["480p", "720p", "1080p", "native"])
         self.assertEqual(r["resolution_allowed"], ["480p", "720p", "1080p", "native"])
         self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("1080p", "1080p"))
-        self.assertEqual(r["storage"]["current"], "1080p/high/auto")
+        self.assertEqual(r["storage"]["current"], "1080p/standard/auto")
         self.assertEqual(r["storage"]["required"]["native/high/60"], r["storage"]["required"]["1080p/high/60"])
         # 4K can't be chosen again
         r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
@@ -1555,19 +1555,19 @@ class DaemonResolutionCapTest(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         st = self.d.status()
         self.assertEqual((st["resolution"], st["resolution_effective"], st["bitrate_kbps"]),
-                         ("native", "native", 15000))
+                         ("native", "native", 10000))
         self.assertEqual(st["storage"]["required"], self.need(resolution="1080p"))
 
     def test_screen_change_is_followed(self):
         self.use_sized((3840, 2160))
         self.call({"cmd": "configure", "changes": {"resolution": "1080p"}})
         st = self.d.status()
-        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1080p", 15000))
+        self.assertEqual((st["resolution_effective"], st["bitrate_kbps"]), ("1080p", 10000))
         SizedRecorder.size = (1280, 720)                  # another monitor on the next start
         self.call({"cmd": "reload"})
         st = self.d.status()
         self.assertEqual((st["source_size"], st["resolution_effective"], st["bitrate_kbps"]),
-                         ([1280, 720], "native", 10000))  # 720 lines: the 720p class
+                         ([1280, 720], "native", 6000))  # 720 lines: the 720p class
 
     def test_new_window_forgets_the_size(self):
         self.use_sized((1280, 720))
@@ -1592,12 +1592,12 @@ class DaemonResolutionCapTest(unittest.TestCase):
         self.free = self.need((1280, 720)) + 10         # 1080p wouldn't fit; the 720p really recorded does
         self.assertGreater(self.need(), self.free)
         st = self.d.status()["storage"]
-        self.assertEqual((st["ok"], st["low"], st["label"]), (True, False, "720p High"))
+        self.assertEqual((st["ok"], st["low"], st["label"]), (True, False, "720p Standard"))
         self.assertEqual(st["needed"], self.need(resolution="720p"))
         self.free = self.need((1280, 720)) - 10
         st = self.d.status()["storage"]
         self.assertTrue(st["low"])
-        self.assertTrue(storage.low_message(st, 3600).startswith("Low storage: 60 min at 720p High needs "))
+        self.assertTrue(storage.low_message(st, 3600).startswith("Low storage: 60 min at 720p Standard needs "))
         # Keep history counts the saved hour at the recorded size too
         self.d.cfg["buffer"]["keep_history"] = True
         self.d.cfg["output"]["dir"] = self._tmp.name      # clips on the buffer's disk
@@ -1655,7 +1655,7 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(storage.human(12), "12 B")
         self.assertEqual(storage.label(self.cfg(resolution="720p", quality="ultra")), "720p Ultra")
         self.assertEqual(storage.label(self.cfg(resolution="2160p", quality="ultra")), "1080p Ultra")  # older config
-        self.assertEqual(storage.label(self.cfg(fps=120)), "1080p High 120 fps")
+        self.assertEqual(storage.label(self.cfg(fps=120)), "1080p Standard 120 fps")
         self.assertEqual(storage.label(self.cfg(bitrate_kbps=50000)), "1080p at 50 Mbps")
 
     def test_check_and_requirements(self):
@@ -1672,9 +1672,9 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(chk["path"], cfg["buffer"]["dir"])
             self.assertTrue(storage.check(cfg, reclaimable=100)["ok"])
             req = storage.requirements(cfg, reclaimable=7)
-        self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/high/auto"))
-        self.assertEqual(req["required"]["1080p/high/60"], need)
-        self.assertEqual(req["required"]["1080p/high/auto"], need)            # refresh unknown: 60 fps
+        self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/standard/auto"))
+        self.assertEqual(req["required"]["1080p/standard/60"], need)
+        self.assertEqual(req["required"]["1080p/standard/auto"], need)            # refresh unknown: 60 fps
         self.assertLess(req["required"]["720p/standard/60"], req["required"]["1080p/ultra/120"])
         self.assertLess(req["required"]["480p/high/60"], req["required"]["720p/high/60"])
         self.assertEqual(sorted(req["required"]), sorted(f"{r}/{q}/{f}" for r in ("480p", "720p", "1080p", "native")
@@ -1697,9 +1697,9 @@ class StorageTest(unittest.TestCase):
             self.assertEqual((chk["history"], chk["disk"]), (False, "buffer"))
             with mock.patch.object(storage, "free_bytes", return_value=need):
                 self.assertFalse(storage.check(cfg)["low"])
-        self.assertEqual(storage.check(self.cfg(fps=120))["label"], "1080p High 120 fps")
+        self.assertEqual(storage.check(self.cfg(fps=120))["label"], "1080p Standard 120 fps")
         # 120 fps: 1.5x the video bits, rounded to whole Mbps (15 -> 22 Mbps at 1080p High)
-        self.assertEqual(storage.buffer_bytes(self.cfg(fps=120)), int((22_000 + 160) * 1000 / 8 * 3600 * 1.05))
+        self.assertEqual(storage.buffer_bytes(self.cfg(fps=120, quality="high")), int((22_000 + 160) * 1000 / 8 * 3600 * 1.05))
         # the buffer length and an explicit bitrate count too
         cfg = self.cfg(bitrate_kbps=50_000)
         cfg["buffer"]["max_seconds"] = 1800
@@ -2991,17 +2991,17 @@ class RecorderWindowTest(unittest.TestCase):
         self.assertEqual(self.pin(rec, (3440, 1440)), ((2580, 1080), None))   # ultrawide: aspect kept
         self.assertEqual(self.pin(rec, (2560, 1440)), ((1920, 1080), None))
         self.assertEqual(self.pin(rec, (1920, 1080)), (None, None))           # its own size, as it is
-        self.assertEqual(self.pin(rec, (1280, 720)), (None, 10_000))          # 720p's bitrate
+        self.assertEqual(self.pin(rec, (1280, 720)), (None, 6_000))          # 720p's bitrate
         win = self.recorder(target="window", resolution="native")
         win.start(interactive=True)
         self.assertEqual(self.pin(win, (3840, 2160)), ((1920, 1080), None))   # a 4K window
-        self.assertEqual(self.pin(win, (1271, 713)), ((1270, 712), 10_000))   # locked, even numbers
+        self.assertEqual(self.pin(win, (1271, 713)), ((1270, 712), 6_000))   # locked, even numbers
 
     def test_presets_and_an_older_4k_config(self):
         rec = self.recorder(target="screen", resolution="1080p")
         self.assertEqual(self.pin(rec, (3840, 2160)), (None, None))           # scaled by the preset
         self.assertEqual(rec.resolution_effective, "1080p")
-        self.assertEqual(self.pin(rec, (1271, 713)), ((1270, 712), 10_000))   # never upscaled
+        self.assertEqual(self.pin(rec, (1271, 713)), ((1270, 712), 6_000))   # never upscaled
         self.assertEqual(rec.resolution_effective, "native")
         sd = self.recorder(target="screen", resolution="sd")                  # the alias
         self.assertEqual((sd.size_name, sd.size), ("480p", (854, 480)))
@@ -3060,7 +3060,7 @@ class RecorderWindowTest(unittest.TestCase):
         self.assertEqual(self.pin(rec, (1920, 1080)), ((1920, 1080), None))     # unknown: pinned at runtime
         self.assertEqual(len(self.caps_sets), 1)
         rec._settle_from = 0.0
-        self.assertEqual(self.pin(rec, (1280, 720), known=(1920, 1080)), ((1280, 720), 10_000))  # differs
+        self.assertEqual(self.pin(rec, (1280, 720), known=(1920, 1080)), ((1280, 720), 6_000))  # differs
         self.assertEqual(len(self.caps_sets), 1)
         self.assertGreater(rec._settle_from, 0.0)                               # a change was made just now
         screen = self.recorder(target="screen", resolution="1080p")
@@ -4302,11 +4302,11 @@ class CLIStatusTest(unittest.TestCase):
                     mock.patch.object(storage, "free_bytes", return_value=10**12):
                 _code, text = self.run_cli(["--config", str(path), "settings"], [self.ST])
                 self.assertIn("resolution: 1080p, records at 720p (your screen's size)", text)
-                self.assertIn("bitrate: 10 Mbps (automatic)", text)
-                self.assertIn("disk use: about 1.2 GB for the full buffer", text)
+                self.assertIn("bitrate: 6 Mbps (automatic)", text)
+                self.assertIn("disk use: about 727.6 MB for the full buffer", text)
                 _code, text = self.run_cli(["--config", str(path), "settings"], [OSError("not running")])
                 self.assertIn("resolution: 1080p\n", text)
-                self.assertIn("bitrate: 15 Mbps (automatic)", text)
+                self.assertIn("bitrate: 10 Mbps (automatic)", text)
             self.assertIn('resolution = "2160p"', path.read_text())
 
     def test_stop_and_resume_messages(self):
@@ -5202,7 +5202,7 @@ class SettingsChangeLogTest(unittest.TestCase):
         self.assertEqual(list(changes), ["replay_length", "resolution", "quality", "fps", "format", "bitrate",
                                          "keep_history"])
         self.assertEqual(settings.describe_changes(changes),
-                         "replay length 15m -> 30m, resolution 1080p -> 720p, quality high -> ultra, fps auto -> 120, "
+                         "replay length 15m -> 30m, resolution 1080p -> 720p, quality standard -> ultra, fps auto -> 120, "
                          "format auto -> av1, bitrate auto -> 12000 kbps, keep history off -> on")
         self.assertEqual(settings.diff(before, {"fps": "auto"}), {})           # auto: the default
         self.assertEqual(settings.describe_changes(settings.diff(before, {"fps": 60})), "fps auto -> 60")
@@ -5214,7 +5214,7 @@ class SettingsChangeLogTest(unittest.TestCase):
                                             "mic": "off"}})                            # mic: already off
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.about_settings(lines),
-                         ["settings changed: resolution 1080p -> 720p, quality high -> ultra, fps auto -> 120, "
+                         ["settings changed: resolution 1080p -> 720p, quality standard -> ultra, fps auto -> 120, "
                           "format auto -> av1 (from the bar)"])
 
     def test_origin(self):
@@ -5249,10 +5249,10 @@ class SettingsChangeLogTest(unittest.TestCase):
         lines, r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"quality": "ultra"}})
         self.assertEqual(r.get("code"), "no_storage")
         [line] = self.about_settings(lines)
-        self.assertTrue(line.startswith("settings change refused (from the bar): quality high -> ultra: "
+        self.assertTrue(line.startswith("settings change refused (from the bar): quality standard -> ultra: "
                                         "not enough disk space: "), line)
         self.assertEqual(self.path.read_text(), saved)                  # nothing was written
-        self.assertEqual(config.load(self.path)["capture"]["quality"], "high")
+        self.assertEqual(config.load(self.path)["capture"]["quality"], "standard")
 
     def test_config_reload(self):
         self.path.write_text(self.path.read_text().replace('resolution = "1080p"',
@@ -5266,9 +5266,9 @@ class SettingsChangeLogTest(unittest.TestCase):
                          ["settings unchanged (config reload): restarting capture with the same settings"])
         # A change from the bar that also picks up a hand edit: each on its own line.
         self.path.write_text(self.path.read_text().replace("fps = 120", "fps = 60"))
-        lines, _r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"quality": "standard"}})
+        lines, _r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"quality": "high"}})
         self.assertEqual(self.about_settings(lines),
-                         ["settings changed: quality high -> standard (from the bar)",
+                         ["settings changed: quality standard -> high (from the bar)",
                           "settings changed: fps 120 -> 60 (from the config file)"])
         self.path.write_text(self.path.read_text().replace("fps = 60", "fps = 75"))
         lines, r = self.logged({"cmd": "reload"})
@@ -5445,7 +5445,7 @@ class DaemonAutoFpsTest(unittest.TestCase):
     def test_status_before_the_refresh_is_known(self):
         st = self.call({"cmd": "status"})
         self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), ("auto", 60, None))
-        self.assertEqual(st["bitrate_kbps"], 15_000)
+        self.assertEqual(st["bitrate_kbps"], 10_000)
         self.assertEqual(protocol_problems("status", st), [])
 
     def test_status_and_storage_on_a_120_hz_screen(self):
@@ -5456,8 +5456,8 @@ class DaemonAutoFpsTest(unittest.TestCase):
         self.assertIn("the recorded screen runs at 120 Hz", [r.getMessage() for r in cm.records])
         st = self.call({"cmd": "status"})
         self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), ("auto", 120, 120.0))
-        self.assertEqual(st["bitrate_kbps"], 22_000)
-        self.assertEqual(st["storage"]["label"], "1080p High 120 fps")
+        self.assertEqual(st["bitrate_kbps"], 15_000)
+        self.assertEqual(st["storage"]["label"], "1080p Standard 120 fps")
         cfg120 = {**self.d.cfg, "capture": {**self.d.cfg["capture"], "fps": 120}}
         self.assertEqual(st["storage"]["required"], storage.required_bytes(cfg120))
         self.assertEqual(protocol_problems("status", st), [])
@@ -5465,13 +5465,13 @@ class DaemonAutoFpsTest(unittest.TestCase):
                                return_value={"outputs": [], "inputs": []}):
             r = self.call({"cmd": "settings"})
         self.assertEqual((r["values"]["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 120, 120.0))
-        self.assertEqual(r["storage"]["current"], "1080p/high/auto")
-        self.assertEqual(r["storage"]["required"]["1080p/high/auto"], r["storage"]["required"]["1080p/high/120"])
+        self.assertEqual(r["storage"]["current"], "1080p/standard/auto")
+        self.assertEqual(r["storage"]["required"]["1080p/standard/auto"], r["storage"]["required"]["1080p/standard/120"])
         # a reload hands the known refresh to the new recorder: it plans at 120 from the start
-        r = self.call({"cmd": "configure", "changes": {"quality": "standard"}})
+        r = self.call({"cmd": "configure", "changes": {"quality": "high"}})
         self.assertTrue(r["ok"], r)
         self.assertEqual(RefreshRecorder.hints[-1], 120.0)
-        self.assertEqual(r["storage"]["label"], "1080p Standard 120 fps")
+        self.assertEqual(r["storage"]["label"], "1080p High 120 fps")
 
     def test_explicit_60_on_a_120_hz_screen(self):
         self.use(144.0)
@@ -5479,7 +5479,7 @@ class DaemonAutoFpsTest(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         st = self.call({"cmd": "status"})
         self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), (60, 60, 144.0))
-        self.assertEqual(st["bitrate_kbps"], 15_000)
+        self.assertEqual(st["bitrate_kbps"], 10_000)
 
     def test_a_60_hz_screen(self):
         self.use(60.0)

@@ -350,7 +350,7 @@ class DaemonContractTest(_DaemonCase):
         self.d.refresh_hz = 144.0                     # what the stream announced (the recorder tells the daemon)
         r = self.check({"cmd": "status"}, ok=True)
         self.assertEqual((r["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 120, 144.0))
-        self.assertEqual(r["storage"]["label"], "1080p High 120 fps")
+        self.assertEqual(r["storage"]["label"], "1080p Standard 120 fps")
         self.assertEqual(validate_reply("status", {**r, "fps": 75}), ["fps: expected one of auto, 60, 120, got 75"])
         self.assertEqual(validate_reply("status", {**r, "fps_effective": 90}),
                          ["fps_effective: expected 60 or 120, got 90"])
@@ -386,7 +386,7 @@ class DaemonContractTest(_DaemonCase):
         r = self.check({"cmd": "status"}, ok=True)
         self.assertEqual((r["resolution"], r["resolution_effective"], r["source_size"]),
                          ("1080p", "native", [1280, 720]))
-        self.assertEqual(r["bitrate_kbps"], 10000)
+        self.assertEqual(r["bitrate_kbps"], 6000)
         self.assertEqual(r["storage"]["required"], self.need(resolution="720p"))
         r = self.check({"cmd": "settings"}, ok=True)
         self.assertEqual(r["resolution_allowed"], ["480p", "720p", "native"])
@@ -406,8 +406,8 @@ class DaemonContractTest(_DaemonCase):
         r = self.check({"cmd": "configure", "changes": {"resolution": "sd"}}, ok=True)   # the alias
         self.assertEqual(r["changed"], {"resolution": "480p"})
         r = self.check({"cmd": "status"}, ok=True)
-        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("480p", "480p", 5000))
-        self.assertEqual(r["storage"]["label"], "480p High")
+        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("480p", "480p", 3000))
+        self.assertEqual(r["storage"]["label"], "480p Standard")
         r = self.check({"cmd": "configure", "changes": {"resolution": "1080p"}}, ok=True)
         before = self.path.read_text()
         for value in ("1440p", "2160p", "4k", "2k"):
@@ -419,7 +419,7 @@ class DaemonContractTest(_DaemonCase):
         self.path.write_text(self.path.read_text().replace('resolution = "1080p"', 'resolution = "2160p"'))
         self.check({"cmd": "reload"}, ok=True)
         r = self.check({"cmd": "status"}, ok=True)
-        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("1080p", "1080p", 15000))
+        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("1080p", "1080p", 10000))
         r = self.check({"cmd": "settings"}, ok=True)
         self.assertEqual(r["values"]["resolution"], "1080p")
         self.assertIn(r["storage"]["current"], r["storage"]["required"])
@@ -429,7 +429,7 @@ class DaemonContractTest(_DaemonCase):
         self.addCleanup(setattr, _FakeRecorder, "source_size", None)
         self.check({"cmd": "configure", "changes": {"resolution": "native"}}, ok=True)
         r = self.check({"cmd": "status"}, ok=True)
-        self.assertEqual((r["resolution_effective"], r["bitrate_kbps"]), ("native", 15000))
+        self.assertEqual((r["resolution_effective"], r["bitrate_kbps"]), ("native", 10000))
         self.assertEqual(r["storage"]["required"], self.need(resolution="1080p"))
         # older daemons' values in status stay valid
         self.assertEqual(validate_reply("status", {**r, "resolution": "2160p", "resolution_effective": "native"}), [])
@@ -454,7 +454,7 @@ class DaemonContractTest(_DaemonCase):
 
         r = self.check({"cmd": "status"}, ok=True)
         self.assertEqual((r["storage"]["low"], r["storage"]["disk"], r["storage"]["label"]),
-                         (False, "buffer", "1080p High"))
+                         (False, "buffer", "1080p Standard"))
         self.free = self.need() - 1
         for msg in ({"cmd": "status"}, {"cmd": "pause"}, {"cmd": "status"}, {"cmd": "stop"}, {"cmd": "status"}):
             r = self.check(msg, ok=True)

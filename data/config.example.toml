@@ -44,9 +44,9 @@ fps = "auto"
 # Change it from a terminal with:  momento set resolution 720p
 resolution = "1080p"
 
-# Picture quality: "standard" | "high" | "ultra"
+# Picture quality: "standard" (default) | "high" | "ultra"
 # Change it with:  momento set quality ultra      (show current: momento settings)
-quality = "high"
+quality = "standard"
 
 # Video bitrate in kbit/s. 0 = pick automatically from resolution + quality:
 #                standard   high   ultra      (Mbit/s)
@@ -58,7 +58,7 @@ quality = "high"
 #   "2160p" records at 1080p)
 #   (at 120 fps, e.g. Auto on a 120 Hz screen, the automatic bitrate is 1.5x these)
 # Set a number (e.g. 20000) to override. Disk used by a full 15-minute replay
-# ~= Mbit/s * 0.11 GB (1080p high: ~1.7 GB); 60 minutes ~= Mbit/s * 0.45 GB.
+# ~= Mbit/s * 0.11 GB (1080p standard: ~1.1 GB); 60 minutes ~= Mbit/s * 0.45 GB.
 bitrate_kbps = 0
 
 # Video format. Clips are MP4 either way:

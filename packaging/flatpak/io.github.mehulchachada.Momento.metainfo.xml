@@ -65,7 +65,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>The clip bar over a game, with the 5 minute length selected</caption>
-      <image>https://raw.githubusercontent.com/mehulchachada/momento/v0.1.0/assets/clip-bar.png</image>
+      <image>https://raw.githubusercontent.com/mehulchachada/momento/v1.0.0/assets/clip-bar.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The gallery: watch your clips and screenshots right above the bar</caption>
+      <image>https://raw.githubusercontent.com/mehulchachada/momento/v1.0.0/assets/gallery.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Video settings: resolution, frame rate, quality and format</caption>
+      <image>https://raw.githubusercontent.com/mehulchachada/momento/v1.0.0/assets/settings-video.png</image>
     </screenshot>
   </screenshots>
 
@@ -86,14 +94,16 @@
   </requires>
 
   <releases>
-    <release version="0.1.0" date="2026-09-26">
+    <release version="1.0.0" date="2026-09-27">
       <description>
-        <p>First public release.</p>
+        <p>Momento 1.0: instant replay for Linux games.</p>
         <ul>
-          <li>Continuous replay buffer of up to 60 minutes</li>
-          <li>Save 15 s to 60 min with Super+Shift+G or the command line</li>
-          <li>Hardware encoding through VA-API and NVENC</li>
-          <li>Clip bar with resolution, quality and sound settings</li>
+          <li>Keep the last 15, 30 or 60 minutes and save 15 seconds to 60 minutes of it</li>
+          <li>Saving runs in the background: a sound and a notification tell you when the clip is ready</li>
+          <li>Frame rate Auto matches your screen: 120 fps on a 120 Hz screen, 60 on a 60 Hz one</li>
+          <li>480p, 720p, 1080p or Native, in H.264, H.265 or AV1</li>
+          <li>A gallery to watch, browse and delete your clips and screenshots</li>
+          <li>Works with a controller: Home + D-pad Down opens the bar</li>
         </ul>
       </description>
     </release>

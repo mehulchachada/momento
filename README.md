@@ -27,7 +27,8 @@ Momento quietly keeps the last 15 minutes of your game (up to 60). Something gre
 |---|---|
 | **Any game** | Steam, non-Steam, emulators, browser games, GeForce NOW and other cloud gaming. |
 | **Save it after it happened** | Momento keeps the last 15, 30 or 60 minutes. Save 15s, 30s, 1m, 3m, 5m, 15m, 30m or 60m of it. |
-| **MP4 in seconds** | No waiting and no converting. Plays and uploads anywhere. |
+| **Saves in the background** | The bar closes at once. A sound and a notification tell you when the MP4 is ready. Plays and uploads anywhere. |
+| **Matches your screen** | Records at 120 fps on a 120 Hz screen and 60 fps on a 60 Hz one, without you setting anything. |
 | **Just the game** | Record one window, so chats and pop-ups stay out of your clips. Or the full screen. |
 | **Screenshots** | One button. The bar gets out of the way first. |
 | **Gallery** | Watch, browse and delete your clips and screenshots right in the bar. |
@@ -92,7 +93,7 @@ Momento now records in the background until you stop it or the game closes.
 | Do this | What happens |
 |---|---|
 | **Super + Shift + G** | Opens or closes the bar |
-| Click a length (or **1**–**8**) | Saves that much, ending right now. The bar closes right away and a notification tells you when the clip is ready |
+| Click a length (or **1**–**8**) | Saves that much, ending right now. The bar closes right away; a sound and a notification tell you when the clip is ready |
 | Camera button | Takes a screenshot |
 | **P** or pause button | Pauses or resumes. What you have can still be saved |
 | Stop button | Stops recording (asks first) |
@@ -102,9 +103,11 @@ Momento now records in the background until you stop it or the game closes.
 
 The **Super** key is the Windows / start-menu key.
 
+While a clip saves, a small saving icon shows in the bar. Want another one right away? Save again: saves wait their turn.
+
 **With a controller**
 
-Press **PS** (or **Xbox** / **Home**) and **D-pad Down** together to open or close the bar. Your game doesn't see the D-pad press.
+Hold **PS** (or **Xbox** / **Home**) and press **D-pad Down** to open or close the bar. Press PS first. Your game doesn't see the D-pad press.
 
 | Button | In the bar |
 |---|---|
@@ -129,21 +132,35 @@ momento status        # is it recording, and how much is kept
 
 ## Gallery
 
-<p align="center"><img src="assets/gallery.png" width="880" alt="The gallery above the bar: filters All, Clips and Screenshots, a clip playing muted at 0:23 of 1:00, controls for back 10, pause, forward 10, sound and full screen, and controller hints with PlayStation symbols"></p>
+<p align="center"><img src="assets/gallery.png" width="880" alt="The gallery above the bar, in three rows: the filters All, Clips and Screenshots; a clip playing muted at 0:23 of 1:00 inside a white ring, with back 10, pause, forward 10, sound and full screen; and the clip's date, controller hints with PlayStation symbols, Delete and Back"></p>
 
-Press **G**, the gallery button, or move to it with your controller. It opens right above the bar.
+Press **G**, the gallery button, or move to it with your controller. It opens right above the bar, and clips start playing, muted.
 
-- **Browse** all your clips and screenshots, or filter to just **Clips** or **Screenshots**.
-- **Clips play** straight away, muted. Turn the sound on with one press (**M**, or □ / X on a controller).
-- **Full screen** with **F** (or △ / Y). Skip 10 seconds with **J** / **L** (or the triggers).
-- **Delete** with the bin (or **Delete**). It asks first, and the file goes to the Trash.
-- Keyboard and controller work everywhere in it. The hints at the bottom change with where you are.
+It has three rows. Move between them with **up / down**; a white ring shows where you are.
 
-In **Full screen** mode, recording pauses while the gallery is open so it doesn't end up in your clips, then picks up again.
+| Row | What's in it |
+|---|---|
+| Top | Filters: **All**, **Clips**, **Screenshots** |
+| Middle | The clip or screenshot, with its controls |
+| Bottom | **Delete** and **Back** |
+
+| Do this | Controller | Keyboard |
+|---|---|---|
+| Browse | **LB / RB** | **PgUp / PgDn** |
+| Skip 10 seconds (on a clip) | **◀ ▶** | **← →** |
+| Play or pause a clip | **A** (✕) | **Space** |
+| Sound on or off | **X** (□) | **M** |
+| Full screen | **Y** (△) | **F** |
+| Delete | the **Delete** button | **Delete** |
+| Back to the bar | **B** (○) | **Esc** |
+
+- **Delete** asks first, and the file goes to the Trash.
+- The hints at the bottom show your own controller's symbols, and change with where you are.
+- In **Full screen** mode, recording pauses while the gallery is open so it doesn't end up in your clips, then picks up again.
 
 ## Settings
 
-<p align="center"><img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p, 1080p or Native, Frame rate Auto, 60 or 120 fps, Quality Standard, High or Ultra, Format Auto, H.264, H.265 or AV1"></p>
+<p align="center"><img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 480p, 720p, 1080p or Native; Frame rate Auto, 60 or 120 fps; Quality Standard, High or Ultra; Format Auto, H.264, H.265 or AV1"></p>
 
 Open with the **gear** (**S**, or **Y** on a controller), pick what you want, then **Apply**. Your replay is kept.
 
@@ -154,8 +171,8 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | | Keep history | **Off**: stopping clears the replay. On: it's kept, and every full replay is also saved to Videos. |
 | **Video** | Resolution | 480p, 720p, **1080p**, Native (your screen's shape, up to 1080p). 480p: smallest files, softest picture. |
 | | Frame rate | **Auto** matches your screen (120 on a 120 Hz screen, 60 on a 60 Hz one). Smoothest for your game. Or always 60 fps or 120 fps. |
-| | Quality | Standard, **High**, Ultra. Higher is sharper and takes more space. |
-| | Format | **Auto** picks one your PC records well: H.264 on most PCs. |
+| | Quality | **Standard**, High, Ultra. Higher is sharper and takes more space. |
+| | Format | **Auto** picks one your PC records well: H.264 on most PCs. Or pick one yourself: |
 | | | H.264: plays everywhere. |
 | | | H.265: smaller files. Some older devices can't play it. |
 | | | AV1: smoothest on newer hardware. Some older devices can't play it. |
@@ -167,22 +184,24 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | | Instant bar | **On**: the bar opens instantly (about 100 MB). Off: saves that memory. |
 | | Problem? | **Make a report** for a [GitHub issue](#something-wrong); **Open logs** shows the log files |
 
-Clips are always MP4. Formats your PC can't record are greyed out.
+Clips are always MP4. Formats your PC can't record are greyed out. If a format stops working, Momento switches to another by itself and tells you.
 
 <details><summary><b>See every tab</b></summary>
 
 <p align="center"><img src="assets/settings-general.png" width="880" alt="Settings, General tab: Record, Replay length, Keep history"></p>
 <p align="center"><img src="assets/settings-audio.png" width="880" alt="Settings, Audio tab: Sound, Mic, Mic device and Menu sounds"></p>
 <p align="center"><img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: PS / Xbox + Down or Off"></p>
-<p align="center"><img src="assets/settings-misc.png" width="880" alt="Settings, Misc tab: Hour warning and Instant bar"></p>
+<p align="center"><img src="assets/settings-misc.png" width="880" alt="Settings, Misc tab: Hour warning, Instant bar, and Problem? with Make a report and Open logs"></p>
 </details>
 
-**Disk space** for a full replay at 1080p, 60 fps (Momento needs this plus 1 GB free to start). At 120 fps, like Auto on a 120 Hz screen, it's about 1.5x:
+**Disk space** for a full replay at 1080p (Momento needs this plus 1 GB free to start). Frame rate **Auto** records at 60 or 120 fps, to match your screen:
 
-| Replay length | Standard | High (default) | Ultra |
-|---|---|---|---|
-| 15 min (default) | 1.1 GB | **1.7 GB** | 2.8 GB |
-| 60 min | 4.5 GB | 6.8 GB | 11.2 GB |
+| Replay length | Frame rate | Standard (default) | High | Ultra |
+|---|---|---|---|---|
+| 15 min (default) | 60 fps | **1.1 GB** | 1.7 GB | 2.8 GB |
+| 15 min (default) | 120 fps | **1.7 GB** | 2.5 GB | 4.3 GB |
+| 60 min | 60 fps | 4.5 GB | 6.8 GB | 11.2 GB |
+| 60 min | 120 fps | 6.8 GB | 9.9 GB | 17.1 GB |
 
 The replay never grows past its length. The free space in the bar turns yellow, then red, when it's getting tight, and you get a notification.
 
@@ -204,23 +223,23 @@ Momento 1.0 was tested on this setup:
 
 | | |
 |---|---|
-| Device | ASUS ROG Ally (Z1 Extreme) |
+| Device | ASUS ROG Ally (Z1 Extreme), 120 Hz screen |
 | System | Bazzite, KDE Plasma 6.7 |
-| Game | Rematch |
-| Recording | 1080p, 60 fps, Window and Full screen |
+| Game | Rematch, Full screen |
+| Settings | 1080p, Frame rate Auto (120 fps), Standard, H.264 |
 
 | What we checked | Result |
 |---|---|
-| Game FPS while recording | A few frames lower: about 5–10 FPS on average in this game |
-| Stutters | Noticeably fewer with AV1 than with H.264, in every run |
+| Game FPS while recording | About 3–5 FPS lower, with only occasional small dips |
+| Recording at 60 fps on the 120 Hz screen | More stutter than 120 fps. Auto avoids this by matching your screen. |
 | Momento's memory | About 150 MB while recording |
 | Steam Gaming Mode | Works |
 
 | Not tested yet |
 |---|
-| NVIDIA, Intel and older AMD graphics |
-| Steam Deck |
-| GNOME, Hyprland |
+| NVIDIA, Intel and other AMD graphics |
+| Steam Deck and other handhelds |
+| GNOME, Hyprland and other desktops |
 | Other distros |
 
 Tried it? [Tell us how it runs](https://github.com/mehulchachada/momento/issues/new?template=how-it-runs.yml). It takes 2 minutes.
@@ -256,7 +275,7 @@ Clips are in `~/Videos/Momento`, screenshots in `~/Videos/Momento/Images`. The n
 </details>
 <details><summary><b>Does it lower my FPS?</b></summary>
 
-A little. On our ROG Ally it was about 5–10 FPS in a demanding game, with fewer stutters in AV1. See [Tested on](#tested-on). Different PC? [Tell us how it runs](https://github.com/mehulchachada/momento/issues/new?template=how-it-runs.yml).
+A little. On our ROG Ally it was about 3–5 FPS in Rematch at 1080p with Frame rate Auto and Standard quality, with only occasional small dips. See [Tested on](#tested-on). Different PC? [Tell us how it runs](https://github.com/mehulchachada/momento/issues/new?template=how-it-runs.yml).
 </details>
 <details><summary><b>Can I use it outside games?</b></summary>
 
@@ -293,7 +312,7 @@ Momento records your **default** sound output. If the game plays through another
 </details>
 <details><summary><b>Will it wear out my SSD?</b></summary>
 
-It writes about 7 GB per hour of play at the default settings, a small part of a typical SSD's rated life. Pick a lower quality to write less.
+At the default settings it writes about 4.5 GB per hour of play (6.8 GB at 120 fps), a small part of a typical SSD's rated life. Pick a lower resolution to write less.
 </details>
 <details><summary><b>Running <code>momento</code> starts a different program</b></summary>
 

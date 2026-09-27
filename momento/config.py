@@ -50,7 +50,7 @@ DEFAULTS = {
         # Other shapes are fitted with black bars, never stretched.
         "resolution": "1080p",
         # standard | high | ultra
-        "quality": "high",
+        "quality": "standard",
         # 0 = derive from resolution + quality; any number overrides (kbps).
         "bitrate_kbps": 0,
         # auto | h264 | h265 | av1: the video format. Auto picks one this PC's graphics
