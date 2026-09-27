@@ -93,6 +93,12 @@ APPLY_CLOSE_MS = 1_200   # "Saved — recording restarted" after Apply in settin
 # the compositor has redrawn the screen without it (a few frames at 30-60 fps).
 SHOT_DELAY_MS = 150
 SHOT_TIMEOUT_S = 30
+# A save closes the bar at once; the daemon exports in the background ("wait": false).
+SAVE_ASK_TIMEOUT_S = 120  # an older daemon without "wait" answers after the export
+SAVE_NOTE_MS = 4_000      # "Saved 30s · 12 s ago" in the status area, once, on the next open
+SAVE_RECENT_S = 600       # a result older than this isn't worth showing any more
+SAVE_SPIN_MS = 1_000      # the saving icon's arc turns once a second...
+SAVE_FRAME_MS = 33        # ...repainted at most ~30 times a second (only while on screen)
 TICK_MS = 250            # the recording timer ticks locally between the 1 s status polls
 DEFAULT_SECONDS = 60
 ICON_W = PILL_H + 2 * PILL_INSET   # pause / stop / screenshot / gear: circles
@@ -373,6 +379,54 @@ def send_resident(cmd: str, timeout: float = 2.0, path=None) -> dict | None:
     except (ipc.IPCError, OSError, ValueError) as e:
         log.warning("the resident clip bar did not answer: %s", e)
         return None
+
+
+def clip_saves(st: dict | None) -> list[dict]:
+    """The clip saves in a status (status.saves; keep_history's hour saves left out)."""
+    jobs = (st or {}).get("saves")
+    if not isinstance(jobs, list):
+        return []
+    return [j for j in jobs if isinstance(j, dict) and j.get("kind", "clip") == "clip"]
+
+
+def saving_badge(st: dict | None):
+    """(count, "Saving 30s…" / "Saving 3 clips…") while clips are being saved, else None."""
+    active = [j for j in clip_saves(st) if j.get("state") in ("queued", "saving")]
+    if not active:
+        return None
+    if len(active) == 1:
+        secs = active[0].get("requested")
+        return 1, f"Saving {dur_label(secs)}\u2026" if isinstance(secs, (int, float)) else "Saving\u2026"
+    return len(active), f"Saving {len(active)} clips\u2026"
+
+
+def _ago(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 2:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds} s ago"
+    return f"{seconds // 60} min ago"
+
+
+def save_note(job: dict, now: float | None = None) -> tuple[str, str]:
+    """What the status area says about a finished save: ("Saved 30s · 12 s ago", "saved") or a
+    short warning ("Not saved: disk full · 12 s ago", "warn")."""
+    now = time.time() if now is None else now
+    ago = _ago(now - float(job.get("finished_at") or now))
+    if job.get("state") == "saved":
+        secs = job.get("seconds") or job.get("requested")
+        return f"Saved {dur_label(secs)} \u00b7 {ago}", "saved"
+    code, error = job.get("code"), str(job.get("error") or "")
+    if code == "no_storage":
+        what = "Not saved: disk full"
+    elif code == "cancelled":
+        what = "Save cancelled"
+    elif error == "nothing recorded yet":
+        what = "Not saved: nothing recorded"
+    else:
+        what = "Save failed"
+    return f"{what} \u00b7 {ago}", "warn"
 
 
 def toggle() -> bool:
@@ -1325,6 +1379,71 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             h = min(TAB_PILL_H, self.height())
             return QRectF(PILL_INSET, (self.height() - h) / 2, self.width() - 2 * PILL_INSET, h)
 
+    class SaveBadge(QWidget):
+        """Clips being saved: a thin arc turning once a second, and how many when more than one.
+
+        Sits over the status label (its child), which it blanks meanwhile, so nothing in
+        the bar moves. Repaints only itself, at most every SAVE_FRAME_MS, and only while
+        on screen; still with ANIMATE off.
+        """
+
+        ICON = 14
+
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.count = 0
+            f = ui_font(tabular=True)
+            f.setPixelSize(NOTE_PX)
+            self.setFont(f)
+            self.timer = QTimer(self)
+            self.timer.setInterval(SAVE_FRAME_MS)
+            self.timer.timeout.connect(self.update)
+            self.hide()
+
+        def set_count(self, count, tip):
+            self.count = count
+            label = str(count) if count > 1 else ""
+            w = self.ICON + (5 + self.fontMetrics().horizontalAdvance(label) if label else 0)
+            self.setGeometry(0, 0, w + 2, self.parentWidget().height())
+            self.setToolTip(tip)
+            self.setAccessibleName(tip)
+            self.update()
+
+        def showEvent(self, ev):
+            if ANIMATE:
+                self.timer.start()
+            super().showEvent(ev)
+
+        def hideEvent(self, ev):
+            self.timer.stop()
+            super().hideEvent(ev)
+
+        def angle(self):
+            if not ANIMATE:
+                return 90.0
+            period = SAVE_SPIN_MS / 1000
+            return 90.0 - (time.monotonic() % period) / period * 360.0
+
+        def paintEvent(self, ev):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            y = self.height() / 2
+            r = 5.5
+            box = QRectF(1 + self.ICON / 2 - r, y - r, 2 * r, 2 * r)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(BORDER).lighter(160), 1.6))
+            p.drawEllipse(box)                                  # the track
+            pen = QPen(QColor(MUTED), 1.6)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawArc(box, int(self.angle() * 16), -100 * 16)   # the part that turns
+            if self.count > 1:
+                p.setPen(QColor(NOTE))
+                p.setFont(self.font())
+                p.drawText(QRectF(1 + self.ICON + 5, 0, self.width(), self.height()),
+                           Qt.AlignVCenter | Qt.AlignLeft, str(self.count))
+            p.end()
+
     class Logo(QWidget):
         """The Momento mark (assets/logo.svg), redrawn so an install needs no file."""
 
@@ -1855,8 +1974,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
     class Bar(QWidget):
         def __init__(self):
             super().__init__()
-            self.saving = False
+            self.saving = False       # (kept for the guards; a save no longer holds the bar)
             self.done = False
+            # Saves run in the daemon after the bar closed (status.saves). While one runs
+            # the status area shows SaveBadge; the next result not yet shown appears there
+            # once ("Saved 30s · 12 s ago") for SAVE_NOTE_MS.
+            self.save_badge_state = None   # (count, tooltip) | None
+            self.save_seen_at = 0.0        # finished_at of the newest result already shown
+            self.save_note_shown = None    # (text, kind) | None
             self.online = None
             self.running = False      # daemon reachable
             self.paused = False
@@ -2012,6 +2137,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.name.setFont(nf)
             self.name.setContentsMargins(0, 0, 8, 0)
             hrow.addWidget(self.name)
+            self.name_text = ""            # what the label says when no save takes it over
+            self.save_badge = SaveBadge(self.name)
+            self.save_note_timer = QTimer(self)
+            self.save_note_timer.setSingleShot(True)
+            self.save_note_timer.setInterval(SAVE_NOTE_MS)
+            self.save_note_timer.timeout.connect(self.end_save_note)
             self.time = QLabel("0:00")
             self.time.setFont(ui_font(tabular=True))
             hrow.addWidget(self.time)
@@ -2138,8 +2269,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.on_status(st)
 
         def _sig_saved(self, gen, r):
-            if gen == self.gen:
-                self.on_saved(r)
+            self.on_save_sent(r)       # the bar is already hidden: any open's reply counts
 
         def _sig_settings(self, gen, data):
             if gen == self.gen:
@@ -2410,10 +2540,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             room = self.stopped_w if sentence else self.name_w
             fm = self.name.fontMetrics()
             shown = label if fm.horizontalAdvance(label) <= room else fm.elidedText(label, Qt.ElideRight, room)
+            self.name_text = shown
             if self.name.text() != shown:
                 self.name.setText(shown)
             self.name.setAccessibleName(label)
             self.name.setHidden(not label)
+            self.sync_save_ui()
             self.dot.setAccessibleName(self.NAMES[view])
             for c in self.controls:
                 pb = c["pause"]
@@ -2502,6 +2634,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def apply_status(self, st):
             self.last_status = st
             self.status_at = time.monotonic()
+            if isinstance(st, dict):
+                self.take_saves(st)
             # the bar row stays live under the gallery (the time ticks on, pause works)
             if self.saving or self.done or self.mode not in ("clip", "gallery") or self.control_busy:
                 return
@@ -2619,6 +2753,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             super().hideEvent(ev)
 
         def choose(self, opt):
+            """Save the last ``opt.seconds``: the bar closes at once (controller and keyboard
+            released), and the daemon saves in the background ("wait": false). Its
+            notification tells the result; the next open shows it in the status area."""
             if self.saving or self.done or self.control_busy:
                 return
             if not self.online or not opt.isEnabled():
@@ -2627,40 +2764,111 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if not self.gallery_yield():
                 return
             self.sound("select")
-            self.saving = True
+            self.done = True
             self.idle.stop()
+            self.poll.stop()
             _store_choice(opt.seconds)
-            shown = min(opt.seconds, self.buffered) if self.buffered else opt.seconds
-            self.show_line(f"Saving last {dur_label(shown)}…")
-            self.relayout()
             secs = opt.seconds
-            gen = self.gen
+            bridge = self.bridge
+            if self.resident:
+                self.dismiss()
+            else:
+                QApplication.instance().setQuitOnLastWindowClosed(False)  # quit after the reply
+                self.hide()
 
             def work():
                 try:
                     # The clip runs up to now. In full screen mode the bar itself may be
                     # in it; recording a window instead keeps it out.
-                    r = ipc.request({"cmd": "save", "seconds": secs}, timeout=120)
+                    r = ipc.request({"cmd": "save", "seconds": secs, "wait": False}, timeout=SAVE_ASK_TIMEOUT_S)
                 except Exception as e:  # noqa: BLE001
-                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
-                self.bridge.saved.emit(gen, r)
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__, "unreachable": True}
+                bridge.saved.emit(-1, {**r, "asked": secs})
             threading.Thread(target=work, daemon=True).start()
 
-        def on_saved(self, r):
-            self.saving = False
-            self.done = True
-            self.relayout()
-            fm = self.line.fontMetrics()
-            room = max(120, self.line.width())
-            self.sound("save" if r.get("ok") else "error")    # the result, not the press
+        def on_save_sent(self, r):
+            """The daemon took the save (or refused it). The bar is gone by now: the daemon's
+            notification is the feedback, and a one-shot bar quits here."""
             if r.get("ok"):
-                name = Path(str(r.get("path", ""))).name or "clip"
-                name = fm.elidedText(name, Qt.ElideMiddle, room - fm.horizontalAdvance("Saved    "))
-                self.show_line(f"Saved&nbsp;&nbsp;<span style='color:{MUTED}'>{_esc(name)}</span>")
+                log.info("save asked: job %s, %s", r.get("job"), r.get("state") or "saved")
+                st = self.last_status
+                if isinstance(r.get("job"), int) and isinstance(st, dict) and st.get("ok"):
+                    # until the next status says it: the next open shows the icon at once
+                    job = {"job": r["job"], "kind": "clip", "state": r.get("state") or "saving",
+                           "requested": r.get("asked"), "finished_at": None}
+                    self.last_status = {**st, "saves": [*clip_saves(st), job]}
             else:
-                err = fm.elidedText(str(r.get("error") or "Save failed"), Qt.ElideRight, room)
-                self.show_line(f"<span style='color:{RED}'>{_esc(err)}</span>")
-            self.after(RESULT_CLOSE_MS, self.close_bar)
+                log.warning("save not asked: %s", r.get("error"))
+                self.sound("error")
+                if r.get("unreachable"):
+                    # no daemon, no notification: say it on the next open instead
+                    self.save_seen_at = 0.0
+                    st = self.last_status if isinstance(self.last_status, dict) else {}
+                    job = {"job": 0, "kind": "clip", "state": "failed", "requested": r.get("asked"),
+                           "finished_at": time.time(), "error": "Momento isn't running"}
+                    self.last_status = {**st, "saves": [*clip_saves(st), job]}
+            if not self.resident:
+                QApplication.instance().quit()
+
+        def on_daemon_saved(self, ok):
+            """The daemon's word that a save finished (control socket "saved"): its sound,
+            even while hidden; an open bar also fetches the result at once."""
+            self.sounds_start()
+            self.sound("save" if ok else "error")
+            if self.isVisible():
+                self.refresh_async()
+
+        # ---------------- saving: the icon, then the result, in the status area
+        def take_saves(self, st):
+            """From a status: the saving icon, and a result not shown yet (newest first)."""
+            self.save_badge_state = saving_badge(st)
+            done = [j for j in clip_saves(st) if j.get("state") in ("saved", "failed", "cancelled")
+                    and isinstance(j.get("finished_at"), (int, float))]
+            if not done:
+                return
+            last = max(done, key=lambda j: j["finished_at"])
+            if last["finished_at"] <= self.save_seen_at:
+                return
+            self.save_seen_at = last["finished_at"]
+            if self.save_badge_state is None and time.time() - last["finished_at"] < SAVE_RECENT_S:
+                self.save_note_shown = save_note(last)
+                self.save_note_timer.start()
+
+        def end_save_note(self):
+            self.save_note_shown = None
+            self.sync_save_ui()
+
+        def sync_save_ui(self):
+            """Put the icon or the result over the status label, at the label's own width,
+            so nothing next to it moves; or give the label back."""
+            name, badge = self.name, self.save_badge
+            usable = bool(self.name_text) and not self.dotbox.isHidden()
+            if usable and (self.save_badge_state or self.save_note_shown):
+                if name.text() != self.name_text:
+                    name.setText(self.name_text)
+                name.setFixedWidth(name.sizeHint().width())
+                if self.save_badge_state:
+                    name.setText("")
+                    name.setStyleSheet("")
+                    badge.set_count(*self.save_badge_state)
+                    badge.show()
+                    name.setAccessibleName(self.save_badge_state[1])
+                else:
+                    badge.hide()
+                    text, kind = self.save_note_shown
+                    fm = name.fontMetrics()
+                    room = name.width() - 8
+                    name.setText(text if fm.horizontalAdvance(text) <= room
+                                 else fm.elidedText(text, Qt.ElideRight, room))
+                    name.setStyleSheet(f"color: {NOTE if kind == 'saved' else WARN};")
+                    name.setAccessibleName(text)
+                return
+            badge.hide()
+            name.setStyleSheet("")
+            name.setMinimumWidth(0)
+            name.setMaximumWidth(16777215)
+            if name.text() != self.name_text:
+                name.setText(self.name_text)
 
         # ---------------- screenshot
         def take_screenshot(self):
@@ -3816,6 +4024,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.ticker.stop()
             self.live_ticking = False
             self.saving = self.done = False
+            self.save_note_shown = None         # a result is shown once, on the open it lands in
+            self.save_note_timer.stop()
             self.control_busy = self.stopping = self.loading_settings = False
             self.resume_picks = False
             self.status_inflight = False
@@ -4274,6 +4484,8 @@ def start_resident(app, use_layer_shell: bool = False, path=None):
             bar.present()
         elif cmd == "hide":
             bar.dismiss()
+        elif cmd == "saved":
+            bar.on_daemon_saved(bool(msg.get("ok")))   # a save finished: its sound
         elif cmd == "quit":
             from PySide6.QtCore import QTimer
 

@@ -127,6 +127,14 @@ class FakeDaemon:
         self.gallery_pid = None
         self.shots = []                  # (monotonic time, what on_shot() saw) per screenshot request
         self.on_shot = None              # called when a screenshot request arrives (e.g. is the bar visible?)
+        # "wait": false saves: jobs finished one at a time by a thread, each once `release` is
+        # set (set by default: then after save_delay); status.saves lists them.
+        self.jobs = []
+        self.save_delay = 0.2
+        self.release = threading.Event()
+        self.release.set()
+        self._lock = threading.Lock()
+        self._worker = None
 
     def request(self, msg, timeout=120, **_):
         if not self.running:
@@ -142,6 +150,8 @@ class FakeDaemon:
             elif self.paused:
                 st.update(state="paused", recording=False, pause_reason=self.pause_reason)
             st.update(self.extra)
+            with self._lock:
+                st["saves"] = [dict(j) for j in self.jobs]
             return st
         if msg["cmd"] == "settings":
             return settings_reply(self.devices, free=self.free, source=self.source, **self.values)
@@ -191,6 +201,19 @@ class FakeDaemon:
             self.shots.append((time.monotonic(), self.on_shot() if self.on_shot else None))
             return {"ok": True, "path": "/home/user/Videos/Momento/Images/Momento_2026-09-26_21-04-11.png",
                     "width": 1920, "height": 1080}
+        if msg["cmd"] == "save" and msg.get("wait") is False:
+            self.saves.append(msg["seconds"])
+            self.save_msgs.append(dict(msg))
+            with self._lock:
+                ahead = any(j["state"] in ("queued", "saving") for j in self.jobs)
+                job = {"job": len(self.jobs) + 1, "kind": "clip", "state": "queued" if ahead else "saving",
+                       "requested": msg["seconds"], "asked_at": time.time(), "finished_at": None,
+                       "path": None, "seconds": None, "error": None, "code": None}
+                self.jobs.append(job)
+                if self._worker is None:
+                    self._worker = threading.Thread(target=self._finish_jobs, daemon=True)
+                    self._worker.start()
+            return {"ok": True, "job": job["job"], "state": job["state"]}
         if msg["cmd"] == "save":
             self.saves.append(msg["seconds"])
             self.save_msgs.append(dict(msg))
@@ -201,6 +224,30 @@ class FakeDaemon:
             return {"ok": True, "path": "/home/user/Videos/Momento/Replay_2026-09-26_21-04-11_5m.mp4",
                     "seconds": secs, "requested": msg["seconds"], "partial": secs < msg["seconds"]}
         return {"ok": False, "error": "unknown"}
+
+
+def _fake_finish(self):
+    """FakeDaemon's save worker: one job at a time, in order."""
+    while True:
+        with self._lock:
+            job = next((j for j in self.jobs if j["state"] in ("queued", "saving")), None)
+            if job is None:
+                self._worker = None
+                return
+            job["state"] = "saving"
+        time.sleep(self.save_delay)
+        self.release.wait(10)
+        with self._lock:
+            secs = min(job["requested"], STATUS["buffered"])
+            if self.fail:
+                job.update(state="failed", error="encoder stalled: no segments written")
+            else:
+                job.update(state="saved", seconds=secs,
+                           path=f"/home/user/Videos/Momento/Momento_2026-09-26_21-04-11_{job['job']}.mp4")
+            job["finished_at"] = time.time()
+
+
+FakeDaemon._finish_jobs = _fake_finish
 
 
 def pump(app, seconds):
@@ -277,7 +324,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(daemon)
         bar.choose(bar.options[1])
         self.wait_for(lambda: daemon.save_msgs)
-        self.assertEqual(daemon.save_msgs[0], {"cmd": "save", "seconds": 30})
+        self.assertEqual(daemon.save_msgs[0], {"cmd": "save", "seconds": 30, "wait": False})
         for gone in ("CAPTURE_EXCLUDED", "_exclude_from_capture", "_parse_kwin_version", "_kwin_version"):
             self.assertFalse(hasattr(overlay, gone), gone)   # no compositor-specific code in the bar
 
@@ -308,31 +355,22 @@ class OverlayOffscreen(unittest.TestCase):
         self.shot(bar, "clip", "v3")
         self.shot(bar, "clip-recording-green", "v4")
 
-        h = bar.size()
-        self.key(Qt.Key_Return)  # saves 5m
-        pump(self.app, 0.05)
-        self.assertTrue(bar.saving)
-        self.assertEqual(bar.stack.currentIndex(), 1)
-        self.assertEqual(bar.size(), h)
-        self.assertIn("Saving last 5m", bar.line.text())
-        self.shot(bar, "saving")
-        self.wait_done(bar)
+        self.key(Qt.Key_Return)  # saves 5m: the bar closes at once, the daemon saves
+        self.assertFalse(bar.isVisible())
         self.assertTrue(bar.done)
-        self.assertEqual(daemon.saves, [300])
-        self.assertIn("Replay_2026-09-26_21-04-11_5m.mp4", bar.line.text())
+        self.wait_for(lambda: daemon.saves == [300])
         self.assertEqual(overlay._last_choice(), 300)
-        self.assertEqual(bar.size(), h)          # the result line keeps the bar's size
-        self.shot(bar, "saved")
-        self.shot(bar, "saved", "v3")
 
     def test_number_key_and_error(self):
         daemon = FakeDaemon(True, fail=True)
         bar = self.make(daemon)
         self.key(Qt.Key_1)
-        self.wait_done(bar)
-        self.assertEqual(daemon.saves, [15])
-        self.assertIn("encoder stalled", bar.line.text())
-        self.shot(bar, "error")
+        self.assertFalse(bar.isVisible())                   # closed at once; the notification tells
+        self.wait_for(lambda: daemon.jobs and daemon.jobs[0]["state"] == "failed")
+        bar2 = self.make(daemon)                             # the next open says it, in yellow
+        self.assertTrue(bar2.name.text().startswith("Save failed \u00b7 "), bar2.name.text())
+        self.assertIn(overlay.WARN, bar2.name.styleSheet())
+        self.shot(bar2, "error")
 
     def assert_off(self, bar):
         self.assertEqual(bar.stack.currentIndex(), 0)          # the same clip bar, not a line page
@@ -631,8 +669,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar = self.make(daemon)
         self.assertTrue(bar.paused)
         self.key(Qt.Key_2)
-        self.wait_done(bar)
-        self.assertEqual(daemon.saves, [30])
+        self.wait_for(lambda: daemon.saves == [30])
 
     def test_stop_confirm(self):
         daemon = FakeDaemon(True)
@@ -1486,8 +1523,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(bar.live_ticking and bar.ticker.isActive())
         self.wait_for(lambda: bar.time.text() == "0:14", timeout=1.5)  # ticks between polls
         bar.choose(bar.options[0])
-        self.assertIn("Saving last 10s", bar.line.text())       # clamped to what is saveable
-        self.wait_done(bar)
+        self.wait_for(lambda: daemon.saves == [15])
         # an older daemon without buffered_live: the time is buffered
         bar2 = self.make(FakeDaemon(True))
         self.assertEqual(bar2.time.text(), "12:34")
@@ -1910,8 +1946,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(next(o for o in bar.options if o.seconds == overlay._last_choice()).hasFocus())
         self.shot(bar, "stopped-window-kept", "v7")
         self.key(Qt.Key_2)                                           # the last 30 s
-        self.wait_done(bar)
-        self.assertEqual(daemon.saves, [30])
+        self.wait_for(lambda: daemon.saves == [30])
         # without keep_history the lengths stay off, even if footage were reported
         bar2 = self.make(FakeDaemon(True, extra={**self.STOPPED, "buffered": 45.0}))
         self.assertTrue(all(not o.isEnabled() for o in bar2.options))
@@ -2127,17 +2162,15 @@ class AutoHide(unittest.TestCase):
         self.wait_for(lambda: not bar.isVisible(), timeout=2)
         self.assertLess(bar.leave.interval(), 1000)
 
-    def test_leaving_during_a_save_waits_for_the_result(self):
+    def test_a_save_closes_the_bar_at_once(self):
         daemon = FakeDaemon(True)
+        daemon.release.clear()                                        # the save takes its time
         bar = self.resident(daemon)
-        self.key(Qt.Key_Return)                                       # save (0.2 s at the fake daemon)
-        self.assertTrue(bar.saving)
-        self.leave(bar)
-        pump(self.app, overlay.LEAVE_HIDE_MS / 1000 + 0.1)
-        self.assertTrue(bar.isVisible())                              # the save goes on...
-        self.wait_for(lambda: bar.done)
-        self.assertIn("Saved", bar.line.text())                       # ...and its result shows
-        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.key(Qt.Key_Return)
+        self.assertFalse(bar.isVisible())                             # no waiting for the export
+        self.assertFalse(bar.idle.isActive() or bar.poll.isActive() or bar.leave.isActive())
+        self.wait_for(lambda: daemon.jobs and daemon.jobs[0]["state"] == "saving")
+        daemon.release.set()
 
     def test_leave_while_hidden_or_shown_again(self):
         bar = self.resident()
@@ -2146,6 +2179,147 @@ class AutoHide(unittest.TestCase):
         self.assertFalse(bar.leave.isActive())
         bar.present()
         self.assertFalse(bar.leave.isActive())                        # a new open starts clean
+
+
+class SavingInBackground(unittest.TestCase):
+    """A save closes the bar at once; the next open shows the saving icon, then the result."""
+
+    make = OverlayOffscreen.make
+    wait_for = OverlayOffscreen.wait_for
+    key = OverlayOffscreen.key
+
+    @classmethod
+    def setUpClass(cls):
+        OverlayOffscreen.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        OverlayOffscreen.tearDownClass.__func__(cls)
+
+    def shot(self, bar, name):
+        OverlayOffscreen.shot(self, bar, name, "asyncsave")
+        review = os.environ.get("MOMENTO_REVIEW_DIR")
+        if review:
+            Path(review).mkdir(parents=True, exist_ok=True)
+            img = QPixmap(str(SHOT_DIR / f"momento-asyncsave-{name}.png"))
+            img.save(str(Path(review) / f"bar-{name}.png"))
+
+    def resident(self, daemon):
+        bar = self.make(daemon)
+        bar.resident = True
+        bar.dismiss()
+        bar.present()
+        pump(self.app, 0.1)
+        return bar
+
+    def layout(self, bar):
+        """Where everything but the status label sits (it must not move)."""
+        return (bar.size(), bar.time.geometry(), bar.gallery_btn.geometry(), bar.dot.mapTo(bar, QPoint(0, 0)),
+                [o.geometry() for o in bar.options], bar.storage_hint.geometry())
+
+    def test_icon_while_saving_then_the_result(self):
+        daemon = FakeDaemon(True)
+        daemon.release.clear()                                  # the export takes its time
+        bar = self.resident(daemon)
+        before = self.layout(bar)
+        name_w = bar.name.width()
+        self.assertFalse(bar.save_badge.isVisible())
+        bar.choose(bar.options[1])                              # 30s: gone at once
+        self.assertFalse(bar.isVisible())
+        self.wait_for(lambda: daemon.jobs)
+        pump(self.app, 0.1)
+        bar.present()                                           # opened again while it saves
+        self.wait_for(lambda: bar.save_badge.isVisible())
+        self.assertEqual(bar.name.text(), "")                   # the icon instead of text
+        self.assertEqual(bar.save_badge.toolTip(), "Saving 30s\u2026")
+        self.assertEqual(bar.save_badge.accessibleName(), "Saving 30s\u2026")
+        self.assertEqual(bar.save_badge.count, 1)
+        self.assertEqual(self.layout(bar), before)              # nothing moved, same width
+        self.assertEqual(bar.name.width(), name_w)
+        if overlay.ANIMATE:
+            self.assertTrue(bar.save_badge.timer.isActive())
+            self.assertLessEqual(bar.save_badge.timer.interval(), 34)   # at most ~30 fps
+        self.shot(bar, "saving-icon")
+        bar.dismiss()
+        self.assertFalse(bar.save_badge.isVisible() or bar.save_badge.timer.isActive())   # only on screen
+        daemon.release.set()
+        self.wait_for(lambda: daemon.jobs[0]["state"] == "saved")
+        daemon.jobs[0]["finished_at"] -= 12                     # it finished 12 s ago, while hidden
+        bar.save_note_timer.setInterval(400)
+        bar.present()
+        self.wait_for(lambda: bar.name.text() == "Saved 30s \u00b7 12 s ago")
+        self.assertFalse(bar.save_badge.isVisible())
+        self.assertIn(overlay.NOTE, bar.name.styleSheet())
+        self.assertEqual(self.layout(bar), before)
+        self.shot(bar, "saved-note")
+        self.wait_for(lambda: bar.name.text() == "Recording Full Screen", timeout=2)   # briefly
+        self.assertEqual(self.layout(bar), before)
+        bar.dismiss()
+        bar.present()
+        pump(self.app, 0.2)
+        self.assertEqual(bar.name.text(), "Recording Full Screen")                    # shown once
+
+    def test_count_with_two_saves(self):
+        daemon = FakeDaemon(True)
+        daemon.release.clear()
+        bar = self.resident(daemon)
+        before = self.layout(bar)
+        bar.choose(bar.options[0])
+        self.wait_for(lambda: len(daemon.jobs) == 1)
+        bar.present()
+        pump(self.app, 0.05)
+        bar.choose(bar.options[1])
+        self.wait_for(lambda: len(daemon.jobs) == 2)
+        pump(self.app, 0.1)
+        bar.present()
+        self.wait_for(lambda: bar.save_badge.isVisible() and bar.save_badge.count == 2)
+        self.assertEqual(bar.save_badge.toolTip(), "Saving 2 clips\u2026")
+        self.assertEqual([j["state"] for j in daemon.jobs], ["saving", "queued"])
+        self.assertEqual(self.layout(bar), before)
+        self.shot(bar, "saving-two")
+        daemon.release.set()
+        self.wait_for(lambda: not bar.save_badge.isVisible(), timeout=3)
+        self.assertTrue(bar.name.text().startswith("Saved 30s \u00b7 "), bar.name.text())   # the newest
+
+    def test_animation_off(self):
+        self.addCleanup(setattr, overlay, "ANIMATE", overlay.ANIMATE)
+        overlay.ANIMATE = False
+        daemon = FakeDaemon(True)
+        daemon.release.clear()
+        self.addCleanup(daemon.release.set)
+        bar = self.resident(daemon)
+        bar.choose(bar.options[0])
+        self.wait_for(lambda: daemon.jobs)
+        bar.present()
+        self.wait_for(lambda: bar.save_badge.isVisible())
+        self.assertFalse(bar.save_badge.timer.isActive())       # a still icon: nothing repaints
+        a = bar.save_badge.angle()
+        time.sleep(0.1)
+        self.assertEqual(bar.save_badge.angle(), a)
+
+    def test_a_failed_save_shows_a_warning(self):
+        daemon = FakeDaemon(True, fail=True)
+        bar = self.resident(daemon)
+        bar.choose(bar.options[0])
+        self.wait_for(lambda: daemon.jobs and daemon.jobs[0]["state"] == "failed")
+        bar.present()
+        self.wait_for(lambda: bar.name.text().startswith("Save failed \u00b7 "))
+        self.assertIn(overlay.WARN, bar.name.styleSheet())
+        self.shot(bar, "failed-note")
+
+    def test_note_texts(self):
+        now = 1000.0
+        job = {"state": "saved", "seconds": 30, "requested": 30, "finished_at": now - 12}
+        self.assertEqual(overlay.save_note(job, now), ("Saved 30s \u00b7 12 s ago", "saved"))
+        self.assertEqual(overlay.save_note({**job, "finished_at": now - 0.5}, now)[0], "Saved 30s \u00b7 just now")
+        self.assertEqual(overlay.save_note({**job, "finished_at": now - 130}, now)[0], "Saved 30s \u00b7 2 min ago")
+        fail = {"state": "failed", "finished_at": now - 3, "requested": 30}
+        self.assertEqual(overlay.save_note({**fail, "code": "no_storage"}, now), ("Not saved: disk full \u00b7 3 s ago", "warn"))
+        self.assertEqual(overlay.save_note({**fail, "error": "nothing recorded yet"}, now)[0],
+                         "Not saved: nothing recorded \u00b7 3 s ago")
+        self.assertEqual(overlay.save_note({**fail, "state": "cancelled", "code": "cancelled"}, now)[0],
+                         "Save cancelled \u00b7 3 s ago")
+        self.assertIsNone(overlay.saving_badge({"saves": [{**job, "kind": "hour", "state": "saving"}]}))
 
 
 class ResidentBar(unittest.TestCase):
@@ -2273,10 +2447,7 @@ class ResidentBar(unittest.TestCase):
         self.assert_fresh(bar)                                # opened by the hotkey: ring shown
         self.key(Qt.Key_Right)
         self.key(Qt.Key_Return)                               # save 3m
-        self.wait_for(lambda: bar.done)
-        self.assertIn("Saved", bar.line.text())
-        # "Saved" hides the bar (a one-shot bar quits here); the process stays
-        self.wait_for(lambda: not bar.isVisible(), timeout=overlay.RESULT_CLOSE_MS / 1000 + 2)
+        self.assertFalse(bar.isVisible())                     # hidden at once; the process stays
         self.assertTrue(self.send("ping")["ok"])
         self.assertEqual(overlay._last_choice(), 180)
         self.send("show")
@@ -2287,13 +2458,12 @@ class ResidentBar(unittest.TestCase):
         daemon = FakeDaemon(True)
         bar = self.make(daemon)
         self.send("show")
-        self.key(Qt.Key_1)                                    # save in flight (0.2 s)
-        self.assertTrue(bar.saving)
-        self.send("hide")
+        self.key(Qt.Key_1)                                    # save: hidden at once
+        self.assertFalse(bar.isVisible())
         self.send("show")
         pump(self.app, 0.5)
         self.assertEqual(daemon.saves, [15])
-        self.assert_fresh(bar)                                # the old "Saved" never lands
+        self.assert_fresh(bar)                                # nothing of the save's reply lands on the bar
 
     def test_esc_and_idle_hide(self):
         daemon = FakeDaemon(True)
@@ -2495,6 +2665,23 @@ class ControllerBar(unittest.TestCase):
         self.assertIsNot(self.dev, first)
         self.assertTrue(self.dev.grabbed)
 
+    def test_save_lets_go_of_the_controller_at_once(self):
+        """A slow save: the bar is gone and the pad back with the game before the export ends."""
+        daemon = FakeDaemon(True)
+        daemon.release.clear()
+        self.addCleanup(daemon.release.set)
+        bar = self.open(daemon)
+        bar.resident = True
+        pad = self.dev
+        self.assertTrue(pad.grabbed)
+        self.press(self.A)                             # save the focused length
+        self.assertFalse(bar.isVisible())
+        self.assertFalse(pad.grabbed)                  # released at once...
+        self.assertTrue(pad.closed)
+        self.assertIsNone(bar.pads)
+        self.assertIsNone(self.app.focusWidget())      # ...and the keyboard too
+        self.wait_for(lambda: daemon.jobs and daemon.jobs[0]["state"] == "saving")   # while it still saves
+
     def test_resident_present_and_dismiss(self):
         bar = self.make(FakeDaemon(True))
         bar.hide()
@@ -2599,7 +2786,7 @@ class ControllerBar(unittest.TestCase):
         self.shot(bar, "clip-controller-focus", "v6")
         self.press(self.A)                             # save
         self.wait_for(lambda: daemon.saves == [bar.options[i].seconds])
-        self.wait_for(lambda: bar.done)
+        self.assertTrue(bar.done)
 
     def test_screenshot_with_controller(self):
         daemon = FakeDaemon(True)

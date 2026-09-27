@@ -450,16 +450,42 @@ class BarSounds(unittest.TestCase):
         bar = self.make()
         self.heard()
         self.key(Qt.Key_Return)                                           # the focused length
-        self.assertEqual(self.heard(), ["select"])
-        self.wait_for(lambda: bar.done)
-        self.assertEqual(self.heard(), ["save"])
+        self.assertEqual(self.heard(), ["select"])                        # and the bar is gone
+        self.assertFalse(bar.isVisible())
+        self.wait_for(lambda: self.daemon.saves)
+        pump(self.app, 0.1)
+        self.assertEqual(self.heard(), [])                                # nothing until it's saved
+        bar.on_daemon_saved(True)                                         # the daemon: "saved"
+        self.assertEqual(self.heard(), ["save"])                          # heard while hidden
 
     def test_a_failed_save_is_an_error(self):
         bar = self.make(fail=True)
         self.heard()
         self.key(Qt.Key_1)
-        self.wait_for(lambda: bar.done)
-        self.assertEqual(self.heard(), ["select", "error"])
+        self.assertEqual(self.heard(), ["select"])
+        bar.on_daemon_saved(False)
+        self.assertEqual(self.heard(), ["error"])
+
+    def test_saved_over_the_control_socket(self):
+        daemon = FakeDaemon(True)
+        real = base.REAL_REQUEST
+
+        def route(msg, timeout=120, path=None, **kw):
+            return real(msg, timeout=timeout, path=path) if path is not None else daemon.request(msg)
+        ipc.request = route
+        sock = config.RUNTIME_DIR / "overlay-saved-test.sock"
+        bar, server = overlay.start_resident(self.app, False, path=sock)
+        self.addCleanup(bar.dismiss)
+        self.addCleanup(self.app.removeEventFilter, bar)
+        self.addCleanup(server.close)
+        box = []
+        t = threading.Thread(target=lambda: box.append(real({"cmd": "saved", "ok": True, "job": 1},
+                                                            timeout=3, path=sock)))
+        t.start()
+        while t.is_alive():
+            pump(self.app, 0.005)
+        self.assertEqual((box[0]["ok"], box[0]["visible"]), (True, False))  # never shown: still heard
+        self.assertEqual(self.heard(), ["save"])
 
     def test_greyed_length_is_refused(self):
         bar = self.make(extra={"max_seconds": 900})                       # 30m and 60m greyed
