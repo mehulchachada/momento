@@ -96,7 +96,7 @@ class SaveQueue:
         """
         with self._cond:
             if self._closing:
-                raise Busy("Momento is closing")
+                raise Busy(CANCELLED)
             # the first active job runs (or is about to); the rest wait
             active = [j for j in self._jobs if j.state in ACTIVE]
             if kind == "clip" and len(active) > self.max_waiting:

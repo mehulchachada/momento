@@ -1334,6 +1334,9 @@ class Daemon:
             job = self.saves.new(seconds)
         except saves.Busy as e:
             log.warning("clip not saved: %s", e)
+            if str(e) == saves.CANCELLED:   # closing: no new saves
+                reply({"ok": False, "code": "cancelled", "error": saves.CANCELLED})
+                return
             notify(self.bus, "Momento: still saving", f"{saves.BUSY}.", "dialog-warning")
             reply({"ok": False, "code": "busy", "error": saves.BUSY})
             return

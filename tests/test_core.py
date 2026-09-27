@@ -4884,7 +4884,7 @@ class DaemonSaveQueueTest(unittest.TestCase):
         self.assertEqual((self.d.ring.pinned(), self.d.saves.running()), (0, None))
         self.assertEqual(self.notes, [])                             # closing: logged, not notified
         r = self.call({"cmd": "save", "seconds": 10})                # nothing new once closing
-        self.assertEqual(r["code"], "busy")
+        self.assertEqual((r["code"], r["error"]), ("cancelled", "save cancelled: Momento was closing"))
 
     def test_shutdown_cancels_a_long_save_and_removes_the_partial_file(self):
         """The real exporter's cancel path, with ffmpeg replaced by a shell that never ends."""
