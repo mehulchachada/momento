@@ -171,18 +171,13 @@ enabled = true
 #   tl / tr = bumpers                  south / east / north / west = face buttons
 #   left_paddle / right_paddle = back buttons (Elite pads, ROG Ally, Legion Go...)
 # The default, PS / Xbox / Home + D-pad Down, keeps the D-pad press from your
-# game: Momento holds the controller while the PS / Xbox / Home button is down
-# (with exclusive = true below).
-# Examples: ["select", "start"], ["left_paddle"], ["thumbl", "thumbr"]
+# game: Momento holds the controller while the PS / Xbox / Home button is down.
+# A shortcut is two buttons, e.g. ["select", "start"] or ["thumbl", "thumbr"].
 open_chord = ["mode", "dpad_down"]
 
-# How long to hold them, in milliseconds (0-5000). 0 (the default) opens the bar
-# the instant they are all down: a tap ("Open with: Tap" in the bar's settings).
-# If you use Select + Start and an emulator you play uses it too, set 300
-# ("Open with: Hold") so a quick press there doesn't open the bar too.
+# Rarely needed: hold the shortcut this many ms before it opens the bar (0 = a tap).
 hold_ms = 0
 
-# While the bar is open, take the controller over so the game doesn't see the
-# presses (and, for a D-pad shortcut, while its other button is held). If another
-# program already holds it, Momento shares it instead.
+# Take the controller over while the bar is open, so the game doesn't see the
+# presses. Set false to share it instead (if it ever misbehaves with Steam Input).
 exclusive = true

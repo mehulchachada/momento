@@ -45,7 +45,9 @@ south east north west tl tr tl2 tr2 select start mode thumbl thumbr
 dpad_up dpad_down dpad_left dpad_right paddle1..paddle4 extra1..extra4.
 Chord-only groups: ``left_paddle`` (paddle3 or paddle4), ``right_paddle``
 (paddle1 or paddle2). Aliases: view=select, menu=start, guide/home/ps/xbox=mode,
-l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2, up/down/left/right=dpad_*.
+l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2, up/down/left/right=dpad_*,
+and the pads' own names by position: a/b/x/y (Xbox), cross/circle/square/triangle,
+l1/r1/l2/r2, share/create/options, minus/plus.
 In a chord, ``dpad_*`` also matches the hat (``ABS_HAT0X/Y``), which is how
 most pads report their D-pad; others send ``BTN_DPAD_*``.
 
@@ -60,6 +62,14 @@ Layout notes
 * **Nintendo.** hid-nintendo reports buttons by position, so "accept" is the
   bottom button even though Nintendo labels it B (and "back" is the right
   one, labelled A). There is no automatic A/B swap for now.
+* **Symbols.** The bar's hints name a pad's own buttons, by position: ✕ ○ □ △,
+  L1/R1, L2/R2 on a PlayStation pad (hid-playstation / hid-sony, or Sony's
+  vendor id), B A Y X, L/R, ZL/ZR on a Nintendo one (hid-nintendo, or
+  Nintendo's vendor id), Xbox letters on everything else (:func:`symbols_for`,
+  :data:`SYMBOLS`). The pad *in use* (:meth:`Gamepads.active_pad`) is the last
+  one that sent a press, else the only one connected; ``on_active`` fires when
+  it changes. A press from another pad within ``CHORD_DEDUP_S`` of the current
+  one's doesn't switch it, since Steam's virtual Xbox pad mirrors the real one.
 * **Paddles.** xpad reports the Elite paddles as ``BTN_TRIGGER_HAPPY5-8``
   (P1 upper right, P2 lower right, P3 upper left, P4 lower left); InputPlumber's
   virtual Elite 2 pad uses the same codes for handheld back buttons.
@@ -165,12 +175,23 @@ BUTTON_NAMES = ("south", "east", "north", "west", "tl", "tr", "tl2", "tr2", "sel
 GROUPS = {"left_paddle": ("paddle3", "paddle4"), "right_paddle": ("paddle1", "paddle2")}
 ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode", "ps": "mode",
            "xbox": "mode", "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2",
-           "up": "dpad_up", "down": "dpad_down", "left": "dpad_left", "right": "dpad_right"}
+           "up": "dpad_up", "down": "dpad_down", "left": "dpad_left", "right": "dpad_right",
+           # the names on the pads (by position): Xbox letters, PlayStation, Nintendo
+           "a": "south", "b": "east", "x": "west", "y": "north",
+           "cross": "south", "circle": "east", "square": "west", "triangle": "north",
+           "l1": "tl", "r1": "tr", "l2": "tl2", "r2": "tr2", "share": "select", "create": "select",
+           "options": "start", "minus": "select", "plus": "start"}
 DPAD_NAMES = ("dpad_up", "dpad_down", "dpad_left", "dpad_right")
 
 DEFAULT_CHORD = ("mode", "dpad_down")
 DEFAULT_HOLD_MS = 0        # open on a tap, like [controller] hold_ms
-# (key, label, buttons): the choices the settings UI offers (the first is the default)
+# (key, label, buttons): every shortcut known by name. Settings (config, `momento set
+# controller`, configure) take all of them; the bar offers only CHORD_OFFERED (plus Off),
+# and shows any other saved shortcut as an extra choice with its buttons.
+# Rule for new shortcuts (and the custom bind to come): exactly CHORD_SIZE buttons
+# pressed together (check_chord_size). `momento set controller` enforces it; a
+# hand-edited open_chord of another size keeps working, with a warning (config.controller).
+CHORD_SIZE = 2
 CHORD_PRESETS = (
     ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")),
     ("view_menu", "View + Menu", ("select", "start")),
@@ -178,6 +199,22 @@ CHORD_PRESETS = (
     ("right_paddle", "Right paddle", ("right_paddle",)),
     ("l3_r3", "L3 + R3", ("thumbl", "thumbr")),
 )
+
+# The pad's own names for its buttons, by position (the hints; see symbols_for). The
+# PlayStation face symbols are drawn as vector glyphs by the bar, never as font text.
+SYMBOLS = {
+    "xbox": {"south": "A", "east": "B", "west": "X", "north": "Y", "tl": "LB", "tr": "RB",
+             "tl2": "LT", "tr2": "RT", "select": "View", "start": "Menu", "mode": "Xbox",
+             "thumbl": "L3", "thumbr": "R3"},
+    "playstation": {"south": "✕", "east": "○", "west": "□", "north": "△", "tl": "L1", "tr": "R1",
+                    "tl2": "L2", "tr2": "R2", "select": "Create", "start": "Options", "mode": "PS",
+                    "thumbl": "L3", "thumbr": "R3"},
+    "nintendo": {"south": "B", "east": "A", "west": "Y", "north": "X", "tl": "L", "tr": "R",
+                 "tl2": "ZL", "tr2": "ZR", "select": "Minus", "start": "Plus", "mode": "Home",
+                 "thumbl": "L3", "thumbr": "R3"},
+}
+CHORD_OFFERED = ("ps_down",)
+PS_FACE_WORDS = {"✕": "Cross", "○": "Circle", "□": "Square", "△": "Triangle"}
 
 DEADZONE = 0.5            # stick deflection (0..1) that counts as a direction
 RELEASE_FRACTION = 0.7    # ...and it lets go below DEADZONE * this (hysteresis)
@@ -248,12 +285,38 @@ def normalize_chord(buttons) -> tuple[str, ...]:
     return tuple(out)
 
 
-def chord_label(buttons) -> str:
-    """Human name for a chord: the preset label, else "Select + Start"-style."""
+def check_chord_size(buttons) -> tuple[str, ...]:
+    """The canonical chord if it is CHORD_SIZE buttons, else ValueError in plain words."""
     names = normalize_chord(buttons)
-    for _key, label, preset in CHORD_PRESETS:
-        if tuple(preset) == names:
+    if len(names) != CHORD_SIZE:
+        raise ValueError(f"a controller shortcut is two buttons pressed together "
+                         f"(got {len(names)}: {' + '.join(names)})")
+    return names
+
+
+def button_word(name: str, symbols: str = "xbox") -> str:
+    """A button's name in running text, as a ``symbols`` pad labels it ("L1", "Cross",
+    "Create", "Down", "Left paddle", "P3")."""
+    label = button_symbol(name, symbols)
+    if label != name:
+        return PS_FACE_WORDS.get(label, label)
+    if name in DPAD_NAMES:
+        return name[5:].capitalize()
+    if name.startswith("paddle"):
+        return "P" + name[6:]
+    return name.replace("_", " ").replace("extra", "extra ").strip().capitalize()
+
+
+def chord_label(buttons, symbols: str | None = None) -> str:
+    """Human name for a chord: the preset label, else "Select + Start"-style. With
+    ``symbols`` (a pad's, see SYMBOLS) a shortcut the bar doesn't offer is named by its
+    buttons as that pad labels them: "View + Menu", "Create + Options", "L1 + R1"."""
+    names = normalize_chord(buttons)
+    for key, label, preset in CHORD_PRESETS:
+        if tuple(preset) == names and (symbols is None or key in CHORD_OFFERED):
             return label
+    if symbols is not None:
+        return " + ".join(button_word(n, symbols) for n in names)
     return " + ".join(n.replace("_", " ").title() for n in names)
 
 
@@ -276,6 +339,20 @@ def layout_for(vendor: int = 0, driver: str = "", name: str = "") -> str:
     if "x-box" in n or "xbox" in n:
         return "xbox"
     return "standard"
+
+
+def symbols_for(vendor: int = 0, driver: str = "", name: str = "") -> str:
+    """Whose button names a pad carries: "playstation", "nintendo" or "xbox" (the rest)."""
+    if driver in ("playstation", "hid-playstation", "sony", "hid-sony") or vendor == 0x054c:
+        return "playstation"
+    if driver in ("nintendo", "hid-nintendo") or vendor == 0x057e:
+        return "nintendo"
+    return "xbox"
+
+
+def button_symbol(name: str, symbols: str = "xbox") -> str:
+    """``"south"`` -> "A" / "✕" / "B": the label a hint chip shows for a button."""
+    return SYMBOLS.get(symbols, SYMBOLS["xbox"]).get(name, name)
 
 
 def _sysfs_has_key(path: str, code: int) -> bool | None:
@@ -417,19 +494,20 @@ class _Inotify:
 
 # --------------------------------------------------------------- per-pad state
 class _Pad:
-    __slots__ = ("dev", "key", "name", "fd", "layout", "names", "has_hat", "axes_info",
+    __slots__ = ("dev", "key", "name", "fd", "layout", "symbols", "names", "has_hat", "axes_info",
                  "held", "axes", "hat", "dir", "dir_src", "dir_blocked", "repeat_at",
                  "chord_since", "chord_latched", "grabbed", "grab_failed", "grab_wait_since",
                  "busy_since", "grab_poll_at", "abs_hat", "mask", "mod_held", "mod_grabbed",
                  "mod_since", "mod_check_at", "dropped", "trig_axes", "trig_latched")
 
     def __init__(self, dev, key, name="", layout="standard", has_hat=True, axes_info=None,
-                 abs_hat=None):
+                 abs_hat=None, symbols="xbox"):
         self.dev = dev
         self.key = key
         self.name = name
         self.fd = None
         self.layout = layout
+        self.symbols = symbols             # SYMBOLS key: the labels its buttons carry
         self.has_hat = has_hat
         self.axes_info = axes_info or {}   # code -> (min, max)
         names = dict(_COMMON)
@@ -517,6 +595,7 @@ class Gamepads:
                  on_chord: Callable[[], None] | None = None,
                  on_grab_lost: Callable[[], None] | None = None,
                  on_devices: Callable[[], None] | None = None,
+                 on_active: Callable[[], None] | None = None,
                  navigate: bool = True, chord=DEFAULT_CHORD, hold_ms: int = DEFAULT_HOLD_MS,
                  deadzone: float = DEADZONE, repeat_delay_ms: int = REPEAT_DELAY_MS,
                  repeat_interval_ms: int = REPEAT_INTERVAL_MS, watchdog_s: float = WATCHDOG_S,
@@ -532,6 +611,7 @@ class Gamepads:
         self.on_chord = on_chord
         self.on_grab_lost = on_grab_lost
         self.on_devices = on_devices
+        self.on_active = on_active
         self.navigate = navigate
         self.chord: tuple[str, ...] = ()
         self.chord_mod: tuple[str, ...] = ()    # the chord minus its D-pad directions
@@ -573,6 +653,8 @@ class Gamepads:
         self._last_action: dict[str, tuple[float, object]] = {}
         self._last_chord: tuple[float, object] | None = None
         self.last_chord_key = None                        # the pad the last chord came from
+        self.last_input_key = None                        # the pad in use (see active_pad)
+        self._input_at = 0.0                              # ...its last press
         self._listeners: list[Callable[[], None]] = []   # loop adapters: fds/timer changed
         _live.add(self)
 
@@ -668,8 +750,37 @@ class Gamepads:
         return out
 
     def devices(self) -> list[dict]:
-        return [{"key": p.key, "name": p.name, "layout": p.layout, "grabbed": p.grabbed}
-                for p in self.pads.values()]
+        return [{"key": p.key, "name": p.name, "layout": p.layout, "symbols": p.symbols,
+                 "grabbed": p.grabbed} for p in self.pads.values()]
+
+    def active_pad(self) -> _Pad | None:
+        """The pad in use: the last one that sent a press, else the only one connected."""
+        pad = self.pads.get(self.last_input_key)
+        if pad is None and len(self.pads) == 1:
+            pad = next(iter(self.pads.values()))
+        return pad
+
+    def symbols(self) -> str:
+        """The button names the hints show (a SYMBOLS key): the pad in use's; with
+        several pads and none used yet, theirs when they agree, else "xbox"."""
+        pad = self.active_pad()
+        if pad is not None:
+            return pad.symbols
+        kinds = {p.symbols for p in self.pads.values()}
+        return kinds.pop() if len(kinds) == 1 else "xbox"
+
+    def _note_input(self, pad: _Pad, now: float) -> None:
+        """A press on ``pad``: it becomes the pad in use (``on_active`` when that changes).
+        Another pad's press this soon after the current one's is a mirror (Steam)."""
+        if pad.key == self.last_input_key:
+            self._input_at = now
+            return
+        if self.last_input_key in self.pads and now - self._input_at < CHORD_DEDUP_S:
+            return
+        before = self.active_pad()
+        self.last_input_key, self._input_at = pad.key, now
+        if before is not pad and self.on_active:
+            self._safe(self.on_active)
 
     def rescan(self, paths: Iterable[str] | None = None) -> None:
         """Open new pads and drop vanished ones (all candidates, or just ``paths``)."""
@@ -745,8 +856,10 @@ class Gamepads:
         has_hat = has_hat or BTN_DPAD_UP in caps.get(EV_KEY, ())
         vendor = getattr(getattr(dev, "info", None), "vendor", 0) or 0
         name = getattr(dev, "name", "") or str(key)
-        layout = layout_for(vendor, getattr(dev, "driver", "") or "", name)
-        pad = _Pad(dev, key, name=name, layout=layout, has_hat=has_hat, axes_info=axes_info)
+        driver = getattr(dev, "driver", "") or ""
+        layout = layout_for(vendor, driver, name)
+        pad = _Pad(dev, key, name=name, layout=layout, has_hat=has_hat, axes_info=axes_info,
+                   symbols=symbols_for(vendor, driver, name))
         try:
             pad.fd = dev.fileno()
         except (AttributeError, OSError, ValueError):
@@ -899,6 +1012,7 @@ class Gamepads:
             name = pad.names[code]
             if value:
                 pad.held.add(code)
+                self._note_input(pad, now)
             else:
                 pad.held.discard(code)
             if self.chord_mod:
@@ -1039,6 +1153,8 @@ class Gamepads:
                 self._emit(pad, action, False, now)
 
     def _emit(self, pad: _Pad, action: str, repeat: bool, now: float) -> None:
+        if not repeat:
+            self._note_input(pad, now)          # a stick, the hat or a trigger axis counts too
         last = self._last_action.get(action)
         if last is not None and last[1] != pad.key and now - last[0] < ACTION_DEDUP_S:
             return
@@ -1712,13 +1828,14 @@ def probe(paths: Iterable[str] | None = None) -> list[dict]:
             caps = dev.capabilities(absinfo=True)
             keys = set(caps.get(EV_KEY, ()))
             layout = layout_for(dev.info.vendor, getattr(dev, "driver", ""), dev.name)
+            symbols = symbols_for(dev.info.vendor, getattr(dev, "driver", ""), dev.name)
             pad = _Pad(None, path, layout=layout,
                        has_hat=any(c in (ABS_HAT0X, ABS_HAT0Y) for c, _ in caps.get(EV_ABS, ()))
                        or BTN_DPAD_UP in keys)
             out.append({
                 "path": path, "name": dev.name, "vendor": f"{dev.info.vendor:04x}",
                 "product": f"{dev.info.product:04x}", "driver": getattr(dev, "driver", ""),
-                "layout": layout,
+                "layout": layout, "symbols": symbols,
                 "buttons": sorted({pad.names[c] for c in keys if c in pad.names}, key=BUTTON_NAMES.index),
                 "axes": {c: (i.min, i.max) for c, i in caps.get(EV_ABS, ())},
             })
@@ -1750,7 +1867,7 @@ def main(argv=None) -> int:
                   "Steam has taken over, which Momento then sees through its virtual controller")
             continue
         print(f"{p['path']}: {p['name']} [{p['vendor']}:{p['product']} {p['driver'] or '-'}, "
-              f"{p['layout']} layout]\n  buttons: {' '.join(p['buttons'])}")
+              f"{p['layout']} layout, {p['symbols']} symbols]\n  buttons: {' '.join(p['buttons'])}")
     if not args.watch:
         return 0
     from gi.repository import GLib

@@ -199,6 +199,50 @@ class ClipDuration(unittest.TestCase):
             self.assertIsNone(media.clip_duration(f.name))
 
 
+class Deletable(unittest.TestCase):
+    """The gallery deletes only clips directly in the clips folder and screenshots directly
+    in its Images folder: never anything else, never through a symlink."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(dir=os.environ.get("MOMENTO_TEST_SANDBOX"))
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.out = root / "Momento"
+        (self.out / "Images" / "deeper").mkdir(parents=True)
+        self.clip = self.out / "Replay_a.mp4"
+        self.shot = self.out / "Images" / "Momento_a.png"
+        self.other = root / "other.mp4"
+        for f in (self.clip, self.shot, self.other, self.out / "notes.txt", self.out / ".x.tmp.mp4",
+                  self.out / "Images" / "deeper" / "b.png", self.out / "Images" / "c.mp4"):
+            f.write_bytes(b"x")
+        (self.out / "link.mp4").symlink_to(self.other)
+        (self.out / "dir.mp4").mkdir()
+
+    def test_allowed(self):
+        self.assertTrue(media.deletable(self.clip, self.out))
+        self.assertTrue(media.deletable(self.shot, self.out))
+        self.assertTrue(media.deletable(str(self.clip), str(self.out)))
+
+    def test_refused(self):
+        for bad in (self.other, self.out / "notes.txt", self.out / ".x.tmp.mp4", self.out / "link.mp4",
+                    self.out / "dir.mp4", self.out / "Images" / "deeper" / "b.png",
+                    self.out / "Images" / "c.mp4", self.out / "Images" / ".." / ".." / "other.mp4",
+                    self.out / "missing.mp4"):
+            self.assertFalse(media.deletable(bad, self.out), bad)
+        with self.assertRaises(ValueError):
+            media.delete(self.other, self.out, to_trash=False)
+        self.assertTrue(self.other.exists())
+
+    def test_delete_for_good_or_to_the_trash(self):
+        from unittest import mock
+
+        self.assertEqual(media.delete(self.clip, self.out, to_trash=False), "deleted")
+        self.assertFalse(self.clip.exists())
+        with mock.patch.object(media, "trash") as trash:
+            self.assertEqual(media.delete(self.shot, self.out), "trashed")
+        trash.assert_called_once_with(self.shot)
+
+
 class ImportIsLight(unittest.TestCase):
     def test_no_qt_or_gi(self):
         code = ("import sys, momento.media; "
