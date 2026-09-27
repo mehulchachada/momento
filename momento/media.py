@@ -117,3 +117,63 @@ def clip_duration(path, timeout: float = PROBE_TIMEOUT) -> float | None:
     except (ValueError, IndexError):
         return None
     return value if value >= 0 else None
+
+
+# ------------------------------------------------------------------ deleting
+def deletable(path, output_dir) -> bool:
+    """``path`` is a clip directly in ``output_dir`` or a screenshot directly in its
+    Images folder, and a regular file (symlinks resolved: one that points elsewhere is
+    refused). The gallery deletes nothing else."""
+    try:
+        real = Path(path).expanduser().resolve(strict=True)
+        base = Path(output_dir).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not real.is_file() or real.name.startswith("."):
+        return False
+    if real.parent == base and real.suffix.lower() == CLIP_SUFFIX:
+        return True
+    try:
+        images = images_dir(base).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return real.parent == images and real.suffix.lower() == SHOT_SUFFIX
+
+
+def can_trash(path) -> bool:
+    """Can ``path`` go to the desktop's Trash (freedesktop, through GIO)? False when GIO
+    is missing or the file system has no trash (then deleting can't be undone)."""
+    try:
+        from gi.repository import Gio
+    except Exception:  # noqa: BLE001 - no PyGObject: no trash
+        return False
+    try:
+        info = Gio.File.new_for_path(str(path)).query_info("access::can-trash", Gio.FileQueryInfoFlags.NONE, None)
+        return bool(info.get_attribute_boolean("access::can-trash"))
+    except Exception:  # noqa: BLE001 - GLib.Error: vanished, no permission
+        return False
+
+
+def trash(path) -> None:
+    """Move ``path`` to the Trash (GIO); raises OSError when that isn't possible."""
+    try:
+        from gi.repository import Gio
+    except Exception as e:  # noqa: BLE001
+        raise OSError(f"no trash here ({e})") from None
+    try:
+        Gio.File.new_for_path(str(path)).trash(None)
+    except Exception as e:  # noqa: BLE001 - GLib.Error
+        raise OSError(getattr(e, "message", None) or str(e)) from None
+
+
+def delete(path, output_dir, to_trash: bool = True) -> str:
+    """Delete a gallery item: to the Trash, or for good when ``to_trash`` is False (a
+    file system without one; the question said so). Returns "trashed" / "deleted".
+    Refuses (ValueError) anything :func:`deletable` doesn't allow."""
+    if not deletable(path, output_dir):
+        raise ValueError(f"not a clip or screenshot in the clips folder: {path}")
+    if to_trash:
+        trash(path)
+        return "trashed"
+    os.unlink(path)
+    return "deleted"
