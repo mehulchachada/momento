@@ -8,15 +8,20 @@ on the newest item, muted, playing.
 
 Layout: a panel of its own right above the bar, as wide as the bar, with the
 bar row unchanged under it (one surface that grows upward like settings; the
-bar paints the two apart). Top to bottom: the filters (All · Clips ·
-Screenshots) with a ``‹ 3 / 42 ›`` counter, a 16:9 stage, the transport row
-(−10, play/pause, +10, sound, time, scrubber, length, full screen; a
-screenshot shows its size and format instead) and a footer (what it is and
-when, the hints, Back). The hints show a controller's buttons while the bar has
-one connected (they follow a hotplug), else the keys. They carry the symbols of
-the controller in use (``Bar.pad_symbols``): ✕ ○ □ △ and L1 / R1 / L2 / R2 on a
-PlayStation one, Nintendo's letters on a Nintendo one, Xbox letters otherwise,
-and switch when another controller is picked up.
+bar paints the two apart). Top to bottom, three focus rows with room and a
+hairline between them: the filters (All · Clips · Screenshots) with a
+``‹ 3 / 42 ›`` counter; the media, a 16:9 stage with its transport right under
+it (−10, play/pause, +10, sound, time, scrubber, length, full screen; a
+screenshot shows its size and format instead); and a footer (what it is and
+when, the hints, delete, Back). Up / down moves between the rows, a white ring
+(the bar's focus ring) goes around the focused one over a faint highlight, and
+left / right acts inside it: the filter, −10 / +10 s on a clip, the footer's
+buttons. LB / RB (PgUp / PgDn) browse from any row. The hints follow the focused
+row. They show a controller's buttons while the bar has one connected (they
+follow a hotplug), else the keys, with the symbols of the controller in use
+(``Bar.pad_symbols``): ✕ ○ □ △ and L1 / R1 / L2 / R2 on a PlayStation one,
+Nintendo's letters on a Nintendo one, Xbox letters otherwise, and switch when
+another controller is picked up.
 
 Clips play muted. The speaker button, M or X / Square (the west button) turns
 the sound on; that sticks while the gallery is open (the next clip too, full
@@ -68,7 +73,7 @@ STEP_MS = 120            # browsing: the next clip loads this long after the las
 SEEK_S = 10              # LT / RT, J / L
 CHROME_MS = 2_500        # full screen: the strip hides after this long without input
 FULL_MARGIN = 32         # full screen: the strip floats this far from the edges
-STAGE_PAD = 16           # the stage's side margins inside the bar
+STAGE_PAD = 52           # the stage's side margins inside the bar (the rows' room comes out of the picture)
 STAGE_RADIUS = 8
 META_PX = 13
 MIN_STAGE_H = 160
@@ -112,32 +117,42 @@ DELETE_FAILED = "Couldn't delete it"
 GLOW_MS = 160            # the focused row's highlight eases in (and the one left fades out)
 
 # Focus rows, top to bottom (up / down moves between them; left / right acts inside one):
-# the filters, the stage (browse), the player (clips: -10 / +10 s), the footer (delete, Back).
-ROWS = ("filter", "stage", "player", "footer")
+# the filters; the media, the picture and its controls as one zone (a clip: -10 / +10 s and
+# A play / pause; a screenshot: A full screen); the footer (delete, Back). LB / RB browse
+# from any row. Full screen has the media row only.
+ROWS = ("filter", "media", "footer")
 
-# The hints in the footer and the full screen strip: [([buttons or keys], word), ...].
-# A controller's buttons while the bar has one (Bar.pad_connected), else the keys; they
-# follow the focused row. PAD_*: by button position (gamepad names); pad_hint() puts in the
-# pad's own symbols. ← → is the D-pad / left stick (or the arrow keys).
-PAD_CLIP = [(["←", "→"], "browse"), (["south"], "play"), (["tl2", "tr2"], "10 s"),
-            (["west"], "sound"), (["north"], "full screen")]
-PAD_SHOT = [(["←", "→"], "browse"), (["north"], "full screen")]
-PAD_PLAYER = [(["←", "→"], "10 s"), (["south"], "play"), (["tl", "tr"], "browse"),
-              (["west"], "sound"), (["north"], "full screen")]
-PAD_FILTER = [(["←", "→"], "filter"), (["tl", "tr"], "browse")]
-PAD_FOOTER = [(["←", "→"], "choose"), (["south"], "select"), (["tl", "tr"], "browse")]
+# Room around the rows (logical px), so each one's ring and highlight stand clear of the
+# next. The panel is as tall as it was with the rows packed: the picture gave the room up.
+EDGE_GAP = 10            # the panel's top edge / the bar row's hairline <-> the nearest row
+ZONE_GAP = 12            # a row <-> the hairline between two rows (on each side of it)
+FILTER_H = 36            # the filters' row (tab pills are 26 tall)
+FOOTER_H = 40            # the footer's row (pills are 32 tall)
+MEDIA_PAD = 6            # the media row's ring <-> the picture (top and sides)
+MEDIA_PAD_B = 2          # the media row's ring <-> the transport under the picture
+CTRL_H = ov.ROW_H        # the transport's row, as wide as the picture...
+CTRL_MIN_W = 600         # ...but never narrower than this (a picture shrunk on a short screen)
+ROW_INSET = 8            # the filter and footer rows' rings <-> the panel's sides
+RING_W = 1.5             # the white focus ring, as thick as the bar's (overlay.Pill)
+PANEL_CHROME = (EDGE_GAP + FILTER_H + 2 * ZONE_GAP + 1 + MEDIA_PAD + CTRL_H + MEDIA_PAD_B
+                + 2 * ZONE_GAP + 1 + FOOTER_H + EDGE_GAP)   # the panel but the picture
+
+# The hints in the footer: [([buttons or keys], word), ...], for the focused row. A
+# controller's buttons while the bar has one (Bar.pad_connected), else the keys. PAD_*: by
+# button position (gamepad names); pad_hint() puts in the pad's own symbols. ◀ ▶ is the
+# D-pad / left stick (drawn, see ps_glyph); ← → the arrow keys.
+PAD_CLIP = [(["◀", "▶"], "10 s"), (["south"], "play"), (["tl", "tr"], "browse")]
+PAD_SHOT = [(["tl", "tr"], "browse"), (["south"], "full screen")]
+PAD_FILTER = [(["◀", "▶"], "filter")]
+PAD_FOOTER = [(["◀", "▶"], "move")]
 PAD_BACK = [(["east"], "Back")]
-CLIP_KEYS = [(["←", "→"], "browse"), (["Space"], "play"), (["J", "L"], "10 s"),
-             (["M"], "sound"), (["F"], "full screen")]
-SHOT_KEYS = [(["←", "→"], "browse"), (["F"], "full screen"), (["Del"], "delete")]
-PLAYER_KEYS = [(["←", "→"], "10 s"), (["Space"], "play"), (["PgUp", "PgDn"], "browse"),
-               (["M"], "sound"), (["F"], "full screen")]
-FILTER_KEYS = [(["←", "→"], "filter"), (["PgUp", "PgDn"], "browse")]
-FOOTER_KEYS = [(["←", "→"], "choose"), (["Enter"], "select"), (["Del"], "delete")]
+CLIP_KEYS = [(["←", "→"], "10 s"), (["Space"], "play"), (["PgUp", "PgDn"], "browse")]
+SHOT_KEYS = [(["PgUp", "PgDn"], "browse"), (["Enter"], "full screen")]
+FILTER_KEYS = [(["←", "→"], "filter")]
+FOOTER_KEYS = [(["←", "→"], "move")]
 BACK_KEYS = [(["Esc"], "Back")]
-# (row, kind) -> (pad hints, key hints); a screenshot has no player row
-ROW_HINTS = {("stage", "clip"): (PAD_CLIP, CLIP_KEYS), ("stage", "shot"): (PAD_SHOT, SHOT_KEYS),
-             ("player", "clip"): (PAD_PLAYER, PLAYER_KEYS),
+# (row, kind) -> (pad hints, key hints)
+ROW_HINTS = {("media", "clip"): (PAD_CLIP, CLIP_KEYS), ("media", "shot"): (PAD_SHOT, SHOT_KEYS),
              ("filter", "clip"): (PAD_FILTER, FILTER_KEYS), ("filter", "shot"): (PAD_FILTER, FILTER_KEYS),
              ("footer", "clip"): (PAD_FOOTER, FOOTER_KEYS), ("footer", "shot"): (PAD_FOOTER, FOOTER_KEYS)}
 
@@ -284,11 +299,22 @@ def draw_replay(p, x, y, color, scale=1.0):
 
 
 PS_GLYPHS = ("✕", "○", "□", "△")    # drawn, not typed: fonts render them unevenly
+DPAD_GLYPHS = ("◀", "▶")            # the D-pad's left / right, drawn too
 
 
 def ps_glyph(p, r, sym, color):
-    """A PlayStation face symbol, a thin outline centred in ``r`` (the chip's text colour)."""
+    """A PlayStation face symbol, a thin outline centred in ``r`` (the chip's text colour),
+    or a D-pad direction (◀ ▶), a small filled triangle."""
     c = r.center()
+    if sym in DPAD_GLYPHS:
+        d = -1 if sym == "◀" else 1
+        p.save()
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawPolygon(QPolygonF([QPointF(c.x() + d * 3.4, c.y()), QPointF(c.x() - d * 2.6, c.y() - 3.8),
+                                 QPointF(c.x() - d * 2.6, c.y() + 3.8)]))
+        p.restore()
+        return
     pen = QPen(QColor(color), 1.5)
     pen.setJoinStyle(Qt.MiterJoin if sym == "□" else Qt.RoundJoin)
     pen.setCapStyle(Qt.RoundCap)
@@ -323,7 +349,7 @@ def chip_run(p, x, y, tokens, word_color=ov.NOTE):
         for bi, b in enumerate(btns):
             if bi:
                 x += 3
-            glyph = b in PS_GLYPHS
+            glyph = b in PS_GLYPHS or b in DPAD_GLYPHS
             w = 18 if glyph else max(18, cfm.horizontalAdvance(b) + 10)
             r = QRectF(x, y - 9, w, 18)
             if p is not None:
@@ -521,6 +547,19 @@ def _widgets(kit):
         return cached
     IconButton, TabButton = kit.IconButton, kit.TabButton
 
+    def zoned(style):
+        """A pill in the gallery: focused, it is white like the bar's, but the ring goes
+        around its whole row (Gallery.paint_glow), not around the pill."""
+        fill, text, _ring = style
+        return fill, text, 0.0
+
+    class ZoneText(kit.TextButton):
+        """The footer's Back / Delete / Cancel (see ``zoned``)."""
+
+        def target(self):
+            state, style = super().target()
+            return state, zoned(style)
+
     class MediaIcon(IconButton):
         TIPS = {**IconButton.TIPS, "play": "Play (K)", "pause": "Pause (K)", "replay": "Play again (K)",
                 "back10": "Back 10 s (J)", "fwd10": "Forward 10 s (L)", "muted": "Turn sound on (M)",
@@ -533,6 +572,10 @@ def _widgets(kit):
             self.prev_kind = None         # the glyph fading out (play -> pause, muted -> sound)
             self.kt = 1.0
             self.ktween = _Tween(self, FADE_MS, self._kt, self._kdone)
+
+        def target(self):
+            state, style = super().target()
+            return state, zoned(style)
 
         def set_kind(self, kind):
             if kind == self.kind:
@@ -589,10 +632,12 @@ def _widgets(kit):
 
         def __init__(self, text):
             super().__init__(text)        # (target() sets self.hl: what the header paints under it)
+            self.setFixedHeight(FILTER_H)
             self.setAccessibleName(f"Show {text.lower()}")
 
         def target(self):
             state, style = super().target()
+            style = zoned(style)
             if self.selected() and state != "disabled":
                 self.hl = style
                 return state, (QColor(0, 0, 0, 0), style[1], 0.0)
@@ -645,16 +690,9 @@ def _widgets(kit):
             r = self.rect_now()
             if tab is None or r is None or tab.hl is None:
                 return
-            fill, _text, ring = tab.hl
+            fill = tab.hl[0]
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
-            if ring > 0.01:
-                c = QColor(ov.RING)
-                c.setAlphaF(min(1.0, ring))
-                p.setPen(QPen(c, 1.5))
-                p.setBrush(Qt.NoBrush)
-                rr = r.adjusted(-2.75, -2.75, 2.75, 2.75)
-                p.drawRoundedRect(rr, rr.height() / 2, rr.height() / 2)
             if fill.alpha():
                 p.setPen(Qt.NoPen)
                 p.setBrush(fill)
@@ -666,6 +704,7 @@ def _widgets(kit):
 
         def __init__(self, text="0 / 0"):
             super().__init__(text)
+            self.setFixedHeight(FILTER_H)
             self.setFont(font(ov.TAB_PX, tabular=True))
             self.side = 1
             self.setAccessibleName("Browse")
@@ -683,7 +722,7 @@ def _widgets(kit):
             state, style = super().target()
             if state == "rest":   # the counter reads as text, not as a quiet tab
                 return state, (QColor(0, 0, 0, 0), QColor(ov.TEXT), 0.0)
-            return state, style
+            return state, zoned(style)
 
         def mouseReleaseEvent(self, ev):
             self.side = -1 if ev.position().x() < self.width() / 2 else 1
@@ -714,27 +753,14 @@ def _widgets(kit):
             self.radius = radius
             self.setCursor(Qt.PointingHandCursor)
             self.setAccessibleName("Clip")
-            self.setFocusPolicy(Qt.ClickFocus)   # the stage row: the keys and the controller focus it
+            self.setFocusPolicy(Qt.ClickFocus)   # the media row: the keys and the controller focus it
 
         def paintEvent(self, ev):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setRenderHint(QPainter.SmoothPixmapTransform)
             self.g.paint_picture(p, QRectF(self.rect()), self.radius, badge=True)
-            if self.hasFocus() and self.g.bar.focus_visible:
-                # the bar's white focus ring, just inside the picture's rounded edge
-                p.setPen(QPen(QColor(ov.RING), 2))
-                p.setBrush(Qt.NoBrush)
-                p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), self.radius, self.radius)
             p.end()
-
-        def focusInEvent(self, ev):
-            self.update()
-            super().focusInEvent(ev)
-
-        def focusOutEvent(self, ev):
-            self.update()
-            super().focusOutEvent(ev)
 
         def mousePressEvent(self, ev):
             if ev.button() == Qt.LeftButton:
@@ -833,7 +859,7 @@ def _widgets(kit):
                 self.clicked.emit()
 
     class Panel(QWidget):
-        """The gallery's panel; paints the focused row's soft highlight under its rows."""
+        """The gallery's panel; paints the focused row's soft highlight and white ring."""
 
         def __init__(self, g):
             super().__init__()
@@ -853,7 +879,7 @@ def _widgets(kit):
             super().__init__()
             self.hint = CLIP_KEYS
             self.asking = False
-            self.setFixedHeight(ov.BAR_HEIGHT)
+            self.setFixedHeight(FOOTER_H)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(18, 0, 0, 0)
             lay.setSpacing(0)
@@ -864,16 +890,16 @@ def _widgets(kit):
             self.question.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             self.question.hide()
             lay.addWidget(self.question, 1)
-            self.trash = MediaIcon("trash")
+            self.trash = MediaIcon("trash", FOOTER_H)
             lay.addWidget(self.trash)
-            self.back = kit.TextButton("Back", glyph="back", quiet=True)
+            self.back = ZoneText("Back", FOOTER_H, glyph="back", quiet=True)
             lay.addWidget(self.back)
-            self.yes = kit.TextButton("Delete", glyph="trash")
-            self.no = kit.TextButton("Cancel", glyph="cross", quiet=True)
+            self.yes = ZoneText("Delete", FOOTER_H, glyph="trash")
+            self.no = ZoneText("Cancel", FOOTER_H, glyph="cross", quiet=True)
             for b in (self.yes, self.no):
                 b.hide()
                 lay.addWidget(b)
-            lay.addSpacing(8)
+            lay.addSpacing(ROW_INSET + 4)   # the last pill as far inside the ring as the first
 
         def buttons(self):
             return [self.yes, self.no] if self.asking else [self.trash, self.back]
@@ -987,8 +1013,8 @@ def _widgets(kit):
                 self.g.toggle_full()
 
     ns = type("GalleryWidgets", (), {})()
-    for c in (MediaIcon, FilterTab, FilterHeader, CounterPill, Stage, Scrubber, Chips, Panel, Footer, Surface,
-              FullView):
+    for c in (MediaIcon, ZoneText, FilterTab, FilterHeader, CounterPill, Stage, Scrubber, Chips, Panel, Footer,
+              Surface, FullView):
         setattr(ns, c.__name__, c)
     kit.gallery_widgets = ns
     return ns
@@ -1087,7 +1113,7 @@ class Gallery(QObject):
         self.pace_timer.setTimerType(Qt.PreciseTimer)
         self.pace_timer.timeout.connect(self._pace_due)
         # focus rows (see ROWS) and the focused row's highlight
-        self.row = "stage"
+        self.row = "media"
         self.foot_btn = "trash"   # the footer button the footer row returns to
         self.glow = {r: 0.0 for r in ROWS}
         self.glow_from = dict(self.glow)
@@ -1105,14 +1131,14 @@ class Gallery(QObject):
     # ------------------------------------------------------------------ building
     @property
     def stage_size(self):
-        """16:9 across the panel (1006 x 566), smaller only when the screen is too short for
-        it (a 1280x720 desktop at 150 %): the bar with its gallery always fits on screen."""
+        """16:9, STAGE_PAD in from the panel's sides (934 x 525 in a 1040 px bar), smaller
+        only when the screen is too short for it (a 1280x720 desktop at 150 %): the bar with
+        its gallery always fits on screen."""
         w = self.bar.bar_w - 2 - 2 * STAGE_PAD
         h = round(w * 9 / 16)
         screen = self.bar.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
-            rest = (ov.BAR_HEIGHT + 2 + ov.GALLERY_JOIN             # the bar, the hairline, the edges
-                    + ov.PANEL_PAD_T + ov.TABS_H + 4 + ov.ROW_PITCH + 1 + ov.BAR_HEIGHT)
+            rest = ov.BAR_HEIGHT + 2 + ov.GALLERY_JOIN + PANEL_CHROME   # the bar, the hairline, the rows
             room = screen.availableGeometry().height() - 2 * ov.BOTTOM_MARGIN - rest
             if room < h:
                 h = max(MIN_STAGE_H, room)
@@ -1120,7 +1146,13 @@ class Gallery(QObject):
         return QSize(w, h)
 
     def panel_height(self):
-        return ov.PANEL_PAD_T + ov.TABS_H + 4 + self.stage.height() + ov.ROW_PITCH + 1 + ov.BAR_HEIGHT
+        return PANEL_CHROME + self.stage.height()
+
+    def _size_media(self):
+        """The picture at ``stage_size`` and the transport as wide as it (CTRL_MIN_W at least)."""
+        size = self.stage_size
+        self.stage.setFixedSize(size)
+        self.player_row.setFixedWidth(min(self.bar.bar_w - 2 - 2 * (ROW_INSET + 8), max(size.width(), CTRL_MIN_W)))
 
     def shown_height(self):
         """The panel's height right now (it grows / folds with ``reveal``)."""
@@ -1146,11 +1178,19 @@ class Gallery(QObject):
         c = self.panel
         panel = W.Panel(self)
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(0, ov.PANEL_PAD_T, 0, 0)
+        pl.setContentsMargins(0, EDGE_GAP, 0, EDGE_GAP)
         pl.setSpacing(0)
 
+        def hairline():                   # between two rows, like the bar's own
+            pl.addSpacing(ZONE_GAP)
+            line = QFrame()
+            line.setFixedHeight(1)
+            line.setStyleSheet(f"background: {ov.BORDER}; margin: 0 12px;")
+            pl.addWidget(line)
+            pl.addSpacing(ZONE_GAP)
+
         header = self.header = W.FilterHeader()
-        header.setFixedHeight(ov.TABS_H)
+        header.setFixedHeight(FILTER_H)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(12, 0, 12, 0)
         hl.setSpacing(0)
@@ -1162,25 +1202,25 @@ class Gallery(QObject):
             self.tabs[key] = b
         hl.addStretch(1)
         c.w["counter"] = W.CounterPill()
-        c.w["counter"].clicked.connect(lambda: self.step(c.w["counter"].side, focus="counter"))
+        c.w["counter"].clicked.connect(lambda: self.step(c.w["counter"].side))
         hl.addWidget(c.w["counter"])
         pl.addWidget(header)
+        hairline()
 
-        sw = QWidget()
-        sl = QHBoxLayout(sw)
-        sl.setContentsMargins(STAGE_PAD, 4, STAGE_PAD, 0)
-        sl.setSpacing(0)
+        # the media row: the picture with its transport right under it, one focus zone
+        media = self.media_w = QWidget()
+        ml = QVBoxLayout(media)
+        ml.setContentsMargins(0, MEDIA_PAD, 0, MEDIA_PAD_B)
+        ml.setSpacing(0)
         self.stage = W.Stage(self)
-        self.stage.setFixedSize(self.stage_size)
         self.stage.clicked.connect(self._stage_clicked)
         self.stage.double.connect(self._stage_double)
-        sl.addWidget(self.stage, 0, Qt.AlignHCenter)
-        pl.addWidget(sw)
+        ml.addWidget(self.stage, 0, Qt.AlignHCenter)
 
         row = self.player_row = QWidget()
-        row.setFixedHeight(ov.ROW_PITCH)
+        row.setFixedHeight(CTRL_H)
         rl = QHBoxLayout(row)
-        rl.setContentsMargins(12, 2, 12, 0)
+        rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
         c.clipbox = QWidget()
         cl = QHBoxLayout(c.clipbox)
@@ -1200,12 +1240,11 @@ class Gallery(QObject):
         c.w["full"] = W.MediaIcon("full", ov.ROW_H)
         c.w["full"].clicked.connect(lambda: self.toggle_full())
         rl.addWidget(c.w["full"])
-        pl.addWidget(row)
+        ml.addWidget(row, 0, Qt.AlignHCenter)
+        self._size_media()
+        pl.addWidget(media)
+        hairline()
 
-        line = QFrame()                   # the hairline over the footer, like the bar's own
-        line.setFixedHeight(1)
-        line.setStyleSheet(f"background: {ov.BORDER}; margin: 0 12px;")
-        pl.addWidget(line)
         self.footer = W.Footer()
         c.w["meta"] = self.footer.meta
         c.w["back"] = self.footer.back
@@ -1225,10 +1264,10 @@ class Gallery(QObject):
     def _transport(self, c, lay, height):
         """−10 · play · +10 · sound · time · scrubber · length (into ``lay``)."""
         W = self.W
-        for name, kind, fn in (("back10", "back10", lambda: self.seek(-SEEK_S, focus="back10")),
-                               ("play", "play", lambda: self.toggle_play(focus="play")),
-                               ("fwd10", "fwd10", lambda: self.seek(SEEK_S, focus="fwd10")),
-                               ("mute", "muted", lambda: self.toggle_mute(focus="mute"))):
+        for name, kind, fn in (("back10", "back10", lambda: self.seek(-SEEK_S, focus="media")),
+                               ("play", "play", lambda: self.toggle_play(focus="media")),
+                               ("fwd10", "fwd10", lambda: self.seek(SEEK_S, focus="media")),
+                               ("mute", "muted", lambda: self.toggle_mute(focus="media"))):
             b = W.MediaIcon(kind, height)
             b.clicked.connect(fn)
             c.w[name] = b
@@ -1273,7 +1312,7 @@ class Gallery(QObject):
         else:
             c.w["counter"] = W.CounterPill()
             c.w["counter"].setFixedHeight(ov.BAR_HEIGHT)
-            c.w["counter"].clicked.connect(lambda: self.step(c.w["counter"].side, focus="counter"))
+            c.w["counter"].clicked.connect(lambda: self.step(c.w["counter"].side))
             lay.addWidget(c.w["counter"])
             lay.addSpacing(8)
             lay.addWidget(divider())
@@ -1349,7 +1388,7 @@ class Gallery(QObject):
         self.active = True
         self.items = list(items)
         self.filter = "all"
-        self.row = "stage"          # left / right browse at once
+        self.row = "media"          # the clip's controls at once (LB / RB browse)
         self.foot_btn = "trash"
         self.footer.unask()
         self.ask_item = None
@@ -1359,7 +1398,7 @@ class Gallery(QObject):
         self.badge_tween.stop()
         self.badge_t = 1.0
         self.chrome = True
-        self.stage.setFixedSize(self.stage_size)   # the screen may have changed since
+        self._size_media()          # the screen may have changed since
         self.header.select(self.tabs[self.filter], animate=False)
         self._xf_drop()
         if not self.closing:                           # reopened while folding: from there
@@ -1602,8 +1641,8 @@ class Gallery(QObject):
         self.sync()
 
     def step(self, d, focus=None):
-        """LB / RB, ← / → on the stage: ``d`` -1 = newer, +1 = older (no wrap). ``focus``:
-        a control to focus (a click); None keeps the focused row."""
+        """LB / RB, PgUp / PgDn, the counter's arrows: ``d`` -1 = newer, +1 = older (no wrap).
+        ``focus``: the row to focus (see ``focus``); None keeps the focused row."""
         if not self.view:
             return
         i = max(0, min(len(self.view) - 1, self.index + d))
@@ -1872,7 +1911,7 @@ class Gallery(QObject):
         if self.full is not None and self.chrome:
             self.wake_chrome()
 
-    def toggle_play(self, focus="play"):
+    def toggle_play(self, focus="media"):
         """A / Space / K / Enter: play or pause; again from the start once it ended.
         On a screenshot it opens (or leaves) full screen."""
         item = self.current()
@@ -1934,7 +1973,7 @@ class Gallery(QObject):
         self.sync_time(animate=True)
         self.sync()
 
-    def toggle_mute(self, focus="mute"):
+    def toggle_mute(self, focus="media"):
         """X / Square (west) / M / the speaker button: sound on or off (off on every open;
         kept across items and in full screen)."""
         if self.is_shot() or self.current() is None:
@@ -2161,8 +2200,8 @@ class Gallery(QObject):
         if item is None:
             hint = []
         else:
-            row = self.row if self.full is None else ("player" if self.row == "player" else "stage")
-            pads, keys = ROW_HINTS.get((row, item.kind)) or ROW_HINTS[("stage", item.kind)]
+            row = self.row if self.full is None else "media"
+            pads, keys = ROW_HINTS.get((row, item.kind)) or ROW_HINTS[("media", item.kind)]
             hint = pad_hint(pads, sym) if pad else keys
         self.footer.set_hint(hint)
         if self.full is not None:
@@ -2171,42 +2210,24 @@ class Gallery(QObject):
             self.full.place()
 
     # ------------------------------------------------------------------ focus
-    def _widget(self, name):
-        """The control called ``name`` in the view that has the keyboard."""
-        if name == "filter":
-            if self.full is not None:
-                return self._widget("counter" if self.is_shot() else "play")
-            return self.tabs.get(self.filter)
-        if self.full is not None and self.fullc is not None:
-            if self.is_shot():
-                name = {"full": "shotfull", "play": "shotfull", "counter": "counter"}.get(name, "shotfull")
-            elif name == "counter":
-                name = "play"
-            return self.fullc.w.get(name)
-        if self.is_shot() and name not in ("counter", "full", "back"):
-            name = "full"
-        return self.panel.w.get(name)
-
     def focus(self, name):
+        """Focus the row ``name`` ("filter", "media"; a click on one of its controls, or a key
+        that acts on it). None: the focus stays where it is."""
         if name is None:
             return
-        w = self._widget(name)
-        if w is None or not w.isVisible() or not w.isEnabled():
-            self.focus_default()
-            return
-        w.setFocus(Qt.TabFocusReason)
+        self.set_row(name if name in ROWS else "media")
 
     def focus_default(self):
-        """The focused row again (the stage when that row is gone: a screenshot has no player)."""
+        """The focused row again (the media row when that row is gone)."""
         self.set_row(self.row)
 
     def _fix_focus(self):
-        """A control that just hid or went disabled hands focus to its row (or the stage)."""
+        """A control that just hid or went disabled hands focus to its row (or the media)."""
         if not self.active:
             return
         w = QApplication.focusWidget()
         host = self.full if self.full is not None else self.bar
-        drifted = (self.bar.focus_visible and self.row not in ("footer",) and self.row in self.rows()
+        drifted = (self.bar.focus_visible and self.row != "footer" and self.row in self.rows()
                    and w is not self.row_widget(self.row))   # e.g. a control hid and Qt moved on
         if (w is None or not (host is w or host.isAncestorOf(w)) or not w.isVisible() or not w.isEnabled()
                 or self.row not in self.rows() or drifted):
@@ -2215,19 +2236,15 @@ class Gallery(QObject):
 
     # ---- rows: up / down between them, left / right inside one, A / Enter on it
     def rows(self):
-        clip = not self.is_shot() and self.current() is not None
-        if self.full is not None:
-            return ("stage", "player") if clip else ("stage",)
-        return ("filter", "stage", "player", "footer") if clip else ("filter", "stage", "footer")
+        return ("media",) if self.full is not None else ROWS
 
     def row_widget(self, row):
+        """What holds the keyboard while ``row`` is focused: the chosen filter's tab, the
+        picture (the full screen view), a footer button."""
         if row == "filter":
             return self.tabs.get(self.filter)
-        if row == "stage":
+        if row == "media":
             return self.full if self.full is not None else self.stage
-        if row == "player":
-            c = self.fullc if self.full is not None else self.panel
-            return c.w.get("play") if c is not None else None
         f = self.footer
         if f.asking:
             return f.yes if f.yes.hasFocus() else f.no
@@ -2236,12 +2253,12 @@ class Gallery(QObject):
         return f.trash
 
     def set_row(self, row):
-        """Focus ``row`` (its control: the filter tab, the stage, play, a footer button)."""
+        """Focus ``row`` (its control: the filter tab, the picture, a footer button)."""
         if row not in self.rows():
-            row = "stage"
+            row = "media"
         w = self.row_widget(row)
         if w is None or not w.isVisible() or not w.isEnabled():
-            row, w = "stage", self.row_widget("stage")
+            row, w = "media", self.row_widget("media")
         self.row = row
         if w is not None and w.isVisible():
             w.setFocus(Qt.TabFocusReason)
@@ -2253,18 +2270,17 @@ class Gallery(QObject):
     def move_row(self, d):
         """Up / down (D-pad, stick, arrow keys): the row above / below; never out of the gallery."""
         rows = self.rows()
-        i = rows.index(self.row) if self.row in rows else rows.index("stage")
+        i = rows.index(self.row) if self.row in rows else rows.index("media")
         j = max(0, min(len(rows) - 1, i + d))
         if j != i:
             self.set_row(rows[j])
 
     def lr(self, d):
-        """Left / right inside the focused row: filters, items, -10 / +10 s, footer buttons."""
-        row = self.row if self.row in self.rows() else "stage"
+        """Left / right inside the focused row: the filters, -10 / +10 s on a clip (a
+        screenshot has nothing there: the error sound), the footer's buttons."""
+        row = self.row if self.row in self.rows() else "media"
         if row == "filter":
             self.step_filter(d)
-        elif row == "player":
-            self.seek(d * SEEK_S)
         elif row == "footer":
             btns = [b for b in self.footer.buttons() if b.isEnabled()]
             cur = QApplication.focusWidget()
@@ -2272,39 +2288,40 @@ class Gallery(QObject):
             j = max(0, min(len(btns) - 1, i + d))
             if btns:
                 btns[j].setFocus(Qt.TabFocusReason)
+        elif self.current() is not None and not self.is_shot():
+            self.seek(d * SEEK_S)
         else:
-            self.step(d)
+            self.bar.sound("error")
 
     def activate(self):
-        """A / Enter: whatever the focused row does."""
-        row = self.row if self.row in self.rows() else "stage"
+        """A / Enter: whatever the focused row does (the media: play / pause a clip, a
+        screenshot full screen)."""
+        row = self.row if self.row in self.rows() else "media"
         if row == "filter":
-            self.set_row("stage")
+            self.set_row("media")
         elif row == "footer":
             w = self.row_widget("footer")
             if w is not None and w.isEnabled():
                 w.click()
-        elif row == "player":
-            self.toggle_play(focus=None)
         else:
-            self.toggle_play(focus=None)          # a screenshot: full screen
+            self.toggle_play(focus=None)
 
     def row_of(self, w):
         """The row ``w`` belongs to (a click focuses it), or None."""
         if w is None:
             return None
         if self.full is not None and w is self.full:
-            return "stage"
+            return "media"
         f = self.footer
         if w in (f.trash, f.back, f.yes, f.no):
             return "footer"
         if w is self.stage:
-            return "stage"
+            return "media"
         if w in self.tabs.values() or w is self.panel.w.get("counter"):
             return "filter"
         for c in (self.panel, self.fullc):
             if c is not None and w in c.w.values():
-                return "stage" if self.is_shot() else "player"
+                return "media"
         return None
 
     def _on_focus_changed(self, _old, new):
@@ -2320,19 +2337,27 @@ class Gallery(QObject):
             self.retarget_glow()
             self.sync_hints()
 
-    # ---- the focused row's highlight (keyboard / controller only, like the ring)
+    # ---- the focused row's white ring and highlight (keyboard / controller only)
     def row_rect(self, row):
-        """Where ``row``'s highlight goes, in the panel's coordinates."""
+        """Where ``row``'s ring (and highlight) goes, in the panel's coordinates: the filter
+        and footer rows ROW_INSET in from the panel's sides, the media row around the picture
+        and its transport as one."""
         panel = self.panel_w
         if row == "filter":
-            r = QRectF(self.header.geometry()).adjusted(6, 1, -6, -1)
-        elif row == "stage":
-            r = QRectF(QPointF(self.stage.mapTo(panel, QPoint(0, 0))), QSizeF(self.stage.size())).adjusted(-5, -5, 5, 5)
-        elif row == "player":
-            r = QRectF(self.player_row.geometry()).adjusted(6, 1, -6, -1)
-        else:
-            r = QRectF(self.footer.geometry()).adjusted(6, 3, -6, -3)
-        return r
+            return QRectF(self.header.geometry()).adjusted(ROW_INSET, 0, -ROW_INSET, 0)
+        if row == "footer":
+            return QRectF(self.footer.geometry()).adjusted(ROW_INSET, 0, -ROW_INSET, 0)
+        stage = QRect(self.stage.mapTo(panel, QPoint(0, 0)), self.stage.size())
+        ctrl = QRect(self.player_row.mapTo(panel, QPoint(0, 0)), self.player_row.size())
+        box = QRectF(stage.united(ctrl))
+        return box.adjusted(-MEDIA_PAD, -MEDIA_PAD, MEDIA_PAD, MEDIA_PAD_B)
+
+    def row_radius(self, row):
+        """The ring's corners: round ends like a pill's for the filter and footer rows, the
+        picture's corners (grown by the gap) for the media row."""
+        if row == "media":
+            return STAGE_RADIUS + MEDIA_PAD
+        return self.row_rect(row).height() / 2
 
     def retarget_glow(self):
         show = self.active and self.full is None and self.bar.focus_visible
@@ -2351,15 +2376,16 @@ class Gallery(QObject):
                 changed.append(r)
         for r in changed:
             rect = self.row_rect(r).adjusted(-3, -3, 3, 3).toAlignedRect()
-            if r == "stage":      # only the ring around the picture: the video isn't repainted
+            if r == "media":      # only the ring around the picture: the video isn't repainted
                 inner = QRect(self.stage.mapTo(self.panel_w, QPoint(0, 0)), self.stage.size())
                 self.panel_w.update(QRegion(rect).subtracted(QRegion(inner)))
             else:
                 self.panel_w.update(rect)
 
     def paint_glow(self, p):
-        """A faint, soft-edged rounded fill behind the focused row: it eases in with a tiny
-        grow, the row left fades out; neutral white at a few percent, no colour."""
+        """Behind the focused row a faint, soft-edged fill (neutral white at a few percent),
+        and around it the bar's white focus ring. Both ease in with a tiny grow; the row left
+        fades out."""
         for r in ROWS:
             v = self.glow[r]
             if v <= 0.004:
@@ -2367,16 +2393,21 @@ class Gallery(QObject):
             rect = self.row_rect(r)
             inset = 3.0 * (1.0 - v)
             rect = rect.adjusted(inset, inset, -inset, -inset)
-            rad = STAGE_RADIUS + 5 if r == "stage" else 12
+            rad = self.row_radius(r) - inset
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, round(6 * v)))          # the soft edge
             p.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), rad + 2, rad + 2)
             p.setBrush(QColor(255, 255, 255, round(12 * v)))
             p.drawRoundedRect(rect, rad, rad)
+            ring = QColor(ov.RING)
+            ring.setAlphaF(min(1.0, v))
+            p.setPen(QPen(ring, RING_W))
+            p.setBrush(Qt.NoBrush)
+            # a quarter pixel out, like the pills' ring: one whole pixel line at 100 % at 1.0
+            p.drawRoundedRect(rect.adjusted(-0.25, -0.25, 0.25, 0.25), rad + 0.25, rad + 0.25)
 
     def on_focus_visible(self):
         """The bar's focus-visible rule changed (a key / the mouse): the ring and highlight follow."""
-        self.stage.update()
         self.retarget_glow()
 
     # ---- deleting
@@ -2453,7 +2484,7 @@ class Gallery(QObject):
         self.view = [i for i in self.view if i.path != item.path]
         self.index = max(0, min(self.index, len(self.view) - 1))   # the next one (older), else the last
         self._show(immediate=True)
-        self.set_row("stage")
+        self.set_row("media")
 
     # ------------------------------------------------------------------ full screen
     def toggle_full(self):
@@ -2587,7 +2618,7 @@ class Gallery(QObject):
         bar.activateWindow()
         self._activate(bar)
         self.sync()
-        self.focus_default()         # the row it was on (the stage when that was the picture)
+        self.focus_default()         # the media row
         item = self.current()
         if item is not None and item.kind == "shot":
             self._load_image(item)   # back to the stage's size: the screen-sized picture goes
@@ -2678,7 +2709,7 @@ class Gallery(QObject):
 
     def key(self, k) -> bool:
         """Keys while the gallery is open (the bar routes every key here): up / down move
-        between rows, left / right act in the focused row (see ROWS)."""
+        between rows, left / right act in the focused row (see ROWS), PgUp / PgDn browse."""
         if self.full is not None:
             self.wake_chrome()
         if self.footer.asking:
