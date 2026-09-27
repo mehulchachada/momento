@@ -34,6 +34,11 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match __version__ = $code"
             exit 1
           fi
+          # The app store text must describe this release too.
+          if ! grep -q "<release version=\"$tag\"" packaging/flatpak/io.github.mehulchachada.Momento.metainfo.xml; then
+            echo "::error::no <release version=\"$tag\"> in the metainfo"
+            exit 1
+          fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Check packaged systemd unit is in sync with data/momento.service
@@ -138,33 +143,39 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           cat > notes.md <<EOF
+          Instant replay for Linux games. Press play once, and when something great happens, save the last 15 seconds to 60 minutes with **Super + Shift + G**, or **Home + D-pad Down** on a controller.
+
           ## Install
 
-          **Any distro, including SteamOS and Bazzite:** Flatpak from Flathub (when available).
+          **Easiest, on any Linux:** paste this in a terminal. It shows what it will install and asks first.
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/v${VERSION}/install.sh | MOMENTO_REF=v${VERSION} bash
+          \`\`\`
+          On Bazzite, Bluefin and Aurora, use this one, not a package below.
 
-          **Fedora 41+** (Fedora's Mesa has no H.264 encoder; AMD users also want \`mesa-va-drivers-freeworld\` from RPM Fusion):
-          \`\`\`
-          sudo dnf install ./momento-${VERSION}-1.noarch.rpm
-          \`\`\`
+          **Or download the package for your system below** and install it from your Downloads folder:
 
-          **Ubuntu 25.04+ / 26.04 LTS, Debian 13+** (Ubuntu 24.04 has no PySide6 packages — use the Flatpak there):
-          \`\`\`
-          sudo apt install ./momento_${VERSION}_all.deb
-          \`\`\`
+          | System | Command |
+          |---|---|
+          | Fedora | \`sudo dnf install ./momento-${VERSION}-1.noarch.rpm\` |
+          | Ubuntu 25.04 or newer, Debian 13 or newer | \`sudo apt install ./momento_${VERSION}_all.deb\` |
+          | Arch, CachyOS, EndeavourOS, Manjaro | \`sudo pacman -U momento-${VERSION}-1-any.pkg.tar.zst\` |
 
-          **Arch, CachyOS, EndeavourOS, Manjaro** (or install \`momento\` from the AUR):
-          \`\`\`
-          sudo pacman -U momento-${VERSION}-1-any.pkg.tar.zst
-          sudo pacman -S --needed gst-plugin-va layer-shell-qt   # recommended
-          \`\`\`
-
-          Then, as your normal user:
+          After a package, run this once so Momento starts when you log in:
           \`\`\`
           systemctl --user enable --now momento.service
           \`\`\`
-          and press **Super+Shift+G** to save a clip.
 
-          Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          Then start your game, press **Super + Shift + G**, press play and pick your game's window.
+
+          ## Good to know
+
+          - **Fedora with AMD graphics:** add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`. Without it, your processor does the recording and games may stutter.
+          - **Arch:** also run \`sudo pacman -S --needed gst-plugin-va layer-shell-qt\`.
+
+          ## Tell us how it runs
+
+          Momento has only been tested on a few machines so far. [Tell us how it runs on yours](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=how-it-runs.yml): it takes 2 minutes.
           EOF
       - name: Publish GitHub Release
         env:
