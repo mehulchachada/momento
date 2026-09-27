@@ -1141,6 +1141,45 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(fmt.buttons[3].visual_state, "capped")    # still shown as chosen, dimmed
         self.assertEqual(fmt.note.text(), "Your graphics chip can't record H.265 or AV1")
 
+    def test_format_row_greys_a_format_that_crashed(self):
+        # AV1 crashed Momento here (a driver abort): greyed with the reason, still choosable
+        bar, fmt, daemon = self.open_format(values={"format": "av1"}, format_allowed=["auto", "h264", "h265", "av1"],
+                                            format_auto="h264", format_effective="h265", format_crashed=["av1"])
+        self.assertEqual([b.isEnabled() for b in fmt.buttons], [True, True, True, True])
+        self.assertEqual([bool(b.property("dim")) for b in fmt.buttons], [False, False, False, True])
+        self.assertEqual(fmt.value, "av1")
+        self.assertEqual(fmt.buttons[3].visual_state, "capped")     # the saved one, shown dimmed
+        self.assertEqual((fmt.note.text(), fmt.note.kind), ("AV1 stopped working here. Pick it again to retry", "warn"))
+        fmt.buttons[2].setFocus()
+        self.assertEqual(fmt.note.text(), "Smaller files. Some older devices can't play it")
+        fmt.buttons[3].setFocus()
+        self.assertEqual((fmt.note.text(), fmt.note.kind), ("AV1 stopped working here. Pick it again to retry", "warn"))
+        bar.row("resolution").focus()
+        pump(self.app, 0.05)
+        self.shot(bar, "format-crashed", "format")
+        self.assertEqual(bar.changes(), {})
+        QTest.mouseClick(fmt.buttons[3], Qt.LeftButton)              # picked again: a retry
+        self.assertEqual(fmt.value, "av1")
+        self.assertFalse(fmt.buttons[3].property("dim"))
+        self.assertEqual(bar.changes(), {"format": "av1"})           # sent although it is the saved value
+        self.assertEqual(bar.note.text(), "Applying restarts recording · your replay is kept")
+        QTest.mouseClick(fmt.buttons[1], Qt.LeftButton)              # changed their mind
+        self.assertEqual(bar.changes(), {"format": "h264"})
+        self.assertTrue(fmt.buttons[3].property("dim"))
+        QTest.mouseClick(fmt.buttons[3], Qt.LeftButton)
+        self.assertEqual(bar.changes(), {"format": "av1"})
+        bar.apply_settings()
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertEqual(daemon.configures, [{"format": "av1"}])
+
+    def test_format_row_crash_note_with_auto(self):
+        _bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="h264",
+                                         format_crashed=["av1", "h265"])
+        self.assertEqual(fmt.value, "auto")
+        self.assertEqual(fmt.note.text(), "H.265 and AV1 stopped working here. Pick one again to retry")
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Recording in H.264 on this PC")
+
     def test_format_auto_says_what_is_really_recorded(self):
         # Auto saved: the daemon's format_effective (what the recorder really uses) wins
         bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1",

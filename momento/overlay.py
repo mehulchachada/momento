@@ -1206,11 +1206,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setObjectName("seg")
             self.setProperty("sel", False)
             self.setProperty("nofit", False)
+            self.setProperty("dim", False)   # greyed but still choosable (a format that crashed)
             if tip:
                 self.setAccessibleDescription(tip)
 
         def rest_text(self):
-            return DIM if self.property("nofit") else MUTED
+            return DIM if self.property("nofit") or self.property("dim") else MUTED
 
         def selected(self):
             return bool(self.property("sel"))
@@ -1224,7 +1225,15 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if not self.isEnabled() and self.selected():
                 # the saved value, which can't apply here: still shown as chosen, dimmed
                 return "capped", (QColor(SEL_OFF), QColor(MUTED), 0.0)
+            if (self.property("dim") and self.selected() and self.isEnabled()
+                    and not self.focus_shown() and not self.hovered):
+                return "capped", (QColor(SEL_OFF), QColor(MUTED), 0.0)
             return super().target()
+
+        def set_dim(self, on):
+            if self.property("dim") != on:
+                self.setProperty("dim", on)
+                self.sync()
 
         def set_nofit(self, on):
             if self.property("nofit") != on:
@@ -1629,6 +1638,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def enabled(self, i):
             return self.values[i] not in self.disabled
 
+        def forced(self):
+            """Send this row's value on Apply even though it is the saved one (a retry)."""
+            return False
+
         def focus(self):
             if self.cycle:
                 self.cur.setFocus(Qt.TabFocusReason)
@@ -1669,10 +1682,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         """Settings -> Video -> Format: Auto / H.264 / H.265 / AV1.
 
         Formats this machine can't record (the settings reply's ``format_allowed``)
-        are disabled. The note at the row's end says what the focused choice means
-        for the clips; Auto says what it records in here ("Recording in AV1 on this
-        PC"). With no focus in the row: why a choice is disabled, or else what the
-        selected one means (Auto: the same "Recording in" line).
+        are disabled. Formats whose start crashed Momento here (``format_crashed``)
+        are greyed but still choosable: picking one again retries it, even when it
+        is the saved one. The note at the row's end says what the focused choice
+        means for the clips; Auto says what it records in here ("Recording in H.264
+        on this PC"). With no focus in the row: why a choice is greyed or disabled,
+        or else what the selected one means (Auto: the same "Recording in" line).
         """
 
         AUTO_HINT = "Picks a format your PC records well"   # Auto's pick not known
@@ -1693,12 +1708,34 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             picked = data.get("format_auto")
             if value == "auto" and data.get("format_effective"):
                 picked = data["format_effective"]
+            crashed = data.get("format_crashed")
+            crashed = [f for f in crashed if f in opts and f not in unavailable] if isinstance(crashed, list) else []
             labels = [(f, codecs.label(f)) for f in opts]
+            self.crashed, self.retry = crashed, None
             super().__init__(bar, key, title, labels, value, avail, disabled=unavailable)
             self.codecs, self.picked, self.unavailable, self.focused = codecs, picked, unavailable, None
             for b in self.buttons:
                 b.installEventFilter(self)
+            self.update_dim()
             self.update_note()
+
+        def update_dim(self):
+            for b, v in zip(self.buttons, self.values):
+                b.set_dim(v in self.crashed and v != self.retry)
+
+        def select(self, i):
+            # Picking a format that crashed here asks to retry it, even the saved one.
+            self.retry = self.values[i] if self.values[i] in self.crashed else None
+            self.update_dim()
+            if self.retry is not None and i == self.idx:
+                self.refresh()
+                self.focus()
+                self.bar.on_row_changed(self)
+                return
+            super().select(i)
+
+        def forced(self):
+            return self.retry is not None and self.retry == self.value
 
         def auto_note(self):
             if self.picked in self.codecs.LABELS and self.picked != "auto":
@@ -1710,15 +1747,22 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return self.auto_note()
             if fmt in self.unavailable:
                 return self.codecs.unavailable_message([fmt])
+            if fmt in self.crashed and fmt != self.retry:
+                return self.codecs.crashed_note([fmt])
             return self.codecs.HINTS.get(fmt, "")
 
         def update_note(self):
             fmt = self.focused if self.focused is not None else self.value
-            if self.focused is None and self.unavailable:
+            crashed = [f for f in self.crashed if f != self.retry]
+            if self.focused is None and (crashed or self.unavailable):
                 # why a chip is greyed, while the row has no focus
-                self.set_note(self.codecs.unavailable_message(self.unavailable), "warn")
+                if crashed:
+                    self.set_note(self.codecs.crashed_note(crashed), "warn")
+                else:
+                    self.set_note(self.codecs.unavailable_message(self.unavailable), "warn")
                 return
-            self.set_note(self.hint(fmt), "warn" if fmt in self.unavailable else "info")
+            warn = fmt in self.unavailable or fmt in crashed
+            self.set_note(self.hint(fmt), "warn" if warn else "info")
 
         def refresh(self):
             super().refresh()
@@ -2875,7 +2919,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
 
         def changes(self):
             vals = self.sdata["values"]
-            return {k: v for k, v in self.pending().items() if vals.get(k) != v}
+            out = {k: v for k, v in self.pending().items() if vals.get(k) != v}
+            for r in self.rows:
+                if getattr(r, "forced", lambda: False)():
+                    out[r.key] = r.value   # a retry of the saved value (a format that crashed)
+            return out
 
         def live_keys(self):
             """Settings the daemon applies without restarting the recording."""
