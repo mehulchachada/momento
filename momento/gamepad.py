@@ -350,7 +350,7 @@ def _sysfs_driver(path: str) -> str:
 def device_origin(path: str = "", name: str = "", phys: str = "", vendor: int = 0,
                   product: int = 0) -> str:
     """Where a pad comes from, for the logs: "InputPlumber virtual pad", "Steam Input
-    virtual pad", "virtual (uhid)", "virtual (uinput)", "physical", or "" (unknown).
+    virtual pad", "Bluetooth", "virtual (uhid)", "virtual (uinput)", "physical", or "" (unknown).
     A virtual pad mirrors a physical one that another program reads; a uhid one is
     also readable through hidraw, which an evdev grab doesn't cover."""
     text = f"{name} {phys}".lower()
@@ -368,6 +368,13 @@ def device_origin(path: str = "", name: str = "", phys: str = "", vendor: int = 
     if not os.path.exists(real):
         return ""
     if "/uhid/" in real:
+        # BlueZ creates Bluetooth HID pads through uhid too: HID bus 0005 is a real pad
+        try:
+            with open(os.path.join(real, "device", "uevent")) as f:
+                if any(line.startswith("HID_ID=0005:") for line in f):
+                    return "Bluetooth"
+        except OSError:
+            pass
         return "virtual (uhid)"
     if "/virtual/" in real:
         return "virtual (uinput)"
