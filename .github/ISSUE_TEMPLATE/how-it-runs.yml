@@ -1,0 +1,63 @@
+name: How does Momento run on your PC?
+description: Takes 2 minutes. Helps us make Momento smoother on your hardware.
+title: "Runs on: "
+labels: ["hardware report"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping! Rough numbers are fine.
+  - type: input
+    id: device
+    attributes:
+      label: Your PC or handheld
+      placeholder: e.g. ROG Ally, Steam Deck, desktop with RTX 3060
+    validations:
+      required: true
+  - type: dropdown
+    id: graphics
+    attributes:
+      label: Graphics
+      options: [AMD, NVIDIA, Intel, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux system
+      placeholder: e.g. Bazzite, Fedora 44, Ubuntu 26.04, Arch
+    validations:
+      required: true
+  - type: dropdown
+    id: desktop
+    attributes:
+      label: Desktop
+      options: [KDE Plasma, GNOME, Hyprland, Steam Game Mode, Other, Not sure]
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game you tried
+    validations:
+      required: true
+  - type: input
+    id: fps
+    attributes:
+      label: FPS with Momento paused → while recording
+      placeholder: e.g. 70 → 62
+  - type: dropdown
+    id: feel
+    attributes:
+      label: How did it feel while recording?
+      options: [Smooth, A few small stutters, Noticeable stutters]
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Momento settings (optional)
+      placeholder: e.g. 1080p, 60 fps, Full screen
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else? (optional)
