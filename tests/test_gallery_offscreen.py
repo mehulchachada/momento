@@ -1664,6 +1664,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIsNone(g.panel_w.graphicsEffect())                 # the effect goes with the motion
         self.assertEqual(g.panel_w.geometry().bottom(), bar.gallery_host.height() - 1)
         self.assertTrue(g.stage.hasFocus())
+        self.wait_for(lambda: g.frame is not None, timeout=2)         # the clip loads once it has grown
         self.key(Qt.Key_Escape)                                       # back: the clip view is live at once
         self.assertEqual(bar.mode, "clip")
         self.assertTrue(g.closing)
@@ -1698,6 +1699,65 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_Escape)
         self.assertIn(bar.gallery_btn.target()[0], ("rest", "focus", "hover"))   # not "selected"
         del g
+
+    def test_motion_player_waits_for_the_open(self):
+        """Nothing heavy while the gallery grows: no player is made, no source set and no
+        play started until the open's growth has finished; then the first clip loads."""
+        gm = self.motion()
+        bar = self.bar()
+        made_at = []
+        orig = gm.PLAYER_FACTORY
+
+        def factory(parent):
+            made_at.append(bar.gallery.reveal)
+            return orig(parent)
+        gm.PLAYER_FACTORY = factory
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        self.assertTrue(g.opening)
+        self.assertEqual(FakePlayer.made, [])                         # not at the open...
+        self.assertIsNone(g.player)
+        self.assertEqual(g.state, "loading")                          # the plain stage meanwhile
+        self.wait_for(lambda: g.reveal > 0.3, timeout=1)
+        self.assertEqual(FakePlayer.made, [])                         # ...nor while it grows
+        self.wait_for(lambda: FakePlayer.made and "play" in FakePlayer.made[-1].calls, timeout=2)
+        self.assertEqual(made_at, [1.0])                              # made once it had grown
+        self.assertFalse(g.opening)
+        self.assertEqual(self.player.sources(), [str(self.clip0)])
+        # Back while it still grows: the clip never loads at all
+        self.key(Qt.Key_Escape)
+        self.wait_for(lambda: bar.gallery_host.isHidden(), timeout=2)
+        n = len(FakePlayer.made)
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        self.assertTrue(g.opening)
+        self.key(Qt.Key_Escape)
+        pump(self.app, 0.5)
+        self.assertEqual(len(FakePlayer.made), n)
+        self.assertFalse(g.opening)
+        self.assertFalse(g.open_load.isActive())
+
+    def test_first_load_waits_for_gstreamer_init_without_blocking(self):
+        """GStreamer's init still running in its warm-up thread: the first load polls for it
+        instead of waiting on its lock on the GUI thread."""
+        gm = self.motion()
+        gm.ANIMATE = False
+        bar = self.bar()
+        self.addCleanup(setattr, gm, "PLAYER_FACTORY", gm.PLAYER_FACTORY)
+        gm.PLAYER_FACTORY = None
+        ready = [False]
+        made = []
+        with mock.patch.object(gst_player, "ready", lambda: ready[0]), \
+                mock.patch.object(gst_player, "warm_up", lambda: None), \
+                mock.patch.object(gst_player, "available", lambda: True), \
+                mock.patch.object(gst_player, "GstPlayer", lambda parent: made.append(1) or FakeGstPlayer(parent)):
+            g = self.open(bar)
+            self.assertEqual(made, [])                                # not ready: nothing made, no wait
+            self.assertTrue(g.open_load.isActive())
+            ready[0] = True
+            self.wait_for(lambda: made, timeout=1)
+            self.assertIsNotNone(g.player)
 
     def test_motion_open_and_close_order(self):
         """Open: the height grows first, the content fades in and slides up a moment later.
