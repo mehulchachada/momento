@@ -63,6 +63,14 @@ body:
       label: Other Momento settings (optional)
       placeholder: e.g. 1080p, 60 fps, Full screen
   - type: textarea
+    id: report
+    attributes:
+      label: Report file (optional, helps a lot)
+      description: >-
+        Drag the file made by Settings → Misc → Make a report (or `momento report`) into this box.
+        Or paste its text.
+      placeholder: Drop Momento-report-….txt here
+  - type: textarea
     id: notes
     attributes:
       label: Anything else? (optional)
