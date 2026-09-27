@@ -124,6 +124,7 @@ That's it. Momento now records in the background until you stop it or the game c
 | The camera button | Takes a screenshot |
 | **S**, or the gear | Opens [settings](#settings) |
 | **G**, or the gallery button | Shows your saved clips and screenshots above the bar |
+| **Delete**, or the bin in the gallery | Moves a clip or screenshot to the Trash (it asks first) |
 | **Esc** | Closes the bar without saving |
 
 In Full screen mode, recording pauses while the gallery is open so it doesn't end up in your clips, and picks up again when you close it.

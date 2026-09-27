@@ -41,10 +41,10 @@ import logging
 import threading
 import time
 
-from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRectF, QSize,
-                            Qt, QTimer, QUrl, QVariantAnimation, Signal)
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF,
+                            QSize, QSizeF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader, QPainter,
-                           QPainterPath, QPen, QPolygonF)
+                           QPainterPath, QPen, QPolygonF, QRegion)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
@@ -97,17 +97,40 @@ FILTERS = (("all", "All"), ("clip", "Clips"), ("shot", "Screenshots"))
 EMPTY_FILTER = {"all": "Nothing saved yet", "clip": "No clips yet", "shot": "No screenshots yet"}
 KIND_NAMES = {"clip": "Clip", "shot": "Screenshot"}
 
+DELETE_ASK = {"clip": "Delete this clip?", "shot": "Delete this screenshot?"}
+DELETE_FINAL = " It can't be undone."      # no Trash on that file system
+DELETE_FAILED = "Couldn't delete it"
+GLOW_MS = 160            # the focused row's highlight eases in (and the one left fades out)
+
+# Focus rows, top to bottom (up / down moves between them; left / right acts inside one):
+# the filters, the stage (browse), the player (clips: -10 / +10 s), the footer (delete, Back).
+ROWS = ("filter", "stage", "player", "footer")
+
 # The hints in the footer and the full screen strip: [([buttons or keys], word), ...].
-# A controller's buttons while the bar has one (Bar.pad_connected), else the keys.
-# PAD_*: by button position (gamepad names); pad_hint() puts in the pad's own symbols.
-PAD_CLIP = [(["tl", "tr"], "browse"), (["↑", "↓"], "filter"), (["south"], "play"), (["tl2", "tr2"], "10 s"),
+# A controller's buttons while the bar has one (Bar.pad_connected), else the keys; they
+# follow the focused row. PAD_*: by button position (gamepad names); pad_hint() puts in the
+# pad's own symbols. ← → is the D-pad / left stick (or the arrow keys).
+PAD_CLIP = [(["←", "→"], "browse"), (["south"], "play"), (["tl2", "tr2"], "10 s"),
             (["west"], "sound"), (["north"], "full screen")]
-PAD_SHOT = [(["tl", "tr"], "browse"), (["↑", "↓"], "filter"), (["north"], "full screen")]
+PAD_SHOT = [(["←", "→"], "browse"), (["north"], "full screen")]
+PAD_PLAYER = [(["←", "→"], "10 s"), (["south"], "play"), (["tl", "tr"], "browse"),
+              (["west"], "sound"), (["north"], "full screen")]
+PAD_FILTER = [(["←", "→"], "filter"), (["tl", "tr"], "browse")]
+PAD_FOOTER = [(["←", "→"], "choose"), (["south"], "select"), (["tl", "tr"], "browse")]
 PAD_BACK = [(["east"], "Back")]
-CLIP_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["Space"], "play"), (["J", "L"], "10 s"),
+CLIP_KEYS = [(["←", "→"], "browse"), (["Space"], "play"), (["J", "L"], "10 s"),
              (["M"], "sound"), (["F"], "full screen")]
-SHOT_KEYS = [(["←", "→"], "browse"), (["↑", "↓"], "filter"), (["F"], "full screen")]
+SHOT_KEYS = [(["←", "→"], "browse"), (["F"], "full screen"), (["Del"], "delete")]
+PLAYER_KEYS = [(["←", "→"], "10 s"), (["Space"], "play"), (["PgUp", "PgDn"], "browse"),
+               (["M"], "sound"), (["F"], "full screen")]
+FILTER_KEYS = [(["←", "→"], "filter"), (["PgUp", "PgDn"], "browse")]
+FOOTER_KEYS = [(["←", "→"], "choose"), (["Enter"], "select"), (["Del"], "delete")]
 BACK_KEYS = [(["Esc"], "Back")]
+# (row, kind) -> (pad hints, key hints); a screenshot has no player row
+ROW_HINTS = {("stage", "clip"): (PAD_CLIP, CLIP_KEYS), ("stage", "shot"): (PAD_SHOT, SHOT_KEYS),
+             ("player", "clip"): (PAD_PLAYER, PLAYER_KEYS),
+             ("filter", "clip"): (PAD_FILTER, FILTER_KEYS), ("filter", "shot"): (PAD_FILTER, FILTER_KEYS),
+             ("footer", "clip"): (PAD_FOOTER, FOOTER_KEYS), ("footer", "shot"): (PAD_FOOTER, FOOTER_KEYS)}
 
 _pad_hints: dict = {}
 
@@ -442,7 +465,8 @@ def _widgets(kit):
     class MediaIcon(IconButton):
         TIPS = {**IconButton.TIPS, "play": "Play (K)", "pause": "Pause (K)", "replay": "Play again (K)",
                 "back10": "Back 10 s (J)", "fwd10": "Forward 10 s (L)", "muted": "Turn sound on (M)",
-                "sound": "Mute (M)", "full": "Full screen (F)", "unfull": "Leave full screen (F)"}
+                "sound": "Mute (M)", "full": "Full screen (F)", "unfull": "Leave full screen (F)",
+                "trash": "Delete (Del)"}
 
         def __init__(self, kind, height=ov.BAR_HEIGHT):
             super().__init__(kind)
@@ -491,6 +515,8 @@ def _widgets(kit):
                 draw_brackets(p, x, y, color, inward=k == "unfull")
             elif k == "replay":
                 draw_replay(p, x, y, color)
+            elif k == "trash":
+                kit.draw_line_glyph(p, "trash", x, y, color.name())
             else:
                 shown, self.kind = self.kind, k     # the bar's own glyphs (play, pause) paint self.kind
                 p.save()
@@ -629,13 +655,27 @@ def _widgets(kit):
             self.radius = radius
             self.setCursor(Qt.PointingHandCursor)
             self.setAccessibleName("Clip")
+            self.setFocusPolicy(Qt.ClickFocus)   # the stage row: the keys and the controller focus it
 
         def paintEvent(self, ev):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setRenderHint(QPainter.SmoothPixmapTransform)
             self.g.paint_picture(p, QRectF(self.rect()), self.radius, badge=True)
+            if self.hasFocus() and self.g.bar.focus_visible:
+                # the bar's white focus ring, just inside the picture's rounded edge
+                p.setPen(QPen(QColor(ov.RING), 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), self.radius, self.radius)
             p.end()
+
+        def focusInEvent(self, ev):
+            self.update()
+            super().focusInEvent(ev)
+
+        def focusOutEvent(self, ev):
+            self.update()
+            super().focusOutEvent(ev)
 
         def mousePressEvent(self, ev):
             if ev.button() == Qt.LeftButton:
@@ -733,12 +773,27 @@ def _widgets(kit):
             if ev.button() == Qt.LeftButton:
                 self.clicked.emit()
 
+    class Panel(QWidget):
+        """The gallery's panel; paints the focused row's soft highlight under its rows."""
+
+        def __init__(self, g):
+            super().__init__()
+            self.g = g
+
+        def paintEvent(self, ev):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            self.g.paint_glow(p)
+            p.end()
+
     class Footer(QWidget):
-        """The panel's last row: what and when · controller or key hints (centred) · Back."""
+        """The panel's last row: what and when · controller or key hints (centred) · delete ·
+        Back. Asking to delete, it holds the question instead, like the bar's Stop question."""
 
         def __init__(self):
             super().__init__()
             self.hint = CLIP_KEYS
+            self.asking = False
             self.setFixedHeight(ov.BAR_HEIGHT)
             lay = QHBoxLayout(self)
             lay.setContentsMargins(18, 0, 0, 0)
@@ -746,9 +801,40 @@ def _widgets(kit):
             self.meta = _label("", META_PX)
             self.meta.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             lay.addWidget(self.meta, 1)
+            self.question = _label("", META_PX, ov.TEXT)
+            self.question.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.question.hide()
+            lay.addWidget(self.question, 1)
+            self.trash = MediaIcon("trash")
+            lay.addWidget(self.trash)
             self.back = kit.TextButton("Back", glyph="back", quiet=True)
             lay.addWidget(self.back)
+            self.yes = kit.TextButton("Delete", glyph="trash")
+            self.no = kit.TextButton("Cancel", glyph="cross", quiet=True)
+            for b in (self.yes, self.no):
+                b.hide()
+                lay.addWidget(b)
             lay.addSpacing(8)
+
+        def buttons(self):
+            return [self.yes, self.no] if self.asking else [self.trash, self.back]
+
+        def ask(self, text):
+            self.asking = True
+            self.question.setText(text)
+            for w in (self.meta, self.trash, self.back):
+                w.hide()
+            for w in (self.question, self.yes, self.no):
+                w.show()
+            self.update()
+
+        def unask(self):
+            self.asking = False
+            for w in (self.question, self.yes, self.no):
+                w.hide()
+            for w in (self.meta, self.trash, self.back):
+                w.show()
+            self.update()
 
         def set_hint(self, tokens):
             if tokens is not self.hint:
@@ -756,7 +842,7 @@ def _widgets(kit):
                 self.update()
 
         def paintEvent(self, ev):
-            if not self.hint:
+            if not self.hint or self.asking:
                 return
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
@@ -842,7 +928,8 @@ def _widgets(kit):
                 self.g.toggle_full()
 
     ns = type("GalleryWidgets", (), {})()
-    for c in (MediaIcon, FilterTab, FilterHeader, CounterPill, Stage, Scrubber, Chips, Footer, Surface, FullView):
+    for c in (MediaIcon, FilterTab, FilterHeader, CounterPill, Stage, Scrubber, Chips, Panel, Footer, Surface,
+              FullView):
         setattr(ns, c.__name__, c)
     kit.gallery_widgets = ns
     return ns
@@ -934,6 +1021,17 @@ class Gallery(QObject):
         self.clock = QTimer(self)             # only while a clip plays
         self.clock.setInterval(CLOCK_MS)
         self.clock.timeout.connect(self._tick_clock)
+        # focus rows (see ROWS) and the focused row's highlight
+        self.row = "stage"
+        self.foot_btn = "trash"   # the footer button the footer row returns to
+        self.glow = {r: 0.0 for r in ROWS}
+        self.glow_from = dict(self.glow)
+        self.glow_to = dict(self.glow)
+        self.glow_tween = _Tween(self, GLOW_MS, self._glow_tick)
+        self.folder = None        # the clips folder the listing came from (deletes stay inside it)
+        self.ask_item = None      # the item the delete question is about
+        self.ask_final = False    # ...and it can't go to the Trash
+        QApplication.instance().focusChanged.connect(self._on_focus_changed)
         self.scanned.connect(self._on_scanned)
         self.loaded.connect(self._on_loaded)
         self.probed.connect(self._on_probed)
@@ -981,7 +1079,7 @@ class Gallery(QObject):
     def _build_panel(self):
         W = self.W
         c = self.panel
-        panel = QWidget()
+        panel = W.Panel(self)
         pl = QVBoxLayout(panel)
         pl.setContentsMargins(0, ov.PANEL_PAD_T, 0, 0)
         pl.setSpacing(0)
@@ -1014,7 +1112,7 @@ class Gallery(QObject):
         sl.addWidget(self.stage, 0, Qt.AlignHCenter)
         pl.addWidget(sw)
 
-        row = QWidget()
+        row = self.player_row = QWidget()
         row.setFixedHeight(ov.ROW_PITCH)
         rl = QHBoxLayout(row)
         rl.setContentsMargins(12, 2, 12, 0)
@@ -1046,7 +1144,11 @@ class Gallery(QObject):
         self.footer = W.Footer()
         c.w["meta"] = self.footer.meta
         c.w["back"] = self.footer.back
+        c.w["trash"] = self.footer.trash
         self.footer.back.clicked.connect(self.back)
+        self.footer.trash.clicked.connect(self.ask_delete)
+        self.footer.yes.clicked.connect(self.confirm_delete)
+        self.footer.no.clicked.connect(self.cancel_delete)
         pl.addWidget(self.footer)
         # Not in the host's layout: pinned to the host's bottom edge, so while the host grows
         # (or folds) the panel rises up from (or sinks back to) the bar instead of squeezing.
@@ -1159,6 +1261,7 @@ class Gallery(QObject):
         def work():
             try:
                 folder = out or config.load()["output"]["dir"]
+                self.folder = folder
                 items = media.scan(folder)
             except Exception:  # noqa: BLE001 - a broken config: nothing to show
                 log.exception("cannot list the clips folder")
@@ -1178,6 +1281,10 @@ class Gallery(QObject):
         self.active = True
         self.items = list(items)
         self.filter = "all"
+        self.row = "stage"          # left / right browse at once
+        self.foot_btn = "trash"
+        self.footer.unask()
+        self.ask_item = None
         self.view = list(self.items)
         self.index = 0
         self.muted = True           # every open starts muted
@@ -1209,6 +1316,11 @@ class Gallery(QObject):
         self.active = False
         self.token += 1
         self.step_timer.stop()
+        self.footer.unask()
+        self.ask_item = None
+        self.glow_tween.stop()
+        self.glow = {r: 0.0 for r in ROWS}
+        self.glow_to = dict(self.glow)
         self.clock.stop()
         self.exit_full(restore=False)
         played = self.player is not None
@@ -1419,8 +1531,9 @@ class Gallery(QObject):
         self._xf_drop()
         self.sync()
 
-    def step(self, d, focus="counter"):
-        """LB / RB, ← / →: ``d`` -1 = newer, +1 = older (no wrap)."""
+    def step(self, d, focus=None):
+        """LB / RB, ← / → on the stage: ``d`` -1 = newer, +1 = older (no wrap). ``focus``:
+        a control to focus (a click); None keeps the focused row."""
         if not self.view:
             return
         i = max(0, min(len(self.view) - 1, self.index + d))
@@ -1430,7 +1543,7 @@ class Gallery(QObject):
             self._show()
         self.focus(focus)
 
-    def jump(self, i, focus="counter"):
+    def jump(self, i, focus=None):
         """Home / End."""
         if not self.view:
             return
@@ -1866,6 +1979,7 @@ class Gallery(QObject):
                 w["shotmeta"].setText(meta)
             if "dims" in w and w["dims"].text() != dims:
                 w["dims"].setText(dims)
+        self.footer.trash.setEnabled(item is not None)
         if self.panel.clipbox is not None:
             self.panel.clipbox.setHidden(shot)
             self.panel.shotbox.setHidden(not shot)
@@ -1884,10 +1998,10 @@ class Gallery(QObject):
         item = self.current()
         if item is None:
             hint = []
-        elif item.kind == "clip":
-            hint = pad_hint(PAD_CLIP, sym) if pad else CLIP_KEYS
         else:
-            hint = pad_hint(PAD_SHOT, sym) if pad else SHOT_KEYS
+            row = self.row if self.full is None else ("player" if self.row == "player" else "stage")
+            pads, keys = ROW_HINTS.get((row, item.kind)) or ROW_HINTS[("stage", item.kind)]
+            hint = pad_hint(pads, sym) if pad else keys
         self.footer.set_hint(hint)
         if self.full is not None:
             for chips in self.full.findChildren(self.W.Chips):
@@ -1921,26 +2035,258 @@ class Gallery(QObject):
         w.setFocus(Qt.TabFocusReason)
 
     def focus_default(self):
-        """The play button on a clip, full screen on a screenshot, else the counter / Back."""
-        for name in ("full", "play") if self.is_shot() else ("play", "counter", "full", "back"):
-            w = self._widget(name)
-            if w is not None and w.isVisible() and w.isEnabled():
-                w.setFocus(Qt.TabFocusReason)
-                return
-        if self.full is not None:
-            self.full.setFocus(Qt.OtherFocusReason)
-        else:
-            self.footer.back.setFocus(Qt.OtherFocusReason)
+        """The focused row again (the stage when that row is gone: a screenshot has no player)."""
+        self.set_row(self.row)
 
     def _fix_focus(self):
-        """A control that just hid or went disabled hands focus to the default one."""
+        """A control that just hid or went disabled hands focus to its row (or the stage)."""
         if not self.active:
             return
         w = QApplication.focusWidget()
         host = self.full if self.full is not None else self.bar
-        if w is None or not host.isAncestorOf(w) or not w.isVisible() or not w.isEnabled():
+        drifted = (self.bar.focus_visible and self.row not in ("footer",) and self.row in self.rows()
+                   and w is not self.row_widget(self.row))   # e.g. a control hid and Qt moved on
+        if (w is None or not (host is w or host.isAncestorOf(w)) or not w.isVisible() or not w.isEnabled()
+                or self.row not in self.rows() or drifted):
             if host.isVisible():
                 self.focus_default()
+
+    # ---- rows: up / down between them, left / right inside one, A / Enter on it
+    def rows(self):
+        clip = not self.is_shot() and self.current() is not None
+        if self.full is not None:
+            return ("stage", "player") if clip else ("stage",)
+        return ("filter", "stage", "player", "footer") if clip else ("filter", "stage", "footer")
+
+    def row_widget(self, row):
+        if row == "filter":
+            return self.tabs.get(self.filter)
+        if row == "stage":
+            return self.full if self.full is not None else self.stage
+        if row == "player":
+            c = self.fullc if self.full is not None else self.panel
+            return c.w.get("play") if c is not None else None
+        f = self.footer
+        if f.asking:
+            return f.yes if f.yes.hasFocus() else f.no
+        if self.foot_btn == "back" or not f.trash.isEnabled():
+            return f.back
+        return f.trash
+
+    def set_row(self, row):
+        """Focus ``row`` (its control: the filter tab, the stage, play, a footer button)."""
+        if row not in self.rows():
+            row = "stage"
+        w = self.row_widget(row)
+        if w is None or not w.isVisible() or not w.isEnabled():
+            row, w = "stage", self.row_widget("stage")
+        self.row = row
+        if w is not None and w.isVisible():
+            w.setFocus(Qt.TabFocusReason)
+        elif self.full is None:
+            self.footer.back.setFocus(Qt.OtherFocusReason)
+        self.retarget_glow()
+        self.sync_hints()
+
+    def move_row(self, d):
+        """Up / down (D-pad, stick, arrow keys): the row above / below; never out of the gallery."""
+        rows = self.rows()
+        i = rows.index(self.row) if self.row in rows else rows.index("stage")
+        j = max(0, min(len(rows) - 1, i + d))
+        if j != i:
+            self.set_row(rows[j])
+
+    def lr(self, d):
+        """Left / right inside the focused row: filters, items, -10 / +10 s, footer buttons."""
+        row = self.row if self.row in self.rows() else "stage"
+        if row == "filter":
+            self.step_filter(d)
+        elif row == "player":
+            self.seek(d * SEEK_S)
+        elif row == "footer":
+            btns = [b for b in self.footer.buttons() if b.isEnabled()]
+            cur = QApplication.focusWidget()
+            i = btns.index(cur) if cur in btns else 0
+            j = max(0, min(len(btns) - 1, i + d))
+            if btns:
+                btns[j].setFocus(Qt.TabFocusReason)
+        else:
+            self.step(d)
+
+    def activate(self):
+        """A / Enter: whatever the focused row does."""
+        row = self.row if self.row in self.rows() else "stage"
+        if row == "filter":
+            self.set_row("stage")
+        elif row == "footer":
+            w = self.row_widget("footer")
+            if w is not None and w.isEnabled():
+                w.click()
+        elif row == "player":
+            self.toggle_play(focus=None)
+        else:
+            self.toggle_play(focus=None)          # a screenshot: full screen
+
+    def row_of(self, w):
+        """The row ``w`` belongs to (a click focuses it), or None."""
+        if w is None:
+            return None
+        if self.full is not None and w is self.full:
+            return "stage"
+        f = self.footer
+        if w in (f.trash, f.back, f.yes, f.no):
+            return "footer"
+        if w is self.stage:
+            return "stage"
+        if w in self.tabs.values() or w is self.panel.w.get("counter"):
+            return "filter"
+        for c in (self.panel, self.fullc):
+            if c is not None and w in c.w.values():
+                return "stage" if self.is_shot() else "player"
+        return None
+
+    def _on_focus_changed(self, _old, new):
+        if not self.active:
+            return
+        row = self.row_of(new)
+        if new is self.footer.trash:
+            self.foot_btn = "trash"
+        elif new is self.footer.back:
+            self.foot_btn = "back"
+        if row is not None and row != self.row:
+            self.row = row
+            self.retarget_glow()
+            self.sync_hints()
+
+    # ---- the focused row's highlight (keyboard / controller only, like the ring)
+    def row_rect(self, row):
+        """Where ``row``'s highlight goes, in the panel's coordinates."""
+        panel = self.panel_w
+        if row == "filter":
+            r = QRectF(self.header.geometry()).adjusted(6, 1, -6, -1)
+        elif row == "stage":
+            r = QRectF(QPointF(self.stage.mapTo(panel, QPoint(0, 0))), QSizeF(self.stage.size())).adjusted(-5, -5, 5, 5)
+        elif row == "player":
+            r = QRectF(self.player_row.geometry()).adjusted(6, 1, -6, -1)
+        else:
+            r = QRectF(self.footer.geometry()).adjusted(6, 3, -6, -3)
+        return r
+
+    def retarget_glow(self):
+        show = self.active and self.full is None and self.bar.focus_visible
+        to = {r: 1.0 if (show and r == self.row) else 0.0 for r in ROWS}
+        if to == self.glow_to:
+            return
+        self.glow_from, self.glow_to = dict(self.glow), to
+        self.glow_tween.run(0.0, 1.0)
+
+    def _glow_tick(self, t):
+        changed = []
+        for r in ROWS:
+            v = self.glow_from[r] + (self.glow_to[r] - self.glow_from[r]) * t
+            if v != self.glow[r]:
+                self.glow[r] = v
+                changed.append(r)
+        for r in changed:
+            rect = self.row_rect(r).adjusted(-3, -3, 3, 3).toAlignedRect()
+            if r == "stage":      # only the ring around the picture: the video isn't repainted
+                inner = QRect(self.stage.mapTo(self.panel_w, QPoint(0, 0)), self.stage.size())
+                self.panel_w.update(QRegion(rect).subtracted(QRegion(inner)))
+            else:
+                self.panel_w.update(rect)
+
+    def paint_glow(self, p):
+        """A faint, soft-edged rounded fill behind the focused row: it eases in with a tiny
+        grow, the row left fades out; neutral white at a few percent, no colour."""
+        for r in ROWS:
+            v = self.glow[r]
+            if v <= 0.004:
+                continue
+            rect = self.row_rect(r)
+            inset = 3.0 * (1.0 - v)
+            rect = rect.adjusted(inset, inset, -inset, -inset)
+            rad = STAGE_RADIUS + 5 if r == "stage" else 12
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, round(6 * v)))          # the soft edge
+            p.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), rad + 2, rad + 2)
+            p.setBrush(QColor(255, 255, 255, round(12 * v)))
+            p.drawRoundedRect(rect, rad, rad)
+
+    def on_focus_visible(self):
+        """The bar's focus-visible rule changed (a key / the mouse): the ring and highlight follow."""
+        self.stage.update()
+        self.retarget_glow()
+
+    # ---- deleting
+    def ask_delete(self):
+        """The trash button / Delete: ask first, in the footer (Cancel focused)."""
+        item = self.current()
+        if item is None or not self.active or self.full is not None or self.footer.asking:
+            return
+        if self.player is not None and self.state in ("playing", "loading"):
+            self.player.pause()          # nothing plays under the question (the idle rule runs)
+            self.state = "paused"
+            self.sync()
+        self.ask_item = item
+        self.ask_final = not media.can_trash(item.path)
+        self.footer.ask(DELETE_ASK[item.kind] + (DELETE_FINAL if self.ask_final else ""))
+        self.row = "footer"
+        self.footer.no.setFocus(Qt.TabFocusReason)
+        self.retarget_glow()
+        self.sync_hints()
+        self.bar.touch_idle()
+
+    def asking(self):
+        return self.footer.asking
+
+    def cancel_delete(self):
+        """Cancel, B / Esc, or the idle timeout while the question is up."""
+        if not self.footer.asking:
+            return
+        self.footer.unask()
+        self.ask_item = None
+        self.foot_btn = "trash"
+        self.set_row("footer")
+
+    def confirm_delete(self):
+        item, final = self.ask_item, self.ask_final
+        if not self.footer.asking or item is None:
+            return
+        self.footer.unask()
+        self.ask_item = None
+        self._delete(item, final)
+
+    def _delete(self, item, final):
+        # let go of everything that could hold the file: the player (QtMultimedia keeps it
+        # open), the frame, a held still, a pending load
+        self.step_timer.stop()
+        self.token += 1
+        self._drop_player()
+        self._release_frame()
+        self._xf_drop()
+        self.trim_timer.start()
+        folder = self.folder or (self.bar.last_status or {}).get("output_dir")
+        try:
+            if not folder:
+                raise ValueError("no clips folder")
+            media.delete(item.path, folder, to_trash=not final)
+        except (OSError, ValueError) as e:
+            log.warning("cannot delete %s: %s", item.path, e)
+            self._show(immediate=True)
+            self.footer.meta.setText(DELETE_FAILED)
+            self.set_row("footer")
+            return
+        log.info("%s %s", "deleted" if final else "moved to the Trash:", item.path)
+        key = str(item.path)
+        for cache in (self.durations,):
+            for k in [k for k in cache if k[0] == key]:
+                cache.pop(k, None)
+        self.dims.pop(key, None)
+        self.items = [i for i in self.items if i.path != item.path]
+        self.view = [i for i in self.view if i.path != item.path]
+        self.index = max(0, min(self.index, len(self.view) - 1))   # the next one (older), else the last
+        self._show(immediate=True)
+        self.set_row("stage")
 
     # ------------------------------------------------------------------ full screen
     def toggle_full(self):
@@ -2070,7 +2416,7 @@ class Gallery(QObject):
         bar.activateWindow()
         self._activate(bar)
         self.sync()
-        self.focus("full")           # back where full screen was asked for
+        self.focus_default()         # the row it was on (the stage when that was the picture)
         item = self.current()
         if item is not None and item.kind == "shot":
             self._load_image(item)   # back to the stage's size: the screen-sized picture goes
@@ -2160,53 +2506,81 @@ class Gallery(QObject):
         self.enter_full()
 
     def key(self, k) -> bool:
-        """Keys while the gallery is open (the bar routes every key here)."""
+        """Keys while the gallery is open (the bar routes every key here): up / down move
+        between rows, left / right act in the focused row (see ROWS)."""
         if self.full is not None:
             self.wake_chrome()
+        if self.footer.asking:
+            return self._ask_key(k)
         if k in (Qt.Key_Escape, Qt.Key_Backspace, Qt.Key_Back):
             self.back()
         elif k == Qt.Key_G and self.full is None:
             self.back()                            # G toggles, like it opened
-        elif k in (Qt.Key_Left, Qt.Key_PageUp):
-            self.step(-1)
-        elif k in (Qt.Key_Right, Qt.Key_PageDown):
-            self.step(1)
+        elif k in (Qt.Key_Left, Qt.Key_Right):
+            self.lr(-1 if k == Qt.Key_Left else 1)
+        elif k in (Qt.Key_Up, Qt.Key_Down):
+            self.move_row(-1 if k == Qt.Key_Up else 1)
+        elif k in (Qt.Key_PageUp, Qt.Key_PageDown):
+            self.step(-1 if k == Qt.Key_PageUp else 1)
         elif k == Qt.Key_Home:
             self.jump(0)
         elif k == Qt.Key_End:
             self.jump(len(self.view) - 1)
-        elif k in (Qt.Key_Up, Qt.Key_Down):
-            self.step_filter(-1 if k == Qt.Key_Up else 1)
-        elif k in (Qt.Key_Space, Qt.Key_K, Qt.Key_Return, Qt.Key_Enter, Qt.Key_Select, Qt.Key_MediaTogglePlayPause):
-            self.toggle_play(focus="full" if self.is_shot() else "play")
+        elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Select):
+            self.activate()
+        elif k in (Qt.Key_Space, Qt.Key_K, Qt.Key_MediaTogglePlayPause):
+            self.toggle_play(focus=None)
         elif k == Qt.Key_J:
-            self.seek(-SEEK_S, focus="back10")
+            self.seek(-SEEK_S)
         elif k == Qt.Key_L:
-            self.seek(SEEK_S, focus="fwd10")
+            self.seek(SEEK_S)
         elif k == Qt.Key_M:
-            self.toggle_mute()
+            self.toggle_mute(focus=None)
         elif k == Qt.Key_F:
             self.toggle_full()
+        elif k == Qt.Key_Delete and self.full is None:
+            self.ask_delete()
         return True                                # nothing else reaches the clip bar
 
+    def _ask_key(self, k) -> bool:
+        """The delete question has the keys: Esc cancels, ← → choose, Enter presses."""
+        f = self.footer
+        if k in (Qt.Key_Escape, Qt.Key_Backspace, Qt.Key_Back):
+            self.cancel_delete()
+        elif k in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Tab, Qt.Key_Backtab):
+            (f.no if f.yes.hasFocus() else f.yes).setFocus(Qt.TabFocusReason)
+        elif k in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Select, Qt.Key_Space):
+            (f.yes if f.yes.hasFocus() else f.no).click()
+        return True
+
     def pad(self, action):
-        """Controller actions while the gallery is open."""
+        """Controller actions while the gallery is open: the D-pad / stick like the arrow
+        keys, A activates the focused row, B goes back; LB / RB browse and LT / RT seek from
+        any row, X sound, Y full screen."""
         if self.full is not None:
             self.wake_chrome()
-        if action in ("prev_section", "left"):
-            self.step(-1)
-        elif action in ("next_section", "right"):
-            self.step(1)
+        if self.footer.asking:
+            f = self.footer
+            if action == "back":
+                self.cancel_delete()
+            elif action in ("left", "right"):
+                (f.no if f.yes.hasFocus() else f.yes).setFocus(Qt.TabFocusReason)
+            elif action == "accept":
+                (f.yes if f.yes.hasFocus() else f.no).click()
+            return
+        if action in ("prev_section", "next_section"):
+            self.step(-1 if action == "prev_section" else 1)
+        elif action in ("left", "right"):
+            self.lr(-1 if action == "left" else 1)
         elif action in ("up", "down"):
-            self.step_filter(-1 if action == "up" else 1)
+            self.move_row(-1 if action == "up" else 1)
         elif action == "accept":
-            self.toggle_play(focus="full" if self.is_shot() else "play")
+            self.activate()
         elif action == "back":
             self.back()
         elif action in ("left_trigger", "right_trigger"):
-            self.seek(-SEEK_S if action == "left_trigger" else SEEK_S,
-                      focus="back10" if action == "left_trigger" else "fwd10")
+            self.seek(-SEEK_S if action == "left_trigger" else SEEK_S)
         elif action == "pause":                    # X / Square
-            self.toggle_mute()
+            self.toggle_mute(focus=None)
         elif action == "settings":                 # Y / Triangle
             self.toggle_full()

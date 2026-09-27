@@ -673,6 +673,15 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(color))
         p.drawRoundedRect(QRectF(x - 4.5, y - 4.5, 9, 9), 1.5, 1.5)
+    elif kind == "trash":
+        # a bin: the lid with its handle, the body narrowing a little, two ribs
+        p.drawLine(P(x - 6, y - 4.5), P(x + 6, y - 4.5))
+        p.drawPolyline(QPolygonF([P(x - 2.2, y - 4.5), P(x - 2.2, y - 6.8), P(x + 2.2, y - 6.8),
+                                  P(x + 2.2, y - 4.5)]))
+        p.drawPolyline(QPolygonF([P(x - 4.6, y - 4.5), P(x - 3.8, y + 6.5), P(x + 3.8, y + 6.5),
+                                  P(x + 4.6, y - 4.5)]))
+        p.drawLine(P(x - 1.3, y - 1.5), P(x - 1.1, y + 3.8))
+        p.drawLine(P(x + 1.3, y - 1.5), P(x + 1.1, y + 3.8))
     elif kind == "cross":
         p.drawLine(P(x - 4.5, y - 4.5), P(x + 4.5, y + 4.5))
         p.drawLine(P(x - 4.5, y + 4.5), P(x + 4.5, y - 4.5))
@@ -3158,7 +3167,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def leave_exempt(self):
             """Watching a clip with the pointer parked elsewhere is normal; full screen too."""
             g = self.gallery
-            return self.mode == "gallery" and g is not None and (g.playing() or g.full is not None)
+            return self.mode == "gallery" and g is not None and (g.playing() or g.full is not None
+                                                                 or g.asking())
 
         def on_leave(self):
             if not self.isVisible() or self.leave_exempt():
@@ -3170,6 +3180,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         # ---------------- input
         def on_idle(self):
             if self.apply_state == "busy" or self.control_busy:
+                self.idle.start()
+                return
+            g = self.gallery
+            if self.mode == "gallery" and g is not None and g.asking():
+                g.cancel_delete()               # the delete question times out to Cancel, the bar stays
                 self.idle.start()
                 return
             self.request_close()
@@ -3378,6 +3393,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.focus_visible = on
             for b in self.pills():
                 b.sync()
+            if self.gallery is not None and self.mode == "gallery":
+                self.gallery.on_focus_visible()
 
         def settle(self):
             """Jump every running pill transition to its end (screenshots, tests)."""
