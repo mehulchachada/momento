@@ -207,13 +207,18 @@ class GstPlayer(QObject):
         self.pipeline = pb
 
     def _set_flags(self, pb):
+        """Audio off: no audio flag, and a fakesink as the audio sink, else playbin still makes
+        (and opens) every audio sink it knows while plugging, to ask what they accept. Audio
+        on: the default sink (AUDIO_SINK, or a fakesink under the tests' sandbox)."""
         flags = _VIDEO | _SOFT_VOLUME | _NATIVE_VIDEO | (_AUDIO if self._audio else 0)
         pb.set_property("flags", flags)
-        sink = AUDIO_SINK
-        if sink is None and os.environ.get("MOMENTO_TEST_SANDBOX"):
-            sink = "fakesink sync=true"           # under the tests' sandbox nothing plays out loud
-        if self._audio and sink:
-            pb.set_property("audio-sink", self.Gst.parse_launch(sink))
+        if not self._audio:
+            sink = "fakesink sync=true"
+        else:
+            sink = AUDIO_SINK
+            if sink is None and os.environ.get("MOMENTO_TEST_SANDBOX"):
+                sink = "fakesink sync=true"       # under the tests' sandbox nothing plays out loud
+        pb.set_property("audio-sink", self.Gst.parse_launch(sink) if sink else None)
 
     def _to_null(self):
         if self.pipeline is not None:

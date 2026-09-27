@@ -2225,7 +2225,8 @@ class GalleryLive(unittest.TestCase):
                 max(gst_player.MIN_SIDE, round(g.stage.height() * dpr)))
         self.assertEqual((g.frame.width(), g.frame.height()), want)
         pb = g.player.pipeline
-        self.assertFalse(int(pb.get_property("flags")) & 0x2)          # muted: no audio stream
+        self.assertFalse(int(pb.get_property("flags")) & 0x2)          # muted: no audio stream,
+        self.assertEqual(pb.get_property("audio-sink").get_factory().get_name(), "fakesink")  # no sink probed
         self.wait_for(lambda: g.duration > 0, timeout=5)
         self.assertAlmostEqual(g.duration, 2.0, delta=0.2)
         self.key(Qt.Key_M)                                            # sound on: rebuilt with audio
