@@ -1,6 +1,6 @@
 # Release: push a tag like v0.1.0 and this builds the distro packages, the
-# source tarball and SHA256SUMS, smoke-tests the packages, and publishes a
-# GitHub Release with them attached.
+# source tarball and SHA256SUMS, smoke-tests the packages, and creates a
+# *draft* GitHub Release with them attached. Check it, then press Publish.
 #
 #   git tag -a v0.1.0 -m "Momento 0.1.0" && git push origin v0.1.0
 #
@@ -187,4 +187,5 @@ jobs:
               --title "Momento $VERSION" \
               --notes-file notes.md \
               --generate-notes \
-              --verify-tag
+              --verify-tag \
+              --draft
