@@ -321,7 +321,6 @@ Your saved clips and screenshots are never deleted.
 - Testing and support on more devices and systems, with your help
 - Your own controller shortcut (any two buttons)
 - 1440p and 4K recording
-- Flatpak
 - Microphone on its own audio track
 - A richer gallery:
   - Mark favourite clips
