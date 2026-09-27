@@ -928,6 +928,26 @@ class OverlayOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         return bar, bar.row("resolution")
 
+    def test_120_fps_note(self):
+        """Frame rate 120: a one-line note says when it helps; 60: no note."""
+        bar, _res = self.open_video(FakeDaemon(True))
+        fps = bar.row("fps")
+        self.assertEqual((fps.value, fps.note.isHidden()), (60, True))
+        self.key(Qt.Key_Down)                           # the Frame rate row
+        self.key(Qt.Key_Right)                          # 120 fps
+        self.assertEqual(fps.value, 120)
+        self.assertEqual((fps.note.text(), fps.note.isHidden()), (overlay.FPS_NOTE, False))
+        self.assertEqual(fps.note.text(), "120 fps only helps if your game runs above 100 fps")
+        self.assertEqual(fps.note.objectName(), bar.row("resolution").note.objectName())   # the same style
+        self.assertLessEqual(fps.note.x() + fps.note.fontMetrics().horizontalAdvance(overlay.FPS_NOTE),
+                             fps.width())                # fits the row
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-video-120fps", "v7")
+        self.key(Qt.Key_Left)                           # back to 60: the note goes
+        self.assertTrue(fps.note.isHidden())
+        bar2, _ = self.open_video(FakeDaemon(True, values={"fps": 120}))   # a saved 120: shown at once
+        self.assertEqual(bar2.row("fps").note.text(), overlay.FPS_NOTE)
+
     def test_resolution_capped_by_the_screen(self):
         self.screen((1280, 720))                       # nothing recorded yet: the bar's own screen
         daemon = FakeDaemon(True, values={"resolution": "720p"})

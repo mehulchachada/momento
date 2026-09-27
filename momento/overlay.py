@@ -108,6 +108,7 @@ GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: p
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
+FPS_NOTE = "120 fps only helps if your game runs above 100 fps"   # Video: at the Frame rate row's end
 # Full screen: the gallery isn't recorded. In the room of the stopped sentence (dot and
 # time hidden); "Paused while the gallery is open" would need the bar 7 px wider.
 GALLERY_PAUSED = "Paused while in the gallery"
@@ -2499,6 +2500,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.update_fit()
             self.track_mouse(self.panel)
             self.update_res_note()
+            self.update_fps_note()
 
         # ---- the resolution cap
         def res_source(self):
@@ -2529,6 +2531,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             row = self.row("resolution")
             if row is not None:
                 row.set_note(self.res_note(row.value))
+
+        def update_fps_note(self):
+            """120 fps costs more and only shows in a game that runs above 100 fps: say so."""
+            row = self.row("fps")
+            if row is not None:
+                row.set_note(FPS_NOTE if row.value == 120 else "")
 
         # ---- tabs
         def show_tab(self, i):
@@ -2684,6 +2692,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def on_row_changed(self, row):
             if row.key == "resolution":
                 self.update_res_note()
+            elif row.key == "fps":
+                self.update_fps_note()
             note = self.note_text()
             if self.note.text() != note:
                 self.note.setText(note)
