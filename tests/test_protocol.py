@@ -305,8 +305,26 @@ class DaemonContractTest(_DaemonCase):
         self.assertEqual(len(keys), len(r["choices"]["resolution"]) * len(r["choices"]["quality"])
                          * len(r["choices"]["fps"]))
         for key in keys:
-            self.assertRegex(key, r"^[a-z0-9]+/[a-z]+/\d+$")
+            self.assertRegex(key, r"^[a-z0-9]+/[a-z]+/(\d+|auto)$")
         self.assertIn(r["storage"]["current"], keys)
+        self.assertEqual(r["choices"]["fps"], list(protocol.FPS_CHOICES))
+        self.assertEqual((r["values"]["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 60, None))
+        self.assertEqual(r["fps"], r["fps_effective"])
+
+    def test_status_fps(self):
+        """fps is the setting ("auto"), fps_effective the rate recorded, refresh_hz the screen's."""
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 60, None))
+        self.d.refresh_hz = 144.0                     # what the stream announced (the recorder tells the daemon)
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 120, 144.0))
+        self.assertEqual(r["storage"]["label"], "1080p High 120 fps")
+        self.assertEqual(validate_reply("status", {**r, "fps": 75}), ["fps: expected one of auto, 60, 120, got 75"])
+        self.assertEqual(validate_reply("status", {**r, "fps_effective": 90}),
+                         ["fps_effective: expected 60 or 120, got 90"])
+        self.assertEqual(validate_reply("status", {**r, "fps": 60, "fps_effective": 60}), [])   # explicit
+        older = {k: v for k, v in r.items() if k not in ("fps_effective", "refresh_hz")}
+        self.assertEqual(validate_reply("status", {**older, "fps": 120}), [])                   # an older daemon
 
     def test_configure(self):
         r = self.check({"cmd": "configure", "changes": {"resolution": "720p", "mic": "on"}}, ok=True)
@@ -885,7 +903,9 @@ class ValidatorTest(unittest.TestCase):
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)
             self.assertIn("ok", spec["reply"], name)
-        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 24)
+        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 36)
+        self.assertEqual(protocol.FPS_CHOICES, quality.FPS_CHOICES)
+        self.assertEqual(protocol.AUTO_HIGH_HZ, quality.AUTO_HIGH_HZ)
         self.assertEqual(protocol.RESOLUTION_TOLERANCE, quality.SOURCE_TOLERANCE)
         self.assertEqual(protocol.RESOLUTION_CHOICES, tuple(quality.RESOLUTIONS))
         self.assertEqual(protocol.MAX_HEIGHT, quality.MAX_HEIGHT)

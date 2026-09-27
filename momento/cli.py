@@ -169,6 +169,19 @@ def format_line(setting, effective) -> str:
     return codecs.label(setting)
 
 
+def fps_line(setting, effective=None, refresh=None) -> str:
+    """The frame rate in words: "120 fps (auto: your screen is 120 Hz)", "auto (60 fps)", "60 fps".
+
+    ``setting``: "auto", 60 or 120 (an older daemon's status says only the rate);
+    ``effective``: what auto records at; ``refresh``: the screen's refresh (Hz), when known.
+    """
+    if str(setting).lower() != "auto":
+        return f"{setting} fps"
+    rate = effective if effective in quality.FPS_RATES else quality.auto_fps(refresh)
+    hz = quality.hz_label(refresh)
+    return f"{rate} fps (auto: your screen is {hz} Hz)" if hz else f"{rate} fps (auto: matches your screen)"
+
+
 def format_note(setting, effective) -> str | None:
     """One line for `momento set format`: the format chosen can't be recorded here."""
     if setting in (None, "auto") or not effective or effective == setting:
@@ -331,8 +344,8 @@ def main(argv: list[str] | None = None) -> int:
             ("state", state),
             ("buffered", f"{durations.clock(r.get('buffered', 0))} / {durations.clock(r.get('max_seconds', 0))}"),
             ("record", record),
-            ("video", f"{res} {r.get('fps', 60)} fps, {r.get('quality', '?')} "
-                      f"({r.get('bitrate_kbps', 0) / 1000:g} Mbps)"),
+            ("video", f"{res} {fps_line(r.get('fps', 60), r.get('fps_effective'), r.get('refresh_hz'))}, "
+                      f"{r.get('quality', '?')} ({r.get('bitrate_kbps', 0) / 1000:g} Mbps)"),
             ("source", r.get("source") or "-"),
             ("encoder", r.get("encoder") or "-"),
             ("output", r.get("output_dir") or "-"),
@@ -356,9 +369,10 @@ def main(argv: list[str] | None = None) -> int:
         # A running daemon knows the recorded picture's size, which caps the resolution.
         st = _status_quietly() or {}
         source = quality.source_size(st.get("source_size"))
+        refresh = quality.refresh_hz(st.get("refresh_hz"))   # the recorded screen's, for fps auto
         try:
             cfg = config.load(args.config)
-            kbps = quality.bitrate_kbps(cfg["capture"], source)
+            kbps = quality.bitrate_kbps(cfg["capture"], source, refresh)
         except (OSError, ValueError) as e:
             print(f"momento: bad config {args.config}: {e}", file=sys.stderr)
             return 1
@@ -390,11 +404,12 @@ def main(argv: list[str] | None = None) -> int:
             ("replay", f"keeps the last {storage.span(cfg['buffer']['max_seconds'])}"),
             ("resolution", resolution),
             ("quality", cur["quality"]),
-            ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
+            ("frame rate", fps_line(cur["fps"], quality.fps(cfg["capture"], refresh), refresh)),
             ("format", format_line(cur["format"], fmt_effective)),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
-            ("disk use", f"about {storage.human(storage.buffer_bytes(cfg, source))} for the full buffer"),
-            ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source))),
+            ("disk use", f"about {storage.human(storage.buffer_bytes(cfg, source, refresh))} for the full buffer"),
+            ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source,
+                                                   refresh))),
             ("sound", sound),
             ("mic", mic),
             ("controller", controller_line(cfg)),

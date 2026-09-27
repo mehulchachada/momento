@@ -1,7 +1,18 @@
-"""Video quality presets: resolution, quality level and frame rate (60 or 120 fps)."""
+"""Video quality presets: resolution, quality level and frame rate (auto, 60 or 120 fps)."""
 
-FPS = 60  # default
-FPS_CHOICES = (60, 120)
+import math
+
+# The frame rate setting: "auto" (the default) follows the refresh rate of the
+# screen being recorded; 60 or 120 are fixed. Only these two rates are ever
+# recorded (the bitrate table covers them).
+FPS = "auto"  # default
+FPS_CHOICES = ("auto", 60, 120)
+FPS_RATES = (60, 120)
+# Auto: a screen at this refresh rate or more records at 120 fps (120, 144,
+# 165 Hz...); a slower one (60, 75, 90 Hz), or one whose refresh isn't known,
+# at 60. Never above 120.
+AUTO_HIGH_HZ = 100
+AUTO_UNKNOWN_FPS = 60
 
 # Every preset Momento knows: name -> output size; None = keep the picture's own size.
 PRESETS: dict[str, tuple[int, int] | None] = {
@@ -184,15 +195,65 @@ def height_label(source) -> str | None:
     return f"{source[1]}p" if source else None
 
 
-def fps(capture: dict) -> int:
-    value = int(capture.get("fps") or FPS)
+def fps_setting(capture: dict) -> str | int:
+    """The frame rate setting of a [capture] table: "auto", 60 or 120 (ValueError otherwise).
+
+    Missing or empty is the default (auto); "60", "120 fps" and "AUTO" are read too.
+    """
+    value = capture.get("fps")
+    if value is None or value == "" or value == 0:
+        return FPS
+    if isinstance(value, bool):
+        value = None
+    elif isinstance(value, str):
+        text = value.strip().lower().removesuffix("fps").strip()
+        value = "auto" if text == "auto" else int(text) if text.isdigit() else None
+    elif isinstance(value, float) and value.is_integer():
+        value = int(value)
     if value not in FPS_CHOICES:
-        raise ValueError(f"unsupported frame rate {value} (choose: {', '.join(map(str, FPS_CHOICES))})")
+        raise ValueError(f"unsupported frame rate {capture.get('fps')!r} "
+                         f"(choose: {', '.join(map(str, FPS_CHOICES))})")
     return value
 
 
-def bitrate_kbps(capture: dict, source=None) -> int:
+def refresh_hz(value) -> float | None:
+    """A screen refresh rate in Hz (a positive number up to 1000), or None when unknown."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) and 0 < value <= 1000 else None
+
+
+def auto_fps(refresh) -> int:
+    """What Auto records at on a screen of ``refresh`` Hz: 120 from AUTO_HIGH_HZ up, else 60.
+
+    60, 75, 90 Hz -> 60; 120, 144, 165 Hz -> 120; unknown -> 60.
+    """
+    refresh = refresh_hz(refresh)
+    if refresh is None:
+        return AUTO_UNKNOWN_FPS
+    return 120 if refresh >= AUTO_HIGH_HZ else 60
+
+
+def fps(capture: dict, refresh=None) -> int:
+    """The frame rate really recorded: the setting, or for "auto" ``auto_fps(refresh)``.
+
+    ``refresh``: the recorded screen's refresh rate in Hz, when known.
+    """
+    value = fps_setting(capture)
+    return auto_fps(refresh) if value == "auto" else value
+
+
+def hz_label(refresh) -> str | None:
+    """119.88 -> "120", 60 -> "60" (None when unknown): a refresh rate as people say it."""
+    refresh = refresh_hz(refresh)
+    return None if refresh is None else str(round(refresh))
+
+
+def bitrate_kbps(capture: dict, source=None, refresh=None) -> int:
     """Explicit bitrate_kbps wins; 0/absent means pick from resolution + quality (+ fps).
+
+    ``refresh``: the recorded screen's refresh rate (Hz), for fps "auto" (see ``fps``).
 
     ``source`` is the recorded picture's size, when known. The bitrate suits the
     size really recorded (``recorded_size``): "native" and a preset taller than
@@ -212,7 +273,7 @@ def bitrate_kbps(capture: dict, source=None) -> int:
     mbps = _MBPS[res][QUALITIES.index(q)]
     # Twice the frames needs ~1.5x the bits for the same look (motion between
     # frames is smaller, so each frame costs less).
-    if fps(capture) == 120:
+    if fps(capture, refresh) == 120:
         mbps = round(mbps * 1.5)
     return mbps * 1000
 

@@ -115,7 +115,12 @@ GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: p
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
-FPS_NOTE = "120 fps only helps if your game runs above 100 fps"   # Video: at the Frame rate row's end
+# Video: the Frame rate row's note, at its end. Auto follows the recorded screen's refresh
+# rate (quality.auto_fps); 120 picked by hand on a screen below 100 Hz gets FPS_NOTE.
+FPS_AUTO_NOTE = "Matching your {hz} Hz screen"            # Auto records at the screen's rate
+FPS_AUTO_OTHER_NOTE = "{fps} fps for your {hz} Hz screen"  # 144 Hz -> 120 fps, 75 Hz -> 60 fps
+FPS_AUTO_UNKNOWN_NOTE = "Matches your screen's refresh rate"
+FPS_NOTE = "Your screen is {hz} Hz \u00b7 120 fps only helps above 100 Hz"
 # Full screen: the gallery isn't recorded. In the room of the stopped sentence (dot and
 # time hidden); "Paused while the gallery is open" would need the bar 7 px wider.
 GALLERY_PAUSED = "Paused while in the gallery"
@@ -184,6 +189,11 @@ SOUND_FACTORY = None
 # what caps the Resolution choices until the daemon knows the recorded picture's
 # size. None here means "ask the kernel" (drm_screen_size); tests swap in a fake.
 SCREEN_SIZE = None
+# Returns the refresh rate (Hz) of the screen the bar is on, or None: what the Frame
+# rate row's Auto note and the estimate use until the daemon knows the recorded
+# screen's refresh (status/settings refresh_hz). None here means "ask Qt"
+# (QScreen.refreshRate); tests swap in a fake.
+SCREEN_REFRESH = None
 DRM_ROOT = "/sys/class/drm"
 
 
@@ -967,6 +977,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         if SCREEN_SIZE is not None:
             return quality.source_size(SCREEN_SIZE())
         return quality.source_size(drm_screen_size())
+
+    def local_refresh(widget=None):
+        """The refresh rate (Hz) of the screen ``widget`` is on (else the primary one), or None."""
+        if SCREEN_REFRESH is not None:
+            return quality.refresh_hz(SCREEN_REFRESH())
+        try:
+            screen = (widget.screen() if widget is not None else None) or QGuiApplication.primaryScreen()
+            return quality.refresh_hz(screen.refreshRate()) if screen is not None else None
+        except Exception:  # noqa: BLE001 - no screen (yet)
+            return None
 
     def ui_font(tabular=False):
         f = QFont()
@@ -2946,7 +2966,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return SettingRow(self, key, title, [(r, RES_LABELS.get(r, r)) for r in choices["resolution"]],
                                   value, avail, disabled=[r for r in choices["resolution"] if r not in allowed])
             if key == "fps":
-                return SettingRow(self, key, title, [(f, f"{f} fps") for f in choices.get("fps", [60])],
+                return SettingRow(self, key, title,
+                                  [(f, "Auto" if f == "auto" else f"{f} fps") for f in choices.get("fps", [60])],
                                   vals.get("fps", quality.FPS), avail)
             if key == "quality":
                 return SettingRow(self, key, title, [(q, q.capitalize()) for q in choices["quality"]],
@@ -3090,11 +3111,40 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if row is not None:
                 row.set_note(self.res_note(row.value))
 
+        def screen_refresh(self):
+            """The recorded screen's refresh rate (Hz): the daemon's (refresh_hz), else the
+            refresh of the screen the bar is on; None when neither is known."""
+            hz = quality.refresh_hz((self.sdata or {}).get("refresh_hz"))
+            return hz if hz is not None else local_refresh(self)
+
+        def fps_effective(self, value):
+            """What frame rate setting ``value`` records at: Auto by the screen's refresh."""
+            try:
+                return quality.fps({"fps": value}, self.screen_refresh())
+            except ValueError:
+                return value
+
+        def fps_note(self, value):
+            """The Frame rate row's note: what Auto matches, or (120 picked by hand on a
+            screen below 100 Hz) that 120 won't help. Empty otherwise."""
+            hz = self.screen_refresh()
+            label = quality.hz_label(hz)
+            if value == "auto":
+                if label is None:
+                    return FPS_AUTO_UNKNOWN_NOTE
+                fps = self.fps_effective(value)
+                if str(fps) == label:
+                    return FPS_AUTO_NOTE.format(hz=label)
+                return FPS_AUTO_OTHER_NOTE.format(fps=fps, hz=label)
+            if value == 120 and hz is not None and hz < quality.AUTO_HIGH_HZ:
+                return FPS_NOTE.format(hz=label)
+            return ""
+
         def update_fps_note(self):
-            """120 fps costs more and only shows in a game that runs above 100 fps: say so."""
+            """Auto says which screen it matches; 120 on a slower screen says it won't help."""
             row = self.row("fps")
             if row is not None:
-                row.set_note(FPS_NOTE if row.value == 120 else "")
+                row.set_note(self.fps_note(row.value))
 
         # ---- tabs
         def show_tab(self, i):
@@ -3187,9 +3237,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             cap = {"resolution": v["resolution"], "quality": v["quality"], "fps": v.get("fps", quality.FPS),
                    "bitrate_kbps": self.sdata["values"].get("bitrate", 0)}
             secs = self.replay_seconds(v)
-            # what is really recorded: a resolution above the picture costs the picture's size
-            gb = quality.buffer_gb(quality.bitrate_kbps(cap, self.res_source()[0]), secs)
-            return f"{cap['fps']} fps · ~{gb:.1f} GB for {secs // 60} min"
+            # what is really recorded: a resolution above the picture costs the picture's size,
+            # and Auto the frame rate it records at on this screen
+            hz = self.screen_refresh()
+            gb = quality.buffer_gb(quality.bitrate_kbps(cap, self.res_source()[0], hz), secs)
+            return f"{self.fps_effective(cap['fps'])} fps · ~{gb:.1f} GB for {secs // 60} min"
 
         # storage: the settings reply carries free space and what each combination needs
         def storage_free(self):
@@ -3202,7 +3254,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             sto = (self.sdata or {}).get("storage")
             if not isinstance(sto, dict):
                 return None
-            need = (sto.get("required") or {}).get(f"{v['resolution']}/{v['quality']}/{v.get('fps', quality.FPS)}")
+            required = sto.get("required") or {}
+            fps = v.get("fps", quality.FPS)
+            if fps == "auto" and f"{v['resolution']}/{v['quality']}/{self.fps_effective(fps)}" in required:
+                fps = self.fps_effective(fps)   # Auto costs what it records at (as the estimate says)
+            need = required.get(f"{v['resolution']}/{v['quality']}/{fps}")
             if need is None:
                 return None
             # the reply counts the saved replay length; the buffer part scales with the length
@@ -3220,7 +3276,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         def current_need(self):
             sto = (self.sdata or {}).get("storage") or {}
             cur = sto.get("current")
-            if cur and cur in (sto.get("required") or {}):
+            if cur and cur in (sto.get("required") or {}) and not cur.endswith("/auto"):
                 return float(sto["required"][cur])
             return self.storage_need({k: self.sdata["values"].get(k) for k in ("resolution", "quality", "fps")})
 

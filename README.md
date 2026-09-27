@@ -143,7 +143,7 @@ In **Full screen** mode, recording pauses while the gallery is open so it doesn'
 
 ## Settings
 
-<p align="center"><img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p, 1080p or Native, Frame rate 60 or 120 fps, Quality Standard, High or Ultra, Format Auto, H.264, H.265 or AV1"></p>
+<p align="center"><img src="assets/settings-video.png" width="880" alt="Settings, Video tab: Resolution 720p, 1080p or Native, Frame rate Auto, 60 or 120 fps, Quality Standard, High or Ultra, Format Auto, H.264, H.265 or AV1"></p>
 
 Open with the **gear** (**S**, or **Y** on a controller), pick what you want, then **Apply**. Your replay is kept.
 
@@ -153,7 +153,7 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | | Replay length | **15 min**, 30 min, 60 min. How far back you can save. Clip lengths longer than this are greyed out. |
 | | Keep history | **Off**: stopping clears the replay. On: it's kept, and every full replay is also saved to Videos. |
 | **Video** | Resolution | 480p, 720p, **1080p**, Native (your screen's shape, up to 1080p). 480p: smallest files, softest picture. |
-| | Frame rate | **60 fps**, 120 fps. 120 only helps if your game runs above 100 fps. |
+| | Frame rate | **Auto** matches your screen (120 on a 120 Hz screen, 60 on a 60 Hz one). Smoothest for your game. Or always 60 fps or 120 fps. |
 | | Quality | Standard, **High**, Ultra. Higher is sharper and takes more space. |
 | | Format | **Auto** picks one your PC records well: H.264 on most PCs. |
 | | | H.264: plays everywhere. |
@@ -177,7 +177,7 @@ Clips are always MP4. Formats your PC can't record are greyed out.
 <p align="center"><img src="assets/settings-misc.png" width="880" alt="Settings, Misc tab: Hour warning and Instant bar"></p>
 </details>
 
-**Disk space** for a full replay at 1080p, 60 fps (Momento needs this plus 1 GB free to start):
+**Disk space** for a full replay at 1080p, 60 fps (Momento needs this plus 1 GB free to start). At 120 fps, like Auto on a 120 Hz screen, it's about 1.5x:
 
 | Replay length | Standard | High (default) | Ultra |
 |---|---|---|---|
@@ -188,7 +188,7 @@ The replay never grows past its length. The free space in the bar turns yellow, 
 
 <details><summary><b>More settings (for tinkerers)</b></summary>
 
-Every setting also works from a terminal: `momento set fps 120`, `momento set format av1`. See them all with `momento settings`.
+Every setting also works from a terminal: `momento set fps auto`, `momento set format av1`. See them all with `momento settings`.
 
 A few extras live only in `~/.config/momento/config.toml`. Restart Momento after editing it: `systemctl --user restart momento.service`.
 
