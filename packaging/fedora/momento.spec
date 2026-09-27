@@ -48,6 +48,8 @@ Recommends:     pipewire-utils
 Recommends:     xdg-user-dirs
 Recommends:     mesa-va-drivers
 Recommends:     python3-evdev
+# Software H.264 fallback (fedora-cisco-openh264 repo) where no GPU encoder works.
+Recommends:     gstreamer1-plugin-openh264
 
 %description
 Momento is instant replay and screenshots for Linux games. Press play once

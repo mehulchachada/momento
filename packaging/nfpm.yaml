@@ -160,6 +160,8 @@ overrides:
       - pipewire-utils
       - python3-evdev
       - xdg-user-dirs
+      # Software H.264 fallback: Fedora's own Mesa can't encode H.264.
+      - gstreamer1-plugin-openh264
   archlinux:
     depends:
       - python>=3.11
