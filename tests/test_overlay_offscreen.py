@@ -435,7 +435,7 @@ class OverlayOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         self.shot(bar, "clip", "settings")
 
-    PANEL = overlay.PANEL_PAD_T + overlay.TABS_H + 3 * overlay.ROW_PITCH + overlay.PANEL_PAD_B
+    PANEL = overlay.PANEL_PAD_T + overlay.TABS_H + 4 * overlay.ROW_PITCH + overlay.PANEL_PAD_B
 
     def test_settings_keyboard_and_apply(self):
         daemon = FakeDaemon(True)
@@ -445,7 +445,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar.gear.setFocus()
         self.key(Qt.Key_Return)  # activates the gear
         self.wait_for(lambda: bar.mode == "settings")
-        self.assertEqual(bar.height(), h0 + self.PANEL + 1)   # tabs + the tallest tab's 3 rows
+        self.assertEqual(bar.height(), h0 + self.PANEL + 1)   # tabs + the tallest tab's 4 rows (Video)
         self.assertEqual(bar.y() + bar.height(), bottom0)  # grew upward
         self.assertEqual(bar.stack.currentIndex(), 2)
         self.assertIn("60 fps", bar.foot.text())
@@ -454,7 +454,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual({r.key: r.icon.kind for r in bar.rows},
                          {"record": "window", "replay_length": "timer", "keep_history": "history",
                           "resolution": "display",
-                          "fps": "gauge", "quality": "sliders", "audio_source": "speaker", "mic": "mic",
+                          "fps": "gauge", "quality": "sliders", "format": "film", "audio_source": "speaker", "mic": "mic",
                           "mic_device": "micdev", "controller": "gamepad", "hour_warning": "hourglass",
                           "instant_bar": "bolt"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
@@ -872,7 +872,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_Return)                   # Enter does not apply
         pump(self.app, 0.1)
         self.assertEqual((bar.apply_state, daemon.configures), (None, []))
-        for _ in range(3):                        # frame rate, quality, then the footer
+        for _ in range(4):                        # frame rate, quality, format, then the footer
             self.key(Qt.Key_Down)
         self.assertTrue(bar.back_btn.hasFocus())  # Apply is skipped
         self.key(Qt.Key_Left)
@@ -1068,6 +1068,79 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertLessEqual(right, bar.width())
         self.assertGreaterEqual(res.note.x(), res.buttons[-1].x() + res.buttons[-1].width())
         self.assertEqual(res.note.width(), res.note.sizeHint().width())   # not squeezed
+
+    # ---------------------------------------------------------------- video format
+
+    def open_format(self, values=None, **reply):
+        """Settings -> Video with a settings reply that says what this machine records (``reply``)."""
+        daemon = FakeDaemon(True, values=values)
+        real = daemon.request
+
+        def request(msg, timeout=120, **kw):
+            r = real(msg, timeout=timeout, **kw)
+            if msg["cmd"] == "settings":
+                r.update(reply)
+            return r
+        daemon.request = request
+        bar = self.make(daemon)
+        self.open_settings(bar)
+        bar.switch_tab(bar.tab_names.index("Video"), "row")
+        pump(self.app, 0.05)
+        return bar, bar.row("format"), daemon
+
+    def test_format_row_on_a_machine_that_records_everything(self):
+        bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1")
+        self.assertIsNotNone(fmt)
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (AV1)", "H.264", "H.265", "AV1"])
+        self.assertTrue(all(b.isEnabled() for b in fmt.buttons))
+        self.assertEqual(fmt.value, "auto")
+        self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        fmt.buttons[1].setFocus()                                   # moving along the row explains each
+        self.assertEqual(fmt.note.text(), "Plays everywhere")
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Picks the smoothest one your PC handles well")
+        bar.row("resolution").focus()                               # away from the row: the chosen one
+        self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        pump(self.app, 0.05)
+        self.shot(bar, "format-auto-av1", "format")
+        right = fmt.note.mapTo(bar, fmt.note.rect().topRight()).x()
+        self.assertLessEqual(right, bar.width())                    # the hint fits the row
+        self.assertGreaterEqual(fmt.note.x(), fmt.buttons[-1].x() + fmt.buttons[-1].width())
+
+    def test_format_row_disables_what_the_chip_cant_record(self):
+        bar, fmt, daemon = self.open_format(format_allowed=["auto", "h264", "h265"], format_auto="h264")
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (H.264)", "H.264", "H.265", "AV1"])
+        self.assertEqual([b.isEnabled() for b in fmt.buttons], [True, True, True, False])
+        self.assertEqual(fmt.note.text(), "Your graphics chip can't record AV1")
+        pump(self.app, 0.05)
+        self.shot(bar, "format-no-av1", "format")
+        QTest.mouseClick(fmt.buttons[3], Qt.LeftButton)              # AV1: nothing happens
+        self.assertEqual(fmt.value, "auto")
+        QTest.mouseClick(fmt.buttons[2], Qt.LeftButton)
+        self.assertEqual(fmt.value, "h265")
+        self.assertEqual(fmt.note.text(), "Smaller files. Some older devices can't play it")
+        self.assertEqual(bar.changes(), {"format": "h265"})
+        self.assertEqual(bar.note.text(), "Applying restarts recording · your replay is kept")
+        fmt.focus()
+        self.key(Qt.Key_Right)                                       # AV1 is skipped: the end, stays
+        self.assertEqual(fmt.value, "h265")
+        self.key(Qt.Key_Return)
+        self.wait_for(lambda: bar.apply_state == "done")
+        self.assertEqual(daemon.configures, [{"format": "h265"}])
+
+    def test_format_saved_that_the_chip_cant_record(self):
+        _bar, fmt, _d = self.open_format(values={"format": "av1"}, format_allowed=["auto", "h264"],
+                                         format_auto="h264")
+        self.assertEqual(fmt.value, "av1")
+        self.assertEqual(fmt.buttons[3].visual_state, "capped")    # still shown as chosen, dimmed
+        self.assertEqual(fmt.note.text(), "Your graphics chip can't record H.265 or AV1")
+
+    def test_format_row_from_an_older_daemon(self):
+        # no format_* fields: every format offered, Auto without a pick
+        _bar, fmt, _d = self.open_format()
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])
+        self.assertTrue(all(b.isEnabled() for b in fmt.buttons))
+        self.assertEqual(fmt.note.text(), "Picks the smoothest one your PC handles well")
 
     # ---------------------------------------------------------------- pills / focus / hints
 
@@ -1317,7 +1390,8 @@ class OverlayOffscreen(unittest.TestCase):
         for b in bar.tab_btns:                                       # small pills, one row
             self.assertEqual(b.pill_rect().height(), overlay.TAB_PILL_H)
             self.assertEqual(b.mapTo(bar, b.rect().topLeft()).y(), bar.tab_btns[0].mapTo(bar, b.rect().topLeft()).y())
-        want = {"General": ["record", "replay_length", "keep_history"], "Video": ["resolution", "fps", "quality"],
+        want = {"General": ["record", "replay_length", "keep_history"],
+                "Video": ["resolution", "fps", "quality", "format"],
                 "Audio": ["audio_source", "mic", "mic_device"],
                 "Controller": ["controller"],
                 "Misc": ["hour_warning", "instant_bar"]}
@@ -1367,7 +1441,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar.switch_tab(bar.tab_names.index("Video"), "row")
         pump(self.app, 0.05)
         rows = bar.visible_rows()
-        self.assertEqual([r.has_divider() for r in rows], [False, True, True])   # between rows only
+        self.assertEqual([r.has_divider() for r in rows], [False, True, True, True])   # between rows only
         bar.settle()
         img = bar.grab().toImage()
         for r in rows:
@@ -1399,7 +1473,7 @@ class OverlayOffscreen(unittest.TestCase):
                          (["On", "Off"], "on", "bolt"))
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Replay length", "Keep history", "Resolution", "Frame rate", "Quality",
-                          "Sound", "Mic",
+                          "Format", "Sound", "Mic",
                           "Mic device", "Controller", "Hour warning", "Instant bar"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
@@ -1433,7 +1507,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar.switch_tab(bar.tab_names.index("Controller"), "row")
         pump(self.app, 0.05)
         self.assertEqual([r.key for r in bar.visible_rows()], ["controller"])
-        self.assertEqual(bar.panel_rows, 3)                       # the tallest tab sets the panel
+        self.assertEqual(bar.panel_rows, 4)                       # the tallest tab (Video) sets the panel
         self.assertEqual((bar.height(), bar.y() + bar.height()), (h0 + self.PANEL + 1, bottom0))
         row = bar.row("controller")
         self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.value, row.icon.kind),

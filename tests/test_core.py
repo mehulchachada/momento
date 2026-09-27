@@ -3319,48 +3319,68 @@ class PortalSizeHintTest(unittest.TestCase):
         rec.source_name = "test"
         return rec, p._Variant("vah264enc", True)
 
-    def test_codec_stages_swap_encoder_parser_and_muxer(self):
-        """h265 / av1: the normal recording with another VA encoder, same bitrate and GOP, no B-frames."""
+    def _stage_format_variant(self, rec, stage):
+        """The first variant the h265 / av1 stage plans (a detection where every VA encoder works)."""
+        from momento import codecs
+
         p = self.pipeline
-        rec, v = self._stage_recorder("vah265enc", "h265parse", "vaav1enc", "av1parse", "matroskamux")
+        det = codecs.Detection(vendor="amd", present=("vah264enc", "vah265enc", "vaav1enc"),
+                               works={"vah264enc": True, "vah265enc": True, "vaav1enc": True})
+        rec._plan_variants = lambda: p.Recorder._plan_variants(rec)
+        with mock.patch.dict(os.environ, {p.STAGE_ENV: stage}), \
+                mock.patch.object(codecs, "DETECTOR", codecs.Detector(key=lambda: None)), \
+                self.assertLogs("momento.pipeline", "WARNING") as logs:
+            rec._start_capture(det)
+        return rec._variants[0], logs.output
+
+    def test_codec_stages_force_the_format(self):
+        """h265 / av1: the normal recording in that format, same bitrate and GOP, no B-frames."""
+        p = self.pipeline
+        rec, _v = self._stage_recorder("vah265enc", "h265parse", "vaav1enc", "av1parse", "matroskamux")
         audio = {"audiotestsrc", "avenc_aac"} if p._have("avenc_aac") else {"audiotestsrc"}
-        cases = {"h265": ("vah265enc", "h265parse", "mpegtsmux", "h265"),
-                 "av1": ("vaav1enc", "av1parse", "matroskamux", "av1")}
-        for stage, (encoder, parser, muxer, codec) in cases.items():
+        cases = {"h265": ("vah265enc", "h265parse", "mpegtsmux", "h265", ".ts"),
+                 "av1": ("vaav1enc", "av1parse", "matroskamux", "av1", ".mkv")}
+        for stage, (encoder, parser, muxer, codec, suffix) in cases.items():
             with self.subTest(stage=stage):
+                v, planned = self._stage_format_variant(rec, stage)
+                self.assertEqual(v, p._Variant(encoder, True))
+                self.assertEqual(len(planned), 1, planned)                     # one clear warning naming it
+                self.assertIn(f"{p.STAGE_ENV}={stage}", planned[0])
                 pl, names, warnings = self._stage_pipeline(rec, v, stage)
+                self.assertEqual(warnings, [])                                 # the build itself is normal
                 self.assertTrue({"vapostproc", "splitmuxsink", encoder, parser} | audio <= names, names)
                 self.assertFalse({"vah264enc", "h264parse", "fakesink"} & names)
-                self.assertEqual(len(warnings), 1, warnings)
-                self.assertIn(f"{p.STAGE_ENV}={stage}", warnings[0])
-                self.assertEqual(pl.get_by_name("mux").get_property("muxer").get_factory().get_name(), muxer)
+                mux = pl.get_by_name("mux")
+                self.assertEqual(mux.get_property("muxer").get_factory().get_name(), muxer)
+                self.assertTrue(mux.get_property("location").endswith(f"seg%08d{suffix}"))
                 enc = pl.get_by_name("enc")
                 self.assertEqual(enc.get_property("bitrate"), rec._kbps)
                 self.assertEqual(enc.get_property("key-int-max"), rec.fps)
                 if stage == "h265":
                     self.assertEqual(enc.get_property("b-frames"), 0)
-                    self.assertIn("MPEG-TS", warnings[0])
                 else:
                     self.assertEqual(enc.get_property("hierarchical-level"), 1)   # no future references
-                    self.assertIn("matroskamux", warnings[0])
                 # The ring buffer is told the real codec, so sessions of another codec are never joined.
                 rec._pipeline, rec._params = pl, None
                 self.assertEqual(rec._stream_params()["codec"], codec)
                 rec._pipeline, rec._params = None, None
-                # A runtime bitrate change keeps the stage's settings.
+                # A runtime bitrate change keeps the format's settings.
                 rec._encoder_settings(enc, encoder, 7000)
                 self.assertEqual(enc.get_property("bitrate"), 7000)
 
-    def test_codec_stage_without_a_va_encoder_records_normally(self):
+    def test_codec_stage_without_the_encoder_falls_back(self):
+        from momento import codecs
+
         p = self.pipeline
-        rec, v = self._stage_recorder()
-        real_have = p._have
-        with mock.patch.object(p, "_have", lambda name: name != "vah265enc" and real_have(name)):
-            _pl, names, warnings = self._stage_pipeline(rec, v, "h265")
-        self.assertTrue({"vah264enc", "h264parse", "splitmuxsink"} <= names)
-        self.assertNotIn("h265parse", names)
-        self.assertEqual(len(warnings), 1, warnings)
-        self.assertIn("recording normally", warnings[0])
+        rec, _v = self._stage_recorder()
+        det = codecs.Detection(vendor="intel", present=("vah264enc",), works={"vah264enc": True})
+        rec._plan_variants = lambda: p.Recorder._plan_variants(rec)
+        with mock.patch.dict(os.environ, {p.STAGE_ENV: "av1"}), \
+                mock.patch.object(codecs, "DETECTOR", codecs.Detector(key=lambda: None)), \
+                self.assertLogs("momento.pipeline", "WARNING"):
+            rec._start_capture(det)
+        self.assertEqual(rec._formats, ["h264"])           # no AV1 (nor H.265) here: H.264
+        self.assertEqual(rec._variants[0].encoder, "vah264enc")
 
     def test_lowbitrate_stage(self):
         p = self.pipeline
@@ -3938,7 +3958,7 @@ class HistorySettingsTest(unittest.TestCase):
         self.assertEqual(d["choices"]["hour_warning"], [10, 5, 3])
         self.assertEqual(d["choices"]["instant_bar"], ["on", "off"])
         self.assertEqual(d["tabs"], [["General", ["record", "replay_length", "keep_history"]],
-                                     ["Video", ["resolution", "fps", "quality"]],
+                                     ["Video", ["resolution", "fps", "quality", "format"]],
                                      ["Audio", ["audio_source", "mic", "mic_device"]],
                                      ["Controller", ["controller"]],
                                      ["Misc", ["hour_warning", "instant_bar"]]])

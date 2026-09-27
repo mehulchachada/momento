@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from . import __version__, config, durations, quality, settings, storage
+from . import __version__, codecs, config, durations, quality, settings, storage
 
 
 # status.stop_reason -> why, for `momento status`.
@@ -131,6 +131,23 @@ def capped_note(resolution, source, target: str | None) -> str | None:
     size = picture_size(source, target)
     what = f"The window is {size}" if target == "window" else f"Your screen is {size}"
     return f"{what}, so this records at {size}; a bigger size would only waste space."
+
+
+def format_line(setting, effective) -> str:
+    """The video format in words: "auto (AV1)", "H.265", "AV1, recording in H.264 instead"."""
+    setting = str(setting or "auto")
+    if setting == "auto":
+        return f"auto ({codecs.label(effective)})" if effective else "auto"
+    if effective and effective != setting:
+        return f"{codecs.label(setting)}, recording in {codecs.label(effective)} instead"
+    return codecs.label(setting)
+
+
+def format_note(setting, effective) -> str | None:
+    """One line for `momento set format`: the format chosen can't be recorded here."""
+    if setting in (None, "auto") or not effective or effective == setting:
+        return None
+    return f"{codecs.unavailable_message([setting])}, so Momento records in {codecs.label(effective)}."
 
 
 def _shown(key: str, value) -> str:
@@ -266,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
             ("encoder", r.get("encoder") or "-"),
             ("output", r.get("output_dir") or "-"),
         ]
+        if r.get("format"):
+            rows.insert(4, ("format", format_line(r["format"], r.get("format_effective"))))
         if isinstance(r.get("keep_history"), bool):
             rows.insert(3, ("history", history_line(r["keep_history"], r.get("max_seconds"))))
         if isinstance(r.get("storage"), dict):
@@ -288,6 +307,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"momento: bad config {args.config}: {e}", file=sys.stderr)
             return 1
         cur = settings.current(cfg)
+        # What the format records in: the daemon's word, else the last detection on disk.
+        if st.get("format") == cur["format"] and st.get("format_effective"):
+            fmt_effective = st["format_effective"]
+        else:
+            det = codecs.cached()
+            fmt_effective = codecs.effective(cur["format"], det) if det or cur["format"] != "auto" else None
         resolution = cur["resolution"]
         instead = capped(resolution, source, cur["record"])
         if instead:
@@ -310,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
             ("resolution", resolution),
             ("quality", cur["quality"]),
             ("frame rate", f"{quality.fps(cfg['capture'])} fps"),
+            ("format", format_line(cur["format"], fmt_effective)),
             ("bitrate", f"{kbps / 1000:g} Mbps{auto}"),
             ("disk use", f"about {storage.human(storage.buffer_bytes(cfg, source))} for the full buffer"),
             ("storage", storage_line(storage.check(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source))),
@@ -388,6 +414,12 @@ def main(argv: list[str] | None = None) -> int:
                 note = capped_note(clean["resolution"], st.get("source_size"), st.get("target"))
                 if note:
                     print(note)
+            if "format" in clean:
+                # Not recordable here: saved as asked, but it records in the fallback.
+                st = _status_quietly() or {}
+                note = format_note(clean["format"], st.get("format_effective"))
+                if note:
+                    print(note)
             return 0
         # Daemon off: write the file; warn (non-fatal) if the new settings won't fit.
         try:
@@ -399,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"momento: {e}", file=sys.stderr)
             return 1
         print(f"{args.key} = {_shown(args.key, clean[args.key])}  (saved to {args.config})")
+        if "format" in clean:
+            det = codecs.cached()
+            note = format_note(clean["format"], codecs.effective(clean["format"], det) if det else None)
+            if note:
+                print(note)
         if not chk["ok"]:
             print(f"momento: warning: {storage.label(cfg)} needs {storage.human(chk['required'])} free, "
                   f"{storage.human(chk['free'] + chk['reclaimable'])} available; "

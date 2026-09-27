@@ -474,6 +474,48 @@ class DaemonContractTest(_DaemonCase):
         self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"]),
                          ("on", 5, "off"))
 
+    def test_video_format(self):
+        from momento import codecs
+
+        st = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((st["format"], st["format_effective"]), ("auto", "h264"))   # sandbox: no test encodes
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual((r["values"]["format"], r["choices"]["format"]), ("auto", list(protocol.FORMAT_CHOICES)))
+        self.assertEqual((r["format_allowed"], r["format_auto"], r["format_effective"]),
+                         (["auto", "h264"], "h264", "h264"))
+        self.assertIn("format", dict(r["tabs"])["Video"])
+        amd = codecs.Detection(vendor="amd", present=("vah264enc", "vaav1enc"),
+                               works={"vah264enc": True, "vaav1enc": True})
+        with mock.patch.object(codecs.DETECTOR, "ready", return_value=amd), \
+                mock.patch.object(codecs.DETECTOR, "wait", return_value=amd):
+            r = self.check({"cmd": "settings"}, ok=True)
+            self.assertEqual((r["format_allowed"], r["format_auto"]), (["auto", "h264", "av1"], "av1"))
+            before = self.d.recorder
+            r = self.check({"cmd": "configure", "changes": {"format": "hevc"}}, ok=True)
+            self.assertEqual((r["changed"], r["restarted"]), ({"format": "h265"}, True))   # restarts, like resolution
+            self.assertIsNot(self.d.recorder, before)
+            self.assertIn('format = "h265"', self.path.read_text())
+            st = self.check({"cmd": "status"}, ok=True)
+            self.assertEqual((st["format"], st["format_effective"]), ("h265", "h264"))   # no H.265 here: fallback
+        r = self.check({"cmd": "configure", "changes": {"format": "vp9"}}, ok=False)
+        self.assertTrue(r["error"].startswith("format:"), r)
+        self.assertEqual(validate_reply("status", {**st, "format_effective": "vp9"}),
+                         ["format_effective: expected one of h264, h265, av1, got 'vp9'"])
+
+    def test_format_fallback_is_told_once(self):
+        from momento import daemon
+
+        rec = self.d.recorder
+        rec.format_fallback = ("av1", "h265")
+        rec.format_effective = "h265"
+        self.d._on_state("recording", None)
+        self.d._on_state("recording", None)
+        calls = [c for c in daemon.notify.call_args_list if "recording in" in c.args[1]]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args[1:3], ("Momento: recording in H.265",
+                                              "AV1 didn't start on this PC, so your replay is recorded in H.265."))
+        self.assertEqual(self.check({"cmd": "status"})["format_effective"], "h265")
+
     def test_controller_is_one_setting(self):
         """Off / PS / Xbox + Down; Open with and Exclusive are gone (config-only hold_ms / exclusive)."""
         r = self.check({"cmd": "settings"}, ok=True)
@@ -739,6 +781,9 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(protocol.RESOLUTION_TOLERANCE, quality.SOURCE_TOLERANCE)
         self.assertEqual(protocol.RESOLUTION_CHOICES, tuple(quality.RESOLUTIONS))
         self.assertEqual(protocol.MAX_HEIGHT, quality.MAX_HEIGHT)
+        from momento import codecs
+
+        self.assertEqual(protocol.FORMAT_CHOICES, codecs.CHOICES)
 
 
 class IndexRecordTest(unittest.TestCase):

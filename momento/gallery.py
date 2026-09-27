@@ -92,6 +92,10 @@ CLOCK_MS = 33            # while playing: the scrubber and time follow at ~30 Hz
 TRIM_DELAY_MS = 1_000    # after closing: give the heap back once the player is deleted
 
 PLAY_ERROR = "Can't play this clip here"
+# Playing, but no picture comes (no decoder here for the clip's format, e.g. an AV1
+# or H.265 clip on a system without one): said after this long, not a black box.
+NO_PICTURE = "Can't show this clip's video here. Try another video player"
+NO_PICTURE_S = 3.0
 SHOW_ERROR = "Can't show this screenshot"
 FILTERS = (("all", "All"), ("clip", "Clips"), ("shot", "Screenshots"))
 EMPTY_FILTER = {"all": "Nothing saved yet", "clip": "No clips yet", "shot": "No screenshots yet"}
@@ -1666,6 +1670,12 @@ class Gallery(QObject):
             return
         self.position = max(0.0, ms / 1000.0)
         self.pos_at = time.monotonic()
+        if self.state == "playing" and self.frame is None and self.position >= NO_PICTURE_S:
+            log.warning("no picture from %s after %.1f s: its video can't be decoded here",
+                        getattr(self.current(), "path", "?"), self.position)
+            self._fail(NO_PICTURE)
+            self._idle_changed()
+            return
         self.sync_time()
 
     def _on_duration(self, ms):

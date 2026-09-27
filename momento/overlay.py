@@ -697,6 +697,16 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(color))
         p.drawEllipse(P(x + 4.6, y - 3.9), 0.9, 0.9)
+    elif kind == "film":
+        # a strip of film: a frame with sprocket holes top and bottom
+        p.drawRoundedRect(QRectF(x - 7, y - 6, 14, 12), 1.5, 1.5)
+        p.drawLine(P(x - 7, y - 2.5), P(x + 7, y - 2.5))
+        p.drawLine(P(x - 7, y + 2.5), P(x + 7, y + 2.5))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        for dx in (-4.5, -1.5, 1.5, 4.5):
+            p.drawEllipse(P(x + dx, y - 4.3), 0.7, 0.7)
+            p.drawEllipse(P(x + dx, y + 4.3), 0.7, 0.7)
     elif kind == "back":
         p.drawLine(P(x - 6, y), P(x + 6, y))
         p.drawPolyline(QPolygonF([P(x - 1.5, y - 4.5), P(x - 6, y), P(x - 1.5, y + 4.5)]))
@@ -791,6 +801,8 @@ ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_histor
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
               "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
               "instant_bar": "Instant bar"}
+ROW_ICONS["format"] = "film"
+ROW_TITLES["format"] = "Format"
 ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
 VALUE_ICONS = {"record": RECORD_ICONS}
@@ -1440,6 +1452,74 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.select(i)
             else:
                 self.focus()                             # at the end: stay
+
+    class FormatRow(SettingRow):
+        """Settings -> Video -> Format: Auto (and what it picks here) / H.264 / H.265 / AV1.
+
+        Formats this machine can't record (the settings reply's ``format_allowed``)
+        are disabled. The note at the row's end says what the focused choice means
+        for the clips; with no focus in the row, why a choice is disabled, or else
+        what the selected one means.
+        """
+
+        AUTO_HINT = "Picks the smoothest one your PC handles well"
+
+        def __init__(self, bar, key, title, data, avail):
+            from . import codecs
+
+            vals, choices = data["values"], data.get("choices") or {}
+            opts = list(choices.get("format") or codecs.CHOICES)
+            value = vals.get("format", "auto")
+            if value not in opts:
+                opts.append(value)
+            allowed = data.get("format_allowed")
+            allowed = opts if not isinstance(allowed, list) else allowed
+            unavailable = [f for f in opts if f != "auto" and f not in allowed]
+            picked = data.get("format_auto")
+            labels = [(f, f"Auto ({codecs.label(picked)})" if f == "auto" and picked else codecs.label(f))
+                      for f in opts]
+            super().__init__(bar, key, title, labels, value, avail, disabled=unavailable)
+            self.codecs, self.picked, self.unavailable, self.focused = codecs, picked, unavailable, None
+            # Up to two short lines in the room the pills leave.
+            room = avail - sum(b.minimumWidth() for b in self.buttons) - 8
+            self.note.setWordWrap(True)
+            self.note.setAlignment(Qt.AlignRight | Qt.AlignVCenter)   # at the row's end, like Resolution's
+            self.note.setFixedWidth(max(120, room))
+            for b in self.buttons:
+                b.installEventFilter(self)
+            self.update_note()
+
+        def hint(self, fmt):
+            if fmt == "auto":
+                return self.AUTO_HINT
+            if fmt in self.unavailable:
+                return self.codecs.unavailable_message([fmt])
+            return self.codecs.HINTS.get(fmt, "")
+
+        def update_note(self):
+            if self.focused is not None:
+                text = self.hint(self.focused)
+            elif self.unavailable:
+                text = self.codecs.unavailable_message(self.unavailable)
+            elif self.value == "auto":
+                text = self.codecs.HINTS.get(self.picked) or self.AUTO_HINT
+            else:
+                text = self.hint(self.value)
+            self.set_note(text)
+
+        def refresh(self):
+            super().refresh()
+            if hasattr(self, "focused"):
+                self.update_note()
+
+        def eventFilter(self, obj, ev):
+            if ev.type() == QEvent.FocusIn and obj in self.buttons:
+                self.focused = self.values[self.buttons.index(obj)]
+                self.update_note()
+            elif ev.type() == QEvent.FocusOut and obj in self.buttons:
+                self.focused = None
+                self.update_note()
+            return False
 
     class Bar(QWidget):
         def __init__(self):
@@ -2394,6 +2474,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if key == "quality":
                 return SettingRow(self, key, title, [(q, q.capitalize()) for q in choices["quality"]],
                                   value, avail)
+            if key == "format":
+                return FormatRow(self, key, title, data, avail)
             dev = data.get("devices") or {}
             if key == "audio_source":
                 sound = [("default", "Default output")] + [(d["name"], d["label"], True)

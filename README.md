@@ -50,7 +50,7 @@ Press play once and Momento records in the background. When something worth keep
 | Keyboard shortcut on Wayland | ✓ | Steam shortcuts | Needs a plugin | ✓ |
 | Steam Gaming Mode | Records; bar coming | ✓ | ✗ | ? |
 | Longest replay | 60 min | 120 min | 6 h | 24 h |
-| Video formats | H.264 | MP4 | H.264, HEVC, AV1 | H.264, HEVC, AV1 |
+| Video formats | H.264, H.265, AV1 | MP4 | H.264, HEVC, AV1 | H.264, HEVC, AV1 |
 
 ## Install
 
@@ -197,6 +197,15 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 - **Frame rate**: 60 fps (default), or 120 fps for high-refresh screens and fast games.
   120 fps only helps when your game runs above 100 fps. Otherwise it costs more and adds nothing.
 - **Quality**: Standard, High (default) or Ultra. Higher looks better and takes more space.
+- **Format**: Auto (default), H.264, H.265 or AV1. Auto picks the smoothest one your PC handles well. Clips are always MP4.
+
+  | Format | What it means for your clips |
+  |---|---|
+  | H.264 | Plays everywhere |
+  | H.265 | Smaller files. Some older devices can't play it |
+  | AV1 | Smoothest on newer hardware. Some older devices can't play it |
+
+  Formats your PC can't record are greyed out.
 - The line at the bottom shows how much space a full replay will take. See [Video quality](#video-quality) for picks.
 
 ### Audio
@@ -251,6 +260,7 @@ Momento tells you what happened, so you never have to guess.
 | **Couldn't save the last 15 minutes — disk full** | Keep history had no room to save a full replay. Recording continues. |
 | **Save failed** / **Screenshot failed** | Something went wrong. The notification says what. |
 | **Nothing to save** | You asked for a clip before anything was recorded. |
+| **Recording in H.264** | The format you picked didn't start on your PC, so Momento switched to one that works. |
 
 ## Video quality
 
