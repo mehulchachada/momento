@@ -36,8 +36,6 @@ def _videos_dir() -> Path:
     return Path.home() / "Videos"
 
 
-# The hold that "Open with: Hold" writes to [controller] hold_ms, in ms.
-HOLD_MS = 300
 
 DEFAULTS = {
     "capture": {
@@ -110,9 +108,10 @@ DEFAULTS = {
         # Elite-style pads and handhelds). With a D-pad direction, the controller is
         # held while the other button is down, so the game doesn't see the D-pad.
         "open_chord": ["mode", "dpad_down"],
-        "hold_ms": 0,     # 0 = open on a tap; HOLD_MS for "Open with: Hold"
-        # Take the controller over while the bar is open, so the game doesn't see
-        # the presses (falls back to sharing it where that isn't possible).
+        # Hidden escape hatches (no setting in the bar or `momento set`): ms to hold
+        # the shortcut (0 = a tap), and taking the controller over while the bar is
+        # open so the game doesn't see the presses (false: share it).
+        "hold_ms": 0,
         "exclusive": True,
     },
 }
@@ -174,6 +173,9 @@ def warn_minutes(cfg: dict) -> int:
     return minutes
 
 
+_warned_chords: set = set()
+
+
 def controller(cfg: dict) -> dict:
     """The [controller] table, checked: {"enabled", "chord" (tuple), "hold_ms", "exclusive"}.
 
@@ -195,6 +197,11 @@ def controller(cfg: dict) -> dict:
         logging.getLogger(__name__).warning("[controller] open_chord: %s; using %s", e,
                                             " + ".join(d["open_chord"]))
         out["chord"] = tuple(d["open_chord"])
+    if len(out["chord"]) != gamepad.CHORD_SIZE and out["chord"] not in _warned_chords:
+        _warned_chords.add(out["chord"])   # kept as written; new shortcuts are two buttons
+        logging.getLogger(__name__).warning("[controller] open_chord %s is %d button(s); shortcuts are "
+                                            "two buttons pressed together (kept as it is)",
+                                            " + ".join(out["chord"]), len(out["chord"]))
     try:
         hold = int(c.get("hold_ms", d["hold_ms"]))
         if isinstance(c.get("hold_ms"), bool) or not 0 <= hold <= 5000:

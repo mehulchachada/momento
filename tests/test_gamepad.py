@@ -714,6 +714,10 @@ class Chord(Base):
         self.assertEqual(g.normalize_chord(["View", "Menu"]), ("select", "start"))
         self.assertEqual(g.normalize_chord("l3+r3"), ("thumbl", "thumbr"))
         self.assertEqual(g.normalize_chord(["left-paddle"]), ("left_paddle",))
+        self.assertEqual(g.normalize_chord("L1 + R1"), ("tl", "tr"))                 # the pads' own names
+        self.assertEqual(g.normalize_chord("cross+triangle"), ("south", "north"))
+        self.assertEqual(g.normalize_chord("a+y"), ("south", "north"))
+        self.assertEqual(g.normalize_chord("create+options"), ("select", "start"))
         with self.assertRaises(ValueError):
             g.normalize_chord(["select", "turbo"])
         with self.assertRaises(ValueError):
@@ -908,6 +912,7 @@ class DpadChord(Base):
         self.assertEqual(g.DEFAULT_CHORD, ("mode", "dpad_down"))
         self.assertEqual(tuple(config.DEFAULTS["controller"]["open_chord"]), g.DEFAULT_CHORD)
         self.assertEqual(g.CHORD_PRESETS[0], ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")))
+        self.assertEqual((g.CHORD_OFFERED, g.CHORD_SIZE), (("ps_down",), 2))   # the bar offers just it
         self.assertEqual([k for k, _l, _b in g.CHORD_PRESETS],
                          ["ps_down", "view_menu", "left_paddle", "right_paddle", "l3_r3"])
         self.assertEqual(g.chord_label(g.DEFAULT_CHORD), "PS / Xbox + Down")

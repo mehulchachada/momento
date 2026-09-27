@@ -155,8 +155,6 @@ momento stop            # stop recording
 
 Press the **PS** (or **Xbox** / **Home**) button and **D-pad Down** together to open the bar. Do it again to close it. That's the **PS** button on a PlayStation controller, the **Xbox** button on an Xbox one, **Home** on a Nintendo-style one, and on a handheld the button your system uses as Home. Your game doesn't see the D-pad press.
 
-Prefer the old **View + Menu**? It's still there, with the paddles and L3 + R3, under [Controller settings](#controller).
-
 | Button | In the bar |
 |---|---|
 | **D-pad** or left stick | Move around |
@@ -168,7 +166,7 @@ Prefer the old **View + Menu**? It's still there, with the paddles and L3 + R3, 
 
 Buttons go by position, so on a PlayStation controller A is Cross, B is Circle, Y is Triangle and X is Square. On a Nintendo controller the bottom button saves and the right one goes back. The button hints in the bar show your own controller's buttons: ✕ ○ □ △ and L1 / R1 on a PlayStation controller.
 
-Want a different shortcut, or a short hold instead of a tap? See [Controller settings](#controller).
+Don't want the shortcut? Turn it off in [Controller settings](#controller).
 
 **Steam Gaming Mode:** the bar can't appear over the game there yet. Use Steam Input to bind a button to `momento save 30s` instead.
 
@@ -178,7 +176,7 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 ### General
 
-<img src="assets/settings-general.png" width="880" alt="Settings, General tab: Record Full screen or Window, Keep history Off or On">
+<img src="assets/settings-general.png" width="880" alt="Settings, General tab: Record Full screen or Window, Replay length 15, 30 or 60 min, Keep history Off or On">
 
 - **Record: Window** (default) records only the game window you pick. The bar and notifications never end up in your clips.
 - **Record: Full screen** records everything on your screen.
@@ -206,11 +204,10 @@ Open settings with the **gear** in the bar (**S** on the keyboard, **Y** on a co
 
 ### Controller
 
-<img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: Controller shortcut Off, PS / Xbox + Down, View + Menu, Left paddle, Right paddle or L3 + R3, and Exclusive Off or On">
+<img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: Controller Off or PS / Xbox + Down">
 
-- **Controller**: the button combo that opens the bar: **PS / Xbox + Down** (default: the PS, Xbox or Home button with D-pad Down), **View + Menu**, **Left paddle** or **Right paddle** (the back buttons on the ROG Ally and Xbox Elite controllers), **L3 + R3** (press both sticks in), or **Off**.
-- **Exclusive: On** (default): while the bar is open, Momento takes the controller so your game doesn't react to your presses. It gives it back when the bar closes. It also keeps the D-pad press of **PS / Xbox + Down** from your game.
-- **Open with: Tap** (default) opens the bar the moment you press the combo. **Hold** waits until you've held it for 0.3 s.
+- **Controller: PS / Xbox + Down** (default): press the PS, Xbox or Home button with D-pad Down to open or close the bar. **Off** turns the shortcut off.
+- While the bar is open, Momento takes the controller so your game doesn't react to your presses, and gives it back when the bar closes. Your game doesn't see the D-pad press of the shortcut either.
 
 ### Misc
 
@@ -293,9 +290,8 @@ ASUS ROG Ally (Z1 Extreme, 16 GB), Bazzite 44, KDE Plasma 6.7 on Wayland, on AC 
 - **Screenshots come from the recording**, so they work only while Momento is recording (not paused or stopped).
 - **With Keep history off, stopping clears your replay.** So does the game closing. Save first.
 - **Momento needs free space for a full replay** before it starts: about 3 GB at the default settings (8 GB for 60 minutes).
-- **Steam may react to the PS / Xbox button too** (its overlay or Big Picture), since it reads controllers its own way. If it gets in the way, pick another shortcut in settings → **Controller**.
-- **View + Menu, the paddles and L3 + R3 also reach your game.** Pick one your game doesn't use. With Exclusive on, the rest of your presses stay in the bar. If another app already holds the controller, the game may still see them.
-- **Emulators that use Select + Start** (the same buttons as View + Menu) would open the bar too if you pick View + Menu. Switch **Open with** to **Hold**, or keep the default shortcut.
+- **Steam may react to the PS / Xbox button too** (its overlay or Big Picture), since it reads controllers its own way. If it gets in the way, turn the shortcut off in settings → **Controller** and use the keyboard shortcut.
+- **If another app already holds your controller**, your game may still see your presses while the bar is open.
 
 ## FAQ
 
@@ -325,11 +321,11 @@ Barely: about 2-3% in a heavy graphics test on our ROG Ally (see [Performance](#
 </details>
 <details><summary><b>How do I change the shortcut?</b></summary>
 
-Controller: settings → **Controller**. Keyboard: on KDE, *System Settings → Keyboard → Shortcuts → Momento*. On other desktops, look for Momento in the keyboard shortcut settings.
+Controller: it's always **PS / Xbox + Down**; turn it on or off in settings → **Controller**. Keyboard: on KDE, *System Settings → Keyboard → Shortcuts → Momento*. On other desktops, look for Momento in the keyboard shortcut settings.
 </details>
 <details><summary><b>My controller doesn't open the bar</b></summary>
 
-Press the **PS** / **Xbox** / **Home** button and **D-pad Down** together (PS button first is easiest). If you picked **View + Menu**, that's the two small middle buttons: **Create + Options** on PlayStation, **− and +** on Nintendo. Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
+Press the **PS** / **Xbox** / **Home** button and **D-pad Down** together (PS button first is easiest). Check that **Controller** isn't set to Off in settings. To see what Momento gets, run `momento controller --watch` and press the buttons.
 </details>
 <details><summary><b>How do I turn off Keep history or the hour warning?</b></summary>
 

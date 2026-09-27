@@ -45,7 +45,9 @@ south east north west tl tr tl2 tr2 select start mode thumbl thumbr
 dpad_up dpad_down dpad_left dpad_right paddle1..paddle4 extra1..extra4.
 Chord-only groups: ``left_paddle`` (paddle3 or paddle4), ``right_paddle``
 (paddle1 or paddle2). Aliases: view=select, menu=start, guide/home/ps/xbox=mode,
-l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2, up/down/left/right=dpad_*.
+l3=thumbl, r3=thumbr, lb=tl, rb=tr, lt=tl2, rt=tr2, up/down/left/right=dpad_*,
+and the pads' own names by position: a/b/x/y (Xbox), cross/circle/square/triangle,
+l1/r1/l2/r2, share/create/options, minus/plus.
 In a chord, ``dpad_*`` also matches the hat (``ABS_HAT0X/Y``), which is how
 most pads report their D-pad; others send ``BTN_DPAD_*``.
 
@@ -173,12 +175,23 @@ BUTTON_NAMES = ("south", "east", "north", "west", "tl", "tr", "tl2", "tr2", "sel
 GROUPS = {"left_paddle": ("paddle3", "paddle4"), "right_paddle": ("paddle1", "paddle2")}
 ALIASES = {"view": "select", "menu": "start", "guide": "mode", "home": "mode", "ps": "mode",
            "xbox": "mode", "l3": "thumbl", "r3": "thumbr", "lb": "tl", "rb": "tr", "lt": "tl2", "rt": "tr2",
-           "up": "dpad_up", "down": "dpad_down", "left": "dpad_left", "right": "dpad_right"}
+           "up": "dpad_up", "down": "dpad_down", "left": "dpad_left", "right": "dpad_right",
+           # the names on the pads (by position): Xbox letters, PlayStation, Nintendo
+           "a": "south", "b": "east", "x": "west", "y": "north",
+           "cross": "south", "circle": "east", "square": "west", "triangle": "north",
+           "l1": "tl", "r1": "tr", "l2": "tl2", "r2": "tr2", "share": "select", "create": "select",
+           "options": "start", "minus": "select", "plus": "start"}
 DPAD_NAMES = ("dpad_up", "dpad_down", "dpad_left", "dpad_right")
 
 DEFAULT_CHORD = ("mode", "dpad_down")
 DEFAULT_HOLD_MS = 0        # open on a tap, like [controller] hold_ms
-# (key, label, buttons): the choices the settings UI offers (the first is the default)
+# (key, label, buttons): every shortcut known by name. Settings (config, `momento set
+# controller`, configure) take all of them; the bar offers only CHORD_OFFERED (plus Off),
+# and shows any other saved shortcut as an extra choice with its buttons.
+# Rule for new shortcuts (and the custom bind to come): exactly CHORD_SIZE buttons
+# pressed together (check_chord_size). `momento set controller` enforces it; a
+# hand-edited open_chord of another size keeps working, with a warning (config.controller).
+CHORD_SIZE = 2
 CHORD_PRESETS = (
     ("ps_down", "PS / Xbox + Down", ("mode", "dpad_down")),
     ("view_menu", "View + Menu", ("select", "start")),
@@ -200,6 +213,7 @@ SYMBOLS = {
                  "tl2": "ZL", "tr2": "ZR", "select": "Minus", "start": "Plus", "mode": "Home",
                  "thumbl": "L3", "thumbr": "R3"},
 }
+CHORD_OFFERED = ("ps_down",)
 PS_FACE_WORDS = {"✕": "Cross", "○": "Circle", "□": "Square", "△": "Triangle"}
 
 DEADZONE = 0.5            # stick deflection (0..1) that counts as a direction
@@ -271,12 +285,38 @@ def normalize_chord(buttons) -> tuple[str, ...]:
     return tuple(out)
 
 
-def chord_label(buttons) -> str:
-    """Human name for a chord: the preset label, else "Select + Start"-style."""
+def check_chord_size(buttons) -> tuple[str, ...]:
+    """The canonical chord if it is CHORD_SIZE buttons, else ValueError in plain words."""
     names = normalize_chord(buttons)
-    for _key, label, preset in CHORD_PRESETS:
-        if tuple(preset) == names:
+    if len(names) != CHORD_SIZE:
+        raise ValueError(f"a controller shortcut is two buttons pressed together "
+                         f"(got {len(names)}: {' + '.join(names)})")
+    return names
+
+
+def button_word(name: str, symbols: str = "xbox") -> str:
+    """A button's name in running text, as a ``symbols`` pad labels it ("L1", "Cross",
+    "Create", "Down", "Left paddle", "P3")."""
+    label = button_symbol(name, symbols)
+    if label != name:
+        return PS_FACE_WORDS.get(label, label)
+    if name in DPAD_NAMES:
+        return name[5:].capitalize()
+    if name.startswith("paddle"):
+        return "P" + name[6:]
+    return name.replace("_", " ").replace("extra", "extra ").strip().capitalize()
+
+
+def chord_label(buttons, symbols: str | None = None) -> str:
+    """Human name for a chord: the preset label, else "Select + Start"-style. With
+    ``symbols`` (a pad's, see SYMBOLS) a shortcut the bar doesn't offer is named by its
+    buttons as that pad labels them: "View + Menu", "Create + Options", "L1 + R1"."""
+    names = normalize_chord(buttons)
+    for key, label, preset in CHORD_PRESETS:
+        if tuple(preset) == names and (symbols is None or key in CHORD_OFFERED):
             return label
+    if symbols is not None:
+        return " + ".join(button_word(n, symbols) for n in names)
     return " + ".join(n.replace("_", " ").title() for n in names)
 
 

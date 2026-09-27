@@ -180,7 +180,7 @@ RECORD_TEXT = {"screen": "Full screen", "window": "Window"}
 DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
                 ("Audio", ("audio_source", "mic", "mic_device")),
-                ("Controller", ("controller", "controller_exclusive", "controller_open")),
+                ("Controller", ("controller",)),
                 ("Misc", ("hour_warning", "instant_bar")))
 
 
@@ -738,21 +738,6 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "bolt":
         p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
                                  P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
-    elif kind == "press_hold":
-        # a button held down: a timer ring closing around it
-        p.drawEllipse(P(x, y), 2.6, 2.6)
-        r = 6.8
-        p.drawArc(QRectF(x - r, y - r, 2 * r, 2 * r), 90 * 16, -270 * 16)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawEllipse(P(x - r, y), 1.3, 1.3)
-    elif kind == "press_tap":
-        # a button tapped: it opens the moment it is down
-        p.drawEllipse(P(x, y), 2.6, 2.6)
-        for deg in (45, 135, 225, 315):
-            a = math.radians(deg)
-            c, s_ = math.cos(a), math.sin(a)
-            p.drawLine(P(x + 5.2 * c, y + 5.2 * s_), P(x + 7.4 * c, y + 7.4 * s_))
     elif kind == "gallery":
         # a media library: a photo (a mountain and a sun in a frame) on a stack
         # of them; the back frame shows only where the front one leaves room
@@ -778,42 +763,28 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
                                  P(left + 8.6, bottom - 3.9), P(front.right(), bottom - 0.4),
                                  P(front.right(), bottom)]))
         p.drawEllipse(P(front.right() - 3.3, front.top() + 3.2), 1.35, 1.35)
-    elif kind == "lock":
-        p.drawRoundedRect(QRectF(x - 5.5, y - 1.5, 11, 8.5), 2, 2)
-        shackle = QPainterPath(P(x - 3.3, y - 1.5))
-        shackle.lineTo(x - 3.3, y - 3.8)
-        shackle.arcTo(QRectF(x - 3.3, y - 7.1, 6.6, 6.6), 180, -180)
-        shackle.lineTo(x + 3.3, y - 1.5)
-        p.drawPath(shackle)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawEllipse(P(x, y + 2.6), 1.2, 1.2)
     p.restore()
 
 
 RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
-             "controller_exclusive": "lock", "controller_open": "press_tap", "keep_history": "history",
+             "keep_history": "history",
              "replay_length": "timer",
              "hour_warning": "hourglass", "instant_bar": "bolt"}
 # Row titles; a key a newer daemon adds gets its key as the title ("frame_pacing" -> "Frame pacing").
 ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_history": "Keep history",
               "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
-              "mic_device": "Mic device", "controller": "Controller", "controller_exclusive": "Exclusive",
-              "controller_open": "Open with", "hour_warning": "Hour warning", "instant_bar": "Instant bar"}
-ON_OFF_KEYS = ("mic", "controller_exclusive", "keep_history", "instant_bar")
+              "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
+              "instant_bar": "Instant bar"}
+ON_OFF_KEYS = ("mic", "keep_history", "instant_bar")
 RECORD_ICONS = {"screen": "fullscreen", "window": "window"}  # the Record row's icon follows its value
-OPEN_ICONS = {"hold": "press_hold", "tap": "press_tap"}      # so does Open with's
-VALUE_ICONS = {"record": RECORD_ICONS, "controller_open": OPEN_ICONS}
+VALUE_ICONS = {"record": RECORD_ICONS}
 # Settings the daemon applies without restarting the recording (settings.LIVE_KEYS
 # wins; this is for an older settings module).
-LIVE_KEYS = ("controller", "controller_exclusive", "controller_open", "replay_length", "keep_history",
-             "hour_warning", "instant_bar")
+LIVE_KEYS = ("controller", "replay_length", "keep_history", "hour_warning", "instant_bar")
 REPLAY_MINUTES = (15, 30, 60)   # the Replay length row, when the reply has no choices for it
-# How the controller shortcut opens the bar: the Open with row's choices.
-OPEN_TEXT = {"hold": "Hold", "tap": "Tap"}
 GLYPH_W = 16             # settings: icon column
 GLYPH_GAP = 10
 
@@ -2420,18 +2391,13 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if key == "controller":
                 if not data.get("controller_available", True):
                     return None             # no python-evdev: the controller settings do nothing
-                ctl = [("off", "Off")] + [(k, label) for k, label, _b in gamepad.CHORD_PRESETS]
+                # Off / PS / Xbox + Down; any other saved shortcut (an older preset, a
+                # hand-edited list) stays as an extra choice named by its buttons
+                ctl = [(k, settings.controller_label(k)) for k in ("off", *gamepad.CHORD_OFFERED)]
                 if value not in [c[0] for c in ctl]:
-                    ctl.append((value, settings.controller_label(value), True))
+                    # as the controller in use labels them (Xbox names without one)
+                    ctl.append((value, settings.controller_label(value, self.pad_symbols()), True))
                 return SettingRow(self, key, title, ctl, value, avail)
-            if key in ("controller_exclusive", "controller_open") and not data.get("controller_available", True):
-                return None
-            if key == "controller_open":
-                opts = [(o, OPEN_TEXT.get(o, str(o).capitalize()))
-                        for o in choices.get(key) or list(OPEN_TEXT)]
-                if value not in [o[0] for o in opts]:
-                    opts.append((value, str(value).capitalize()))
-                return SettingRow(self, key, title, opts, value, avail)
             if key == "replay_length":
                 opts = list(choices.get(key) or REPLAY_MINUTES)
                 if value not in opts:

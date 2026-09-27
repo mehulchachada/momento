@@ -171,13 +171,14 @@ Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
 open bar reads the controllers itself and releases them when it hides. For a
 chord with a D-pad direction (the default ``["mode", "dpad_down"]``) the daemon
-holds that controller (EVIOCGRAB) while the chord's other button is down, when
-``exclusive`` is on, so the game doesn't see the D-pad press.
+holds that controller (EVIOCGRAB) while the chord's other button is down, so
+the game doesn't see the D-pad press. The shortcut is a tap and the open bar
+holds the controller exclusively; ``[controller] hold_ms`` and ``exclusive``
+are config-only escape hatches with no setting.
 ``configure`` {changes, force?}
     Validate every value first (all or nothing), write the changed ones to
     config.toml keeping comments, reload if anything changed (``changed: {}``
-    = nothing to do). Changes that only touch ``controller`` /
-    ``controller_exclusive`` / ``controller_open`` / ``replay_length`` /
+    = nothing to do). Changes that only touch ``controller`` / ``replay_length`` /
     ``keep_history`` / ``hour_warning`` / ``instant_bar`` apply without a
     reload (``restarted: false``). A shorter ``replay_length`` drops the
     oldest footage beyond it at once (the newest is kept); a longer one fills
@@ -345,13 +346,11 @@ SETTING_VALUES = {
     "audio_source": (("string",), True),   # "default" | "off" | monitor source name
     "mic": (("string",), True),            # "on" | "off"
     "mic_device": (("string",), True),     # "default" | source name
-    # "off" | a preset ("ps_down" (mode+dpad_down, the default), "view_menu", "left_paddle",
-    # "right_paddle", "l3_r3") | buttons joined with "+" ("select+mode"); configure also
-    # takes "on" (enable, keep the shortcut)
+    # "off" | "ps_down" (mode+dpad_down, the default) | an older preset still accepted
+    # ("view_menu", "left_paddle", "right_paddle", "l3_r3") | buttons joined with "+"
+    # ("select+mode"); configure also takes "on" (enable, keep the shortcut). New shortcuts
+    # from `momento set` are two buttons (gamepad.CHORD_SIZE)
     "controller": (("string",), False),
-    "controller_exclusive": (("string",), False),   # "on" | "off"
-    # "tap" (hold_ms = 0, the default: opens on press) | "hold" ([controller] hold_ms above 0, 300 when chosen)
-    "controller_open": (("string",), False),
     "keep_history": (("string",), False),   # "off" | "on": keep the replay on stop, save each hour
     "hour_warning": (("integer",), False),  # minutes before the replay is full to warn: 3-10 (UI: 10, 5, 3)
     "instant_bar": (("string",), False),    # "on" | "off": keep the clip bar loaded ([ui] keep_bar_loaded)
@@ -363,8 +362,7 @@ SETTING_CHOICES = {
     "resolution": (("array",), True),
     "quality": (("array",), True),
     "fps": (("array",), True),
-    "controller": (("array",), False),     # ["off", <preset keys>]
-    "controller_open": (("array",), False),  # ["hold", "tap"]
+    "controller": (("array",), False),     # ["off", "ps_down"]: what the bar offers
     "keep_history": (("array",), False),   # ["off", "on"]
     "hour_warning": (("array",), False),   # [10, 5, 3]
     "instant_bar": (("array",), False),    # ["on", "off"]

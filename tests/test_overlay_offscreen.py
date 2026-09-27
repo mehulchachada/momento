@@ -439,8 +439,8 @@ class OverlayOffscreen(unittest.TestCase):
                          {"record": "window", "replay_length": "timer", "keep_history": "history",
                           "resolution": "display",
                           "fps": "gauge", "quality": "sliders", "audio_source": "speaker", "mic": "mic",
-                          "mic_device": "micdev", "controller": "gamepad", "controller_exclusive": "lock",
-                          "controller_open": "press_tap", "hour_warning": "hourglass", "instant_bar": "bolt"})
+                          "mic_device": "micdev", "controller": "gamepad", "hour_warning": "hourglass",
+                          "instant_bar": "bolt"})
         self.assertTrue(all(r.height() == overlay.ROW_PITCH for r in bar.rows))
         self.assertEqual((bar.apply_btn.glyph, bar.back_btn.glyph), ("check", "back"))
         self.assertEqual(bar.tab_names[bar.tab], "General")
@@ -488,11 +488,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.key(Qt.Key_PageDown)                # another tab; the footer keeps focus
         self.assertEqual(bar.tab_names[bar.tab], "Controller")
         self.assertTrue(bar.apply_btn.hasFocus())
-        self.key(Qt.Key_Up)                      # the tab's last row
-        self.assertTrue(bar.row("controller_open").buttons[1].hasFocus())        # Tap (the default)
-        self.key(Qt.Key_Up)
-        self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())   # On
-        self.key(Qt.Key_Up)
+        self.key(Qt.Key_Up)                      # the tab's only row
         self.assertTrue(bar.row("controller").buttons[1].hasFocus())             # PS / Xbox + Down
         self.key(Qt.Key_PageUp)                  # back on Audio: Sound
         self.assertTrue(bar.row("audio_source").buttons[1].hasFocus())
@@ -1287,7 +1283,7 @@ class OverlayOffscreen(unittest.TestCase):
             self.assertEqual(b.mapTo(bar, b.rect().topLeft()).y(), bar.tab_btns[0].mapTo(bar, b.rect().topLeft()).y())
         want = {"General": ["record", "replay_length", "keep_history"], "Video": ["resolution", "fps", "quality"],
                 "Audio": ["audio_source", "mic", "mic_device"],
-                "Controller": ["controller", "controller_exclusive", "controller_open"],
+                "Controller": ["controller"],
                 "Misc": ["hour_warning", "instant_bar"]}
         heights = set()
         for i, name in enumerate(bar.tab_names):
@@ -1365,13 +1361,10 @@ class OverlayOffscreen(unittest.TestCase):
                          (["10 min", "5 min", "3 min", "7 min"], 7, "hourglass"))
         self.assertEqual(([b.text() for b in ib.buttons], ib.value, ib.icon.kind),
                          (["On", "Off"], "on", "bolt"))
-        ex = bar.row("controller_exclusive")
-        self.assertEqual(([b.text() for b in ex.buttons], ex.value, ex.icon.kind),
-                         (["Off", "On"], "on", "lock"))
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Replay length", "Keep history", "Resolution", "Frame rate", "Quality",
                           "Sound", "Mic",
-                          "Mic device", "Controller", "Exclusive", "Open with", "Hour warning", "Instant bar"])
+                          "Mic device", "Controller", "Hour warning", "Instant bar"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
             self.assertLessEqual(lbl.fontMetrics().horizontalAdvance(lbl.text()), lbl.width())
@@ -1393,8 +1386,9 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.foot.text(), "Saved")            # nothing restarted
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")
 
-    def test_settings_open_with_row(self):
-        """Controller tab: Open with (Hold / Tap), the third row; applies without a restart."""
+    def test_settings_controller_tab(self):
+        """Controller tab: one row, Off / PS / Xbox + Down (Open with and Exclusive are gone);
+        applies without a restart."""
         daemon = FakeDaemon(True)
         bar = self.make(daemon)
         bar.move(100, 700)
@@ -1402,109 +1396,43 @@ class OverlayOffscreen(unittest.TestCase):
         self.open_settings(bar)
         bar.switch_tab(bar.tab_names.index("Controller"), "row")
         pump(self.app, 0.05)
-        self.assertEqual([r.key for r in bar.visible_rows()], ["controller", "controller_exclusive", "controller_open"])
-        self.assertEqual(bar.panel_rows, 3)                       # still the tallest tab: no taller panel
+        self.assertEqual([r.key for r in bar.visible_rows()], ["controller"])
+        self.assertEqual(bar.panel_rows, 3)                       # the tallest tab sets the panel
         self.assertEqual((bar.height(), bar.y() + bar.height()), (h0 + self.PANEL + 1, bottom0))
-        row = bar.row("controller_open")
+        row = bar.row("controller")
         self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.value, row.icon.kind),
-                         ("Open with", ["Hold", "Tap"], "tap", "press_tap"))        # a tap by default
-        self.assertTrue(row.has_divider())
-        self.shot(bar, "settings-controller-tap", "controller")
-        self.key(Qt.Key_Down)
-        self.key(Qt.Key_Down)
-        self.assertTrue(row.buttons[1].hasFocus())
-        self.key(Qt.Key_Left)                                     # Hold
-        self.assertEqual((row.value, row.icon.kind), ("hold", "press_hold"))
-        self.assertEqual(bar.changes(), {"controller_open": "hold"})
-        pump(self.app, 0.05)
-        self.shot(bar, "settings-controller-hold", "controller")
-        daemon.configure_reply = {"ok": True, "changed": {"controller_open": "hold"}, "restarted": False,
+                         ("Controller", ["Off", "PS / Xbox + Down"], "ps_down", "gamepad"))
+        self.shot(bar, "settings-controller-row", "controller")
+        self.assertTrue(row.buttons[1].hasFocus())                # the tab opened on its row
+        self.key(Qt.Key_Right)                                    # the last choice: stays
+        self.assertEqual(row.value, "ps_down")
+        self.key(Qt.Key_Left)                                     # Off
+        self.assertEqual(bar.changes(), {"controller": "off"})
+        daemon.configure_reply = {"ok": True, "changed": {"controller": "off"}, "restarted": False,
                                   "paused": False}
         self.key(Qt.Key_Return)
         self.wait_for(lambda: bar.apply_state == "done")
-        self.assertEqual(daemon.configures, [{"controller_open": "hold"}])
+        self.assertEqual(daemon.configures, [{"controller": "off"}])
         self.assertIn("controller updated", bar.foot.text())
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
 
-    def test_settings_open_with_values(self):
-        daemon = FakeDaemon(True, values={"controller_open": "tap"})
-        bar = self.make(daemon)
-        self.open_settings(bar)
-        row = bar.row("controller_open")
-        self.assertEqual((row.value, row.icon.kind, row.buttons[1].selected()), ("tap", "press_tap", True))
+    def test_settings_controller_older_shortcuts(self):
+        """A saved shortcut the row doesn't offer (an older preset, a hand-edited list) is an
+        extra choice named by its buttons; without python-evdev there is no row."""
+        for value, label in (("view_menu", "View + Menu"), ("left_paddle", "Left paddle"),
+                             ("l3_r3", "L3 + R3"), ("tl+tr", "LB + RB")):
+            bar = self.make(FakeDaemon(True, values={"controller": value}))
+            self.open_settings(bar)
+            row = bar.row("controller")
+            self.assertEqual(([b.text() for b in row.buttons], row.value),
+                             (["Off", "PS / Xbox + Down", label], value), value)
+            self.assertTrue(row.buttons[2].selected())
         bar.clear_rows()
         data = settings_reply()                                   # no python-evdev: no controller rows
         data["controller_available"] = False
         bar.sdata = data
         bar.build_rows()
         self.assertEqual([r.key for r in bar.rows if r.key.startswith("controller")], [])
-        bar.clear_rows()
-
-    def test_settings_tab_remembered(self):
-        bar = self.make(FakeDaemon(True))
-        self.open_settings(bar)
-        self.key(Qt.Key_PageDown)
-        self.key(Qt.Key_PageDown)                  # Audio
-        self.key(Qt.Key_Escape)
-        self.assertEqual(bar.mode, "clip")
-        self.open_settings(bar)
-        self.assertEqual(bar.tab_names[bar.tab], "Audio")    # the tab it was left on
-        self.assertTrue(bar.row("audio_source").isAncestorOf(self.app.focusWidget()))
-        bar.resident = True
-        bar.dismiss()                              # hidden and shown again: same process
-        bar.present()
-        self.open_settings(bar)
-        self.assertEqual(bar.tab_names[bar.tab], "Audio")
-
-    def test_settings_replay_length_row(self):
-        """General: Replay length (15 / 30 / 60 min) right under Record, written like the others."""
-        daemon = FakeDaemon(True, values={"replay_length": 15})
-        bar = self.make(daemon)
-        self.open_settings(bar)
-        rl = bar.row("replay_length")
-        self.assertEqual(([b.text() for b in rl.buttons], rl.value, rl.icon.kind, rl.tab),
-                         (["15 min", "30 min", "60 min"], 15, "timer", 0))
-        self.assertEqual([r.key for r in bar.rows if r.tab == 0], ["record", "replay_length", "keep_history"])
-        self.assertEqual(rl.findChild(QLabel).text(), "Replay length")
-        self.assertEqual(rl.height(), overlay.ROW_PITCH)
-        self.assertIn("for 15 min", bar.foot.text())
-        self.assertEqual(bar.note.text(), "Applying restarts recording · your replay is kept")
-        self.key(Qt.Key_Down)                                    # Record -> Replay length
-        self.assertTrue(rl.buttons[0].hasFocus())
-        self.shot(bar, "settings-replay-length", "v8")
-
-        for start, pick, note in ((15, 30, "Applies right away · your replay is kept"),
-                                  (15, 60, "Applies right away · your replay is kept"),
-                                  (60, 15, "Keeps the newest 15 min · older footage is dropped")):
-            daemon = FakeDaemon(True, values={"replay_length": start})
-            daemon.configure_reply = {"ok": True, "changed": {"replay_length": pick}, "restarted": False,
-                                      "paused": False}
-            bar = self.make(daemon)
-            self.open_settings(bar)
-            rl = bar.row("replay_length")
-            rl.buttons[rl.values.index(pick)].click()
-            self.assertEqual(bar.changes(), {"replay_length": pick})
-            self.assertEqual(bar.note.text(), note)
-            self.assertIn(f"for {pick} min", bar.foot.text())
-            bar.apply_settings()
-            self.wait_for(lambda: bar.apply_state == "done")
-            self.assertEqual(daemon.configures, [{"replay_length": pick}])
-            self.assertEqual(bar.foot.text(), "Saved")                     # nothing restarted
-            self.assertNotEqual((bar.last_status or {}).get("state"), "starting")
-
-    def test_settings_replay_length_storage(self):
-        """A length that needs more room than is free is marked like a resolution that doesn't fit."""
-        need15 = quality.buffer_gb(quality.bitrate_kbps({"resolution": "1080p", "quality": "high", "fps": 60}),
-                                   900) * 1e9
-        daemon = FakeDaemon(True, values={"replay_length": 15}, free=2.5 * need15)
-        bar = self.make(daemon)
-        self.open_settings(bar)
-        rl = bar.row("replay_length")
-        self.assertEqual([b.property("nofit") for b in rl.buttons], [False, False, True])   # 60 min doesn't fit
-        rl.buttons[2].click()
-        self.assertFalse(bar.apply_btn.isEnabled())
-        self.assertIn("Needs", bar.foot.text())
-        rl.buttons[1].click()                                    # 30 min fits
         self.assertTrue(bar.apply_btn.isEnabled())
 
     def test_settings_older_reply_without_tabs(self):
@@ -1513,7 +1441,6 @@ class OverlayOffscreen(unittest.TestCase):
         data.pop("tabs")
         for k in NEW_VALUES:
             data["values"].pop(k)
-        data["values"].pop("controller_exclusive")
         bar = self.make(FakeDaemon(True))
         bar.sdata = data
         bar.build_rows()
@@ -2373,19 +2300,14 @@ class ControllerBar(unittest.TestCase):
         self.press(self.A)                             # into the tab
         ctl = bar.row("controller")
         self.assertTrue(ctl.buttons[1].hasFocus())
-        self.assertEqual([b.text() for b in ctl.buttons],
-                         ["Off", "PS / Xbox + Down", "View + Menu", "Left paddle", "Right paddle", "L3 + R3"])
+        self.assertEqual([b.text() for b in ctl.buttons], ["Off", "PS / Xbox + Down"])
         self.assertEqual(ctl.icon.kind, "gamepad")
-        self.right()                                   # View + Menu
-        self.assertEqual(ctl.value, "view_menu")
-        self.right()                                   # Left paddle
-        self.assertEqual(ctl.value, "left_paddle")
-        self.assertEqual(bar.changes(), {"controller": "left_paddle"})
-        self.down()
-        self.assertTrue(bar.row("controller_exclusive").buttons[1].hasFocus())
-        self.down()
-        self.assertTrue(bar.row("controller_open").buttons[1].hasFocus())       # Tap (the default)
-        self.down()                                    # the footer
+        self.right()                                   # nothing past PS / Xbox + Down
+        self.assertEqual(ctl.value, "ps_down")
+        self.left()                                    # Off
+        self.assertEqual(ctl.value, "off")
+        self.assertEqual(bar.changes(), {"controller": "off"})
+        self.down()                                    # the footer (the tab's only row)
         self.assertTrue(bar.apply_btn.hasFocus())
         self.right()
         self.assertTrue(bar.back_btn.hasFocus())
@@ -2394,7 +2316,7 @@ class ControllerBar(unittest.TestCase):
         self.shot(bar, "settings-controller", "v6")
         self.press(self.A)                             # apply
         self.wait_for(lambda: bar.apply_state == "done")
-        self.assertEqual(daemon.configures, [{"controller": "left_paddle"}])
+        self.assertEqual(daemon.configures, [{"controller": "off"}])
         self.assertIn("controller updated", bar.foot.text())
         self.shot(bar, "settings-controller-saved", "v6")
         self.assertNotEqual((bar.last_status or {}).get("state"), "starting")   # nothing restarted
@@ -2491,7 +2413,7 @@ class ControllerBar(unittest.TestCase):
 
     def test_chord_closes_when_held(self):
         self.use_view_menu()
-        config.set_value("controller", "hold_ms", 300, self.cfg)   # Open with: Hold
+        config.set_value("controller", "hold_ms", 300, self.cfg)   # hand-edited (config only)
         bar = self.open(FakeDaemon(True))
         bar.resident = True
         self.press(gamepad.BTN_SELECT, gamepad.BTN_START, hold=0.2)
@@ -2525,7 +2447,7 @@ class ControllerBar(unittest.TestCase):
         self.press(self.Y)
         self.wait_for(lambda: bar.mode == "settings")
         ctl = bar.row("controller")
-        self.assertEqual((ctl.value, ctl.labels[-1]), ("select+mode", "Select + Mode"))
+        self.assertEqual((ctl.value, ctl.labels[-1]), ("select+mode", "View + Xbox"))   # the pad's names
         self.press(self.B)
         orig = gamepad.available
         gamepad.available = lambda: False                # no python-evdev: no row
