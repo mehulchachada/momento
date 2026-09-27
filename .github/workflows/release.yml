@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      name: ${{ steps.version.outputs.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +41,9 @@ jobs:
             exit 1
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
+          # People-facing name: v1.0.0 -> "1.0", v1.1.0 -> "1.1", v1.0.1 -> "1.0.1".
+          if [[ "$tag" =~ ^([0-9]+\.[0-9]+)\.0$ ]]; then name="${BASH_REMATCH[1]}"; else name="$tag"; fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Check packaged systemd unit is in sync with data/momento.service
         run: |
@@ -141,17 +145,18 @@ jobs:
       - name: Release notes
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          NAME: ${{ needs.build.outputs.name }}
         run: |
           cat > notes.md <<EOF
-          Instant replay for Linux games. Press play once, and when something great happens, save the last 15 seconds to 60 minutes with **Super + Shift + G**, or **Home + D-pad Down** on a controller.
+          **Momento ${NAME}**: instant replay for Linux games. Press play once, and when something great happens, save the last 15 seconds to 60 minutes with **Super + Shift + G**, or **Home + D-pad Down** on a controller.
 
           ## Install
 
           **Easiest, on any Linux:** paste this in a terminal. It shows what it will install and asks first.
           \`\`\`
-          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/v${VERSION}/install.sh | MOMENTO_REF=v${VERSION} bash
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/v${VERSION}/install.sh | bash
           \`\`\`
-          On Bazzite, Bluefin and Aurora, use this one, not a package below.
+          On Bazzite, Bluefin, Aurora and Ubuntu 24.04, use this one, not a package below.
 
           **Or download the package for your system below** and install it from your Downloads folder:
 
@@ -170,20 +175,21 @@ jobs:
 
           ## Good to know
 
+          - **Ubuntu 24.04:** everything works except playing clips in the gallery, which needs Ubuntu 25.04 or newer.
           - **Fedora with AMD graphics:** add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`. Without it, your processor does the recording and games may stutter.
 
           ## Tell us how it runs
 
           Momento has only been tested on a few machines so far. [Tell us how it runs on yours](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=how-it-runs.yml): it takes 2 minutes.
           EOF
-      - name: Publish GitHub Release
+      - name: Create the draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          NAME: ${{ needs.build.outputs.name }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Momento $VERSION" \
+              --title "Momento $NAME" \
               --notes-file notes.md \
               --generate-notes \
               --verify-tag \
