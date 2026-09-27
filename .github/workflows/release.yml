@@ -176,11 +176,18 @@ jobs:
           ## Good to know
 
           - **Ubuntu 24.04:** everything works except playing clips in the gallery, which needs Ubuntu 25.04 or newer.
-          - **Fedora with AMD graphics:** add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`. Without it, your processor does the recording and games may stutter.
+          - **Fedora with AMD graphics:** for the smoothest recording, add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`.
+
+          ## What's next
+
+          - Support for more devices and systems, tested with your help
+          - Any button combo as your controller shortcut
+          - Recording in 1440p and 4K
+          - Flatpak
 
           ## Tell us how it runs
 
-          Momento has only been tested on a few machines so far. [Tell us how it runs on yours](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=how-it-runs.yml): it takes 2 minutes.
+          Help make Momento great on every PC: [tell us how it runs on yours](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=how-it-runs.yml). It takes 2 minutes.
           EOF
       - name: Create the draft GitHub Release
         env:
