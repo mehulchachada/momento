@@ -1454,15 +1454,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.focus()                             # at the end: stay
 
     class FormatRow(SettingRow):
-        """Settings -> Video -> Format: Auto (and what it picks here) / H.264 / H.265 / AV1.
+        """Settings -> Video -> Format: Auto / H.264 / H.265 / AV1.
 
         Formats this machine can't record (the settings reply's ``format_allowed``)
         are disabled. The note at the row's end says what the focused choice means
-        for the clips; with no focus in the row, why a choice is disabled, or else
-        what the selected one means.
+        for the clips; Auto says what it records in here ("Recording in AV1 on this
+        PC"). With no focus in the row: why a choice is disabled, or else what the
+        selected one means (Auto: the same "Recording in" line).
         """
 
-        AUTO_HINT = "Picks the smoothest one your PC handles well"
+        AUTO_HINT = "Picks the smoothest one your PC handles well"   # Auto's pick not known
 
         def __init__(self, bar, key, title, data, avail):
             from . import codecs
@@ -1475,9 +1476,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             allowed = data.get("format_allowed")
             allowed = opts if not isinstance(allowed, list) else allowed
             unavailable = [f for f in opts if f != "auto" and f not in allowed]
+            # What Auto records in here: the daemon's format_effective while Auto is the
+            # saved format (what is really recorded), else its format_auto.
             picked = data.get("format_auto")
-            labels = [(f, f"Auto ({codecs.label(picked)})" if f == "auto" and picked else codecs.label(f))
-                      for f in opts]
+            if value == "auto" and data.get("format_effective"):
+                picked = data["format_effective"]
+            labels = [(f, codecs.label(f)) for f in opts]
             super().__init__(bar, key, title, labels, value, avail, disabled=unavailable)
             self.codecs, self.picked, self.unavailable, self.focused = codecs, picked, unavailable, None
             # Up to two short lines in the room the pills leave.
@@ -1489,9 +1493,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 b.installEventFilter(self)
             self.update_note()
 
+        def auto_note(self):
+            if self.picked in self.codecs.LABELS and self.picked != "auto":
+                return f"Recording in {self.codecs.label(self.picked)} on this PC"
+            return self.AUTO_HINT
+
         def hint(self, fmt):
             if fmt == "auto":
-                return self.AUTO_HINT
+                return self.auto_note()
             if fmt in self.unavailable:
                 return self.codecs.unavailable_message([fmt])
             return self.codecs.HINTS.get(fmt, "")
@@ -1501,8 +1510,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 text = self.hint(self.focused)
             elif self.unavailable:
                 text = self.codecs.unavailable_message(self.unavailable)
-            elif self.value == "auto":
-                text = self.codecs.HINTS.get(self.picked) or self.AUTO_HINT
             else:
                 text = self.hint(self.value)
             self.set_note(text)

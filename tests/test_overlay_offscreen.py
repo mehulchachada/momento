@@ -1091,16 +1091,19 @@ class OverlayOffscreen(unittest.TestCase):
     def test_format_row_on_a_machine_that_records_everything(self):
         bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1")
         self.assertIsNotNone(fmt)
-        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (AV1)", "H.264", "H.265", "AV1"])
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])   # just "Auto"
         self.assertTrue(all(b.isEnabled() for b in fmt.buttons))
         self.assertEqual(fmt.value, "auto")
-        self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")   # what Auto uses, said plainly
         fmt.buttons[1].setFocus()                                   # moving along the row explains each
         self.assertEqual(fmt.note.text(), "Plays everywhere")
-        fmt.buttons[0].setFocus()
-        self.assertEqual(fmt.note.text(), "Picks the smoothest one your PC handles well")
-        bar.row("resolution").focus()                               # away from the row: the chosen one
+        fmt.buttons[3].setFocus()
         self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        fmt.buttons[0].setFocus()                                   # back on Auto: what it records in
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
+        fmt.buttons[2].setFocus()
+        bar.row("resolution").focus()                               # away from the row: the chosen one (Auto)
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
         pump(self.app, 0.05)
         self.shot(bar, "format-auto-av1", "format")
         right = fmt.note.mapTo(bar, fmt.note.rect().topRight()).x()
@@ -1109,9 +1112,12 @@ class OverlayOffscreen(unittest.TestCase):
 
     def test_format_row_disables_what_the_chip_cant_record(self):
         bar, fmt, daemon = self.open_format(format_allowed=["auto", "h264", "h265"], format_auto="h264")
-        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (H.264)", "H.264", "H.265", "AV1"])
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])
         self.assertEqual([b.isEnabled() for b in fmt.buttons], [True, True, True, False])
-        self.assertEqual(fmt.note.text(), "Your graphics chip can't record AV1")
+        self.assertEqual(fmt.note.text(), "Your graphics chip can't record AV1")   # why AV1 is greyed
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Recording in H.264 on this PC")
+        bar.row("resolution").focus()
         pump(self.app, 0.05)
         self.shot(bar, "format-no-av1", "format")
         QTest.mouseClick(fmt.buttons[3], Qt.LeftButton)              # AV1: nothing happens
@@ -1134,6 +1140,22 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(fmt.value, "av1")
         self.assertEqual(fmt.buttons[3].visual_state, "capped")    # still shown as chosen, dimmed
         self.assertEqual(fmt.note.text(), "Your graphics chip can't record H.265 or AV1")
+
+    def test_format_auto_says_what_is_really_recorded(self):
+        # Auto saved: the daemon's format_effective (what the recorder really uses) wins
+        bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1",
+                                        format_effective="h265")
+        self.assertEqual(fmt.buttons[0].text(), "Auto")
+        self.assertEqual(fmt.note.text(), "Recording in H.265 on this PC")
+        self.app.removeEventFilter(bar)
+        bar.close()
+        pump(self.app, 0.05)
+        # another format saved: format_effective is that one's, Auto's note keeps format_auto
+        _bar, fmt, _d = self.open_format(values={"format": "h264"}, format_allowed=["auto", "h264", "h265", "av1"],
+                                         format_auto="av1", format_effective="h264")
+        self.assertEqual(fmt.note.text(), "Plays everywhere")
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
 
     def test_format_row_from_an_older_daemon(self):
         # no format_* fields: every format offered, Auto without a pick
