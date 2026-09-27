@@ -377,6 +377,9 @@ check_deps() {
     if py_try 'from PySide6 import QtCore, QtGui, QtWidgets'; then
         ok "PySide6"
         if py_try 'from PySide6 import QtMultimedia'; then ok "PySide6 QtMultimedia (plays clips in the gallery)"
+        elif [[ "$PYTHON" == "$VENV_DIR"/* ]]; then
+            # PySide6 came from PyPI (e.g. Ubuntu 24.04): nothing to install.
+            warn "Everything works, except playing clips in the gallery. That needs a newer system (Ubuntu 25.04 or newer)."
         else optneed media "PySide6 QtMultimedia (plays clips in the gallery)"; fi
     else
         need pyside "PySide6"
@@ -494,9 +497,9 @@ install_system_deps() {
     esac
 
     plan_packages
-    if [ -n "$UNAVAILABLE" ]; then warn "not in your repos (skipped): $UNAVAILABLE"; fi
+    if [ -n "$UNAVAILABLE" ]; then warn "Not available on $OS_NAME, so skipped: $UNAVAILABLE"; fi
     if [ "$PYSIDE_FROM_PYPI" = 1 ]; then
-        warn "your distro has no PySide6 package — the installer will fetch it from PyPI into Momento's own folder"
+        warn "$OS_NAME has no PySide6 package (the toolkit for Momento's bar). It will be downloaded into Momento's own folder instead."
     fi
     if [ -z "$WANT$EXTRA" ]; then
         ok "nothing to install from the repos"
@@ -581,20 +584,20 @@ pyside_venv() {
     py_try 'import gi, sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || return 0
     [ "$FAMILY" != fedora ] || [ "$ATOMIC" = 0 ] || return 0
     echo
-    warn "PySide6 (the Qt toolkit for the clip bar) isn't installed and your distro doesn't package it."
-    if ! ask "Download PySide6-Essentials (~100 MB) from PyPI into $VENV_DIR?"; then return 0; fi
+    warn "Momento's bar needs PySide6, and $OS_NAME doesn't have it as a package."
+    if ! ask "Download it (about 100 MB) into Momento's own folder ($VENV_DIR)?"; then return 0; fi
     local base="$PYTHON"
     case "$base" in "$VENV_DIR"/*) base=/usr/bin/python3 ;; esac
     rm -rf "${VENV_DIR:?}"
     mkdir -p "$LIB_DIR"
     if ! "$base" -m venv --system-site-packages "$VENV_DIR"; then
-        bad "couldn't create a venv (on Debian/Ubuntu: install python3-venv)"; rm -rf "${VENV_DIR:?}"; return 0
+        bad "Couldn't set up Momento's own Python folder. Install python3-venv, then run the installer again."; rm -rf "${VENV_DIR:?}"; return 0
     fi
     if "$VENV_DIR/bin/python3" -m pip install --quiet --disable-pip-version-check PySide6-Essentials; then
         ok "PySide6 -> $VENV_DIR"
         INSTALLED_PKGS="${INSTALLED_PKGS:+$INSTALLED_PKGS }PySide6-Essentials (PyPI, private venv)"
     else
-        bad "pip install PySide6-Essentials failed"; rm -rf "${VENV_DIR:?}"
+        bad "Couldn't download PySide6. Check your internet connection, then run the installer again."; rm -rf "${VENV_DIR:?}"
     fi
 }
 
