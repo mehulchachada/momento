@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import codecs, config, durations, protocol, quality, settings, storage
+from . import codecs, config, durations, protocol, quality, saves, settings, storage
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +285,9 @@ class Daemon:
         # A format whose start killed the last process (codecs.START_GUARD): told once,
         # when recording in another one.
         self._crash_notice: str | None = None
+        # Saves (clips and keep_history's spans): one export at a time, in order,
+        # in the queue's own thread (see saves.py). status.saves lists them.
+        self.saves = saves.SaveQueue(on_done=self._save_done)
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -302,6 +305,7 @@ class Daemon:
         # Pick up footage from before a restart/reboot (drops strays and the
         # unfinished last segment); saveable even if capture cannot start.
         self.ring.recover()
+        self._clean_export_leftovers()
         self.server = ipc.Server(config.SOCKET_PATH, self.handle)
         self.server.start()
         if self.bus is not None:
@@ -357,6 +361,9 @@ class Daemon:
                 self.recorder.stop()
             except Exception:  # noqa: BLE001
                 log.exception("recorder stop failed")
+        # A save in progress gets a short grace period, then is cancelled (its temp
+        # file removed); waiting ones are cancelled. Before the buffer is cleared.
+        self.saves.shutdown()
         if self.shortcut is not None and hasattr(self.shortcut, "close"):
             try:
                 self.shortcut.close()
@@ -760,52 +767,30 @@ class Daemon:
                "dialog-information")
 
     def _save_hour(self, until: float) -> None:
-        """keep_history: export the footage since the previous mark, like a save (off the main loop)."""
-        from . import exporter
-
+        """keep_history: export the footage since the previous mark, like a save (in the save queue)."""
         length = self.ring.max_seconds
-        sel = self.ring.select_last(length, until=until)
-        if sel is None:
-            return
-        # "Saved the last hour to Videos" / "Saved the last 15 minutes to Videos"
-        what = "last hour" if length == 3600 else f"last {span_label(length)}"
-        need = sum(_size(s.path) for s in sel.segments) + storage.SAVE_MARGIN
         try:
-            free = storage.free_bytes(self.cfg["output"]["dir"])
-        except OSError as e:
-            log.warning("cannot check free space for the hour: %s", e)
-            free = need
-        if free < need:
-            self.ring.release(sel)
-            log.warning("not saving the %s: needs %s, %s free", what, storage.human(need), storage.human(free))
+            job = self.saves.new(int(length), kind="hour")
+        except saves.Busy:
+            return  # closing
+        # "Saved the last hour to Videos" / "Saved the last 15 minutes to Videos"
+        job.info["what"] = "last hour" if length == 3600 else f"last {span_label(length)}"
+        job.until = until
+        self._queue_save(job, datetime.now())
+
+    def _finish_hour(self, job) -> None:
+        result, what = job.result or {}, job.info.get("what", "last hour")
+        if result.get("ok"):
+            notify(self.bus, f"Saved the {what} to Videos", result["path"], "media-record")
+        elif result.get("code") == "no_storage":
+            need, free = job.info.get("need", 0), job.info.get("free", 0)
             notify(self.bus, f"Momento: couldn't save the {what} — disk full",
                    f"Needs {storage.human(need)}, {storage.human(free)} free. Recording continues.",
                    "dialog-warning")
+        elif result.get("error") == "nothing recorded yet":
             return
-        when = datetime.now()
-        log.info("saving the %s (%.0f s of footage)", what, sel.duration)
-
-        def work() -> None:
-            try:
-                path = exporter.export(sel, exporter.output_path(self.cfg, sel.duration, when))
-                result = {"ok": True, "path": str(path), "seconds": round(sel.duration, 2)}
-            except Exception as e:  # noqa: BLE001
-                log.exception("saving the %s failed", what)
-                result = {"ok": False, "error": str(e) or e.__class__.__name__}
-            finally:
-                self.ring.release(sel)
-            from gi.repository import GLib
-
-            GLib.idle_add(self._finish_hour, result, what)
-
-        threading.Thread(target=work, name="save-hour", daemon=True).start()
-
-    def _finish_hour(self, result: dict, what: str) -> bool:
-        if result.get("ok"):
-            notify(self.bus, f"Saved the {what} to Videos", result["path"], "media-record")
-        else:
+        elif result.get("code") != "cancelled":
             notify(self.bus, f"Momento: couldn't save the {what}", result.get("error", ""), "dialog-error")
-        return False
 
     # --- disk space ---------------------------------------------------------------
 
@@ -815,7 +800,9 @@ class Daemon:
         A resolution taller than the known source counts at the size really recorded.
         """
         if reclaimable is None:
-            reclaimable = storage.dir_bytes(self.buffer_dir)
+            # Footage that saves in the queue still hold beyond the replay length
+            # isn't room a new buffer can reuse until they finish.
+            reclaimable = max(0, storage.dir_bytes(self.buffer_dir) - self.ring.held_bytes())
         return storage.check(cfg or self.cfg, reclaimable, self.source_size)
 
     def _start_recorder(self, reclaimable: int | None = None, interactive: bool = False) -> bool:
@@ -1309,6 +1296,8 @@ class Daemon:
             # Momento here: "AV1 stopped working on this PC, so Momento switched to H.264".
             "format_reason": self.format_reason(),
             "storage": self._storage_status(),
+            # Recent saves (running, waiting, and the last few finished), oldest first.
+            "saves": self.saves.snapshot(),
         }
         if self.state == "no_storage" and not self.paused and self.storage_error:
             result["error"] = self.storage_error
@@ -1317,6 +1306,12 @@ class Daemon:
         return result
 
     def save(self, msg: dict, reply) -> None:
+        """Save the newest ``seconds`` of footage as a clip, in the save queue.
+
+        ``wait`` (default true): reply once the clip is written (the CLI). With
+        ``"wait": false`` the reply comes at once with the job's id; the result is
+        in ``status.saves`` and a desktop notification (the clip bar does this).
+        """
         try:
             seconds = msg.get("seconds")
             if isinstance(seconds, bool):
@@ -1327,8 +1322,20 @@ class Daemon:
         except (TypeError, ValueError) as e:
             reply({"ok": False, "error": f"bad duration: {e}"})
             return
+        wait = msg.get("wait") is not False
         if seconds > self.ring.max_seconds:
-            reply({"ok": False, "code": "too_long", "error": too_long_message(seconds, self.ring.max_seconds)})
+            error = too_long_message(seconds, self.ring.max_seconds)
+            log.info("clip not saved: %s", error)
+            if not wait:   # nobody sees the reply: say it on the desktop
+                notify(self.bus, "Momento: clip too long", error, "dialog-warning")
+            reply({"ok": False, "code": "too_long", "error": error})
+            return
+        try:
+            job = self.saves.new(seconds)
+        except saves.Busy as e:
+            log.warning("clip not saved: %s", e)
+            notify(self.bus, "Momento: still saving", f"{saves.BUSY}.", "dialog-warning")
+            reply({"ok": False, "code": "busy", "error": saves.BUSY})
             return
         t_req = time.time()
         until = msg.get("until")
@@ -1336,14 +1343,20 @@ class Daemon:
             # The clip bar asks to end the clip when it was opened, so the bar
             # itself (visible on screen since then) isn't in the clip.
             t_req = float(until)
+        # The clip covers the moment it was asked for, however long it waits in the queue.
+        job.until = t_req
         when = datetime.now()
+        if wait:
+            job.reply = reply
+        else:
+            reply({"ok": True, "job": job.id, "state": "queued" if self.saves.ahead(job) else "saving"})
         done = []
 
         def after_flush(*_args) -> None:
             if done:
                 return
             done.append(True)
-            self._export(seconds, t_req, when, reply)
+            self._queue_save(job, when)
 
         if self.recorder is not None and getattr(self.recorder, "recording", False):
             try:
@@ -1353,17 +1366,23 @@ class Daemon:
                 log.exception("flush failed; saving what is already closed")
         after_flush()
 
-    def _export(self, seconds: int, t_req: float, when: datetime, reply) -> None:
+    def _queue_save(self, job, when: datetime) -> None:
+        """Main loop, after the flush: pin the footage up to job.until now, then queue the export."""
+        sel = self.ring.select_last(job.requested, until=job.until)
+        if sel is None:
+            self.saves.fail(job, {"ok": False, "error": "nothing recorded yet"})
+            return
+        ahead = self.saves.ahead(job)
+        log.info("save #%d asked: %s (%.0f s of footage, %d segments pinned)%s", job.id,
+                 job.info.get("what") or f"last {durations.label(job.requested)}", sel.duration,
+                 len(sel.segments), f", {ahead} ahead of it" if ahead else "")
+        self.saves.submit(job, run=lambda j: self._run_save(j, sel, when),
+                          release=lambda: self.ring.release(sel))
+
+    def _run_save(self, job, sel, when: datetime) -> dict:
+        """The save queue's thread: check the space, export, and say how it went (a result dict)."""
         from . import exporter
 
-        # The newest `seconds` of footage, across pauses/restarts, ending at the request.
-        sel = self.ring.select_last(seconds, until=t_req)
-        if sel is None:
-            result = {"ok": False, "error": "nothing recorded yet"}
-            log.info("clip not saved: nothing recorded yet")
-            notify(self.bus, "Momento: nothing to save", "Nothing has been recorded yet.", "dialog-warning")
-            reply(result)
-            return
         need = sum(_size(s.path) for s in sel.segments) + storage.SAVE_MARGIN
         try:
             free = storage.free_bytes(self.cfg["output"]["dir"])
@@ -1371,37 +1390,81 @@ class Daemon:
             log.warning("cannot check free space for the clip: %s", e)
             free = need
         if free < need:
-            self.ring.release(sel)
-            error = (f"Not enough space to save this clip: needs {storage.human(need)}, "
-                     f"{storage.human(free)} free")
-            log.warning("%s", error)
-            notify(self.bus, "Momento: not enough disk space", error, "dialog-warning")
-            reply({"ok": False, "error": error, "code": "no_storage"})
+            job.info.update(need=need, free=free)
+            return {"ok": False, "code": "no_storage",
+                    "error": (f"Not enough space to save this clip: needs {storage.human(need)}, "
+                              f"{storage.human(free)} free")}
+        out = exporter.output_path(self.cfg, sel.duration, when)
+        log.info("save #%d started: %.0f s of footage -> %s", job.id, sel.duration, out)
+        try:
+            path = exporter.export(sel, out, cancel=job.cancel)
+        except exporter.ExportCancelled:
+            return {"ok": False, "code": "cancelled", "error": saves.CANCELLED}
+        except Exception as e:  # noqa: BLE001
+            log.exception("save #%d: export failed", job.id)
+            return {"ok": False, "error": str(e) or e.__class__.__name__}
+        result = {"ok": True, "path": str(path), "seconds": round(sel.duration, 2),
+                  "requested": job.requested, "partial": sel.duration < job.requested - 1.5}
+        if sel.note:  # e.g. "earlier footage used a different resolution"
+            result["reason"] = sel.note
+        job.info["params"] = clip_params(sel)
+        return result
+
+    def _save_done(self, job) -> None:
+        """A save ended (any thread): log it, answer a waiting client, tell the desktop and the bar."""
+        r = job.result or {}
+        took = f" in {time.monotonic() - job.started:.1f} s" if job.started else ""
+        if r.get("ok"):
+            log.info("clip saved%s: %s (%.0f s of %d s asked), %s%s", took, r["path"], r["seconds"],
+                     job.requested, job.info.get("params", "?"), f"; {r['reason']}" if r.get("reason") else "")
+        elif r.get("code") == "cancelled":
+            log.info("%s (save #%d%s)", saves.CANCELLED, job.id, took)
+        else:
+            log.warning("clip not saved%s: %s", took, r.get("error"))
+        if job.reply is not None:
+            try:
+                job.reply({**r, "job": job.id} if r.get("ok") else r)
+            except Exception:  # noqa: BLE001 - the client may be gone
+                log.debug("could not answer save #%d", job.id)
+        if r.get("code") == "cancelled" or self._stopping:
+            return  # closing: logged only
+        from gi.repository import GLib
+
+        GLib.idle_add(self._announce_save, job)
+
+    def _announce_save(self, job) -> bool:
+        """Main loop: one desktop notification per save, and the bar's sound."""
+        if job.kind == "hour":
+            self._finish_hour(job)
+        else:
+            self._finish_save(job.result or {})
+        if job.kind == "clip":
+            self._tell_bar({"cmd": "saved", "ok": bool((job.result or {}).get("ok")), "job": job.id})
+        return False
+
+    def _tell_bar(self, msg: dict) -> None:
+        """Best effort: pass ``msg`` to the resident bar (it plays the save sound, hidden or not)."""
+        if not self._bar_managed or not self.keep_bar_loaded() or self._stopping:
             return
 
         def work() -> None:
+            from . import ipc
+
             try:
-                out = exporter.output_path(self.cfg, sel.duration, when)
-                path = exporter.export(sel, out)
-                result = {
-                    "ok": True, "path": str(path), "seconds": round(sel.duration, 2),
-                    "requested": seconds, "partial": sel.duration < seconds - 1.5,
-                }
-                if sel.note:  # e.g. "earlier footage used a different resolution"
-                    result["reason"] = sel.note
-                log.info("clip saved: %s (%.0f s of %d s asked), %s%s", path, sel.duration, seconds,
-                         clip_params(sel), f"; {sel.note}" if sel.note else "")
-            except Exception as e:  # noqa: BLE001
-                log.exception("export failed")
-                result = {"ok": False, "error": str(e) or e.__class__.__name__}
-            finally:
-                self.ring.release(sel)
-            from gi.repository import GLib
+                ipc.request(msg, timeout=1.0, path=config.OVERLAY_SOCKET)
+            except Exception as e:  # noqa: BLE001 - no bar, or an older one: no sound
+                log.debug("clip bar not told about the save: %s", e)
 
-            GLib.idle_add(self._finish_save, result)
-            reply(result)
+        threading.Thread(target=work, name="bar-saved", daemon=True).start()
 
-        threading.Thread(target=work, name="export", daemon=True).start()
+    def _clean_export_leftovers(self) -> None:
+        """At start: remove the temp files of a save that a crash interrupted (logged once)."""
+        from . import exporter
+
+        gone = exporter.clean_leftovers(self.cfg["output"]["dir"])
+        if gone:
+            log.info("removed %d leftover file(s) of an unfinished save: %s", len(gone),
+                     ", ".join(p.name for p in gone))
 
     def screenshot(self, reply) -> None:
         """Save the next recorded frame as a PNG in <output dir>/Images (only while recording).
@@ -1470,7 +1533,8 @@ class Daemon:
             notify(self.bus, "Momento: screenshot failed", result.get("error", ""), "dialog-error")
         return False
 
-    def _finish_save(self, result: dict) -> bool:
+    def _finish_save(self, result: dict) -> None:
+        """The one notification a clip save gets, success or failure, in plain words."""
         if result.get("ok"):
             got = durations.label(result["seconds"])
             summary = f"Saved last {got}"
@@ -1478,9 +1542,14 @@ class Daemon:
                 summary += f" (asked for {durations.label(result['requested'])})"
             body = result["path"] + (f"\n{result['reason'].capitalize()}." if result.get("reason") else "")
             notify(self.bus, summary, body, "media-record")
+        elif result.get("error") == "nothing recorded yet":
+            notify(self.bus, "Momento: nothing to save", "Nothing has been recorded yet.", "dialog-warning")
+        elif result.get("code") == "no_storage":
+            notify(self.bus, "Momento: not enough disk space", result.get("error", ""), "dialog-warning")
         else:
-            notify(self.bus, "Momento: save failed", result.get("error", ""), "dialog-error")
-        return False
+            error = str(result.get("error") or "").strip().splitlines()
+            notify(self.bus, "Momento: save failed",
+                   "The clip couldn't be written" + (f": {error[-1]}" if error else "."), "dialog-error")
 
 
 def clip_params(sel) -> str:

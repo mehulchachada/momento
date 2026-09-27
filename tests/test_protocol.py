@@ -111,6 +111,7 @@ class _DaemonCase(unittest.TestCase):
         self.d.ring.recover()
         self.d.recorder = _FakeRecorder(self.cfg, self.d.ring, self.d._on_state)
         self.d._start_recorder()
+        self.addCleanup(lambda: self.d.saves.shutdown(grace=5))   # no save thread outlives a test
 
     # --- helpers --------------------------------------------------------------------
 
@@ -186,7 +187,7 @@ class DaemonContractTest(_DaemonCase):
 
         self.fill(3)
 
-        def fake_export(sel, out):
+        def fake_export(sel, out, **kw):
             Path(out).write_bytes(b"mp4")
             return Path(out)
 
@@ -199,6 +200,37 @@ class DaemonContractTest(_DaemonCase):
             self.assertEqual(r["requested"], 300)
             self.assertTrue(r["partial"])
             self.assertAlmostEqual(r["seconds"], 30.0, delta=0.5)
+
+    def test_save_no_wait(self):
+        from momento import exporter, saves
+
+        self.fill(3)
+        gate = threading.Event()
+
+        def slow_export(sel, out, cancel=None):
+            gate.wait(5)
+            Path(out).write_bytes(b"mp4")
+            return Path(out)
+
+        with mock.patch.object(exporter, "export", side_effect=slow_export):
+            r = self.check({"cmd": "save", "seconds": 20, "wait": False}, ok=True)
+            self.assertEqual((r["job"], r["state"]), (1, "saving"))
+            self.assertNotIn("path", r)
+            r = self.check({"cmd": "save", "seconds": 10, "wait": False}, ok=True)
+            self.assertEqual((r["job"], r["state"]), (2, "queued"))
+            st = self.check({"cmd": "status"}, ok=True)
+            self.assertEqual([(j["job"], j["state"]) for j in st["saves"]], [(1, "saving"), (2, "queued")])
+            for _ in range(saves.MAX_WAITING - 1):
+                self.check({"cmd": "save", "seconds": 10, "wait": False}, ok=True)
+            self.check({"cmd": "save", "seconds": 10, "wait": False}, ok=False, code="busy")
+            gate.set()
+            deadline = time.monotonic() + 5
+            while self.d.saves.busy() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            st = self.check({"cmd": "status"}, ok=True)
+            self.assertEqual({j["state"] for j in st["saves"]}, {"saved"})
+            self.assertEqual(len(st["saves"]), saves.HISTORY)          # the last 10 finished
+            self.assertTrue(all(Path(j["path"]).exists() for j in st["saves"]))
 
     def test_save_errors(self):
         r = self.check({"cmd": "save", "seconds": 30}, ok=False)
@@ -477,7 +509,7 @@ class DaemonContractTest(_DaemonCase):
         self.assertGreater(st["buffered"], 0)
         from momento import exporter
 
-        with mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out)):
+        with mock.patch.object(exporter, "export", side_effect=lambda sel, out, **kw: Path(out)):
             self.check({"cmd": "save", "seconds": 15}, ok=True)          # saving works while stopped
         r = self.check({"cmd": "settings"}, ok=True)
         self.assertEqual((r["values"]["keep_history"], r["values"]["hour_warning"], r["values"]["instant_bar"],
@@ -669,7 +701,7 @@ class CoverageTest(_DaemonCase):
     def test_every_documented_command_is_handled(self):
         from momento import exporter
 
-        ctx = [mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out))]
+        ctx = [mock.patch.object(exporter, "export", side_effect=lambda sel, out, **kw: Path(out))]
         if _gi_available():
             from gi.repository import GLib
 
@@ -798,6 +830,19 @@ class ValidatorTest(unittest.TestCase):
         self.assertTrue(validate_reply("pause", {"ok": False}))                       # error text missing
         self.assertTrue(validate_reply("pause", {"ok": False, "error": "x", "code": "nope"}))
         self.assertTrue(validate_reply("frobnicate", {"ok": True}))
+        # save with "wait": false, and status.saves
+        self.assertEqual(validate_reply("save", {"ok": True, "job": 3, "state": "queued"}), [])
+        self.assertTrue(validate_reply("save", {"ok": True, "job": 3, "state": "done"}))   # not a job state
+        self.assertTrue(validate_reply("save", {"ok": True, "job": "3", "state": "saving"}))
+        job = {"job": 1, "kind": "clip", "state": "saved", "requested": 30, "asked_at": 1.0, "finished_at": 2.0,
+               "path": "/x.mp4", "seconds": 30, "error": None, "code": None}
+        status = {"ok": True, "state": "recording", "recording": True, "buffered": 1, "max_seconds": 900,
+                  "source": None, "encoder": None, "output_dir": "/x", "resolution": "1080p", "quality": "high",
+                  "bitrate_kbps": 1, "fps": 60, "storage": {"ok": True, "free": 1, "required": 1, "reclaimable": 0, "path": "/"}}
+        self.assertEqual(validate_reply("status", {**status, "saves": [job]}), [])
+        self.assertTrue(validate_reply("status", {**status, "saves": [{**job, "state": "lost"}]}))
+        self.assertTrue(validate_reply("status", {**status, "saves": [{**job, "code": "oops"}]}))
+        self.assertTrue(validate_reply("status", {**status, "saves": [{"job": 1}]}))
         status = {"ok": True, "state": "paused", "recording": False, "buffered": 0, "max_seconds": 3600,
                   "source": None, "encoder": None, "output_dir": "/v", "resolution": "1080p",
                   "quality": "high", "bitrate_kbps": 15000, "fps": 60,
@@ -857,6 +902,8 @@ class ValidatorTest(unittest.TestCase):
 
     def test_requests(self):
         self.assertEqual(validate_request({"cmd": "save", "seconds": "5m"}), [])
+        self.assertEqual(validate_request({"cmd": "save", "seconds": "5m", "wait": False}), [])
+        self.assertTrue(validate_request({"cmd": "save", "seconds": "5m", "wait": "no"}))
         self.assertEqual(validate_request({"cmd": "pick_window"}), [])
         self.assertEqual(validate_request({"cmd": "screenshot"}), [])
         self.assertEqual(validate_request({"cmd": "pause", "reason": "gallery", "pid": 4242}), [])

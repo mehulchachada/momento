@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     presets = ", ".join(label for _, label in durations.PRESETS)
     s = sub.add_parser("save", help="save the last N of footage")
     s.add_argument("duration", type=_duration, help=f"e.g. {presets}, or 90s / 2m")
+    s.add_argument("--no-wait", action="store_true",
+                   help="return at once; a notification says when the clip is ready (`momento status` too)")
     sub.add_parser("screenshot", help="save a picture of what is being recorded (in the Images folder "
                                       "next to your clips)")
     sub.add_parser("status", help="show recorder status")
@@ -281,9 +283,16 @@ def main(argv: list[str] | None = None) -> int:
         return daemon.main(cfg)
 
     if args.command == "save":
-        r = _request({"cmd": "save", "seconds": args.duration})
+        msg = {"cmd": "save", "seconds": args.duration}
+        if args.no_wait:
+            msg["wait"] = False
+        r = _request(msg)
         if r is None:
             return 1
+        if r.get("ok") and args.no_wait:
+            ahead = " (after the saves ahead of it)" if r.get("state") == "queued" else ""
+            print(f"Saving{ahead}: save #{r.get('job')}. A notification says when the clip is ready.")
+            return 0
         if not r.get("ok"):
             print(f"momento: {r.get('error', 'save failed')}", file=sys.stderr)
             if r.get("code") == "too_long":

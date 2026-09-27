@@ -947,6 +947,7 @@ class DaemonControlTest(unittest.TestCase):
         self.d.recorder.start()
 
     def tearDown(self):
+        self.d.saves.shutdown(grace=5)   # no save thread outlives the test
         self._tmp.cleanup()
 
     def call(self, msg, timeout=5):
@@ -1367,10 +1368,16 @@ class DaemonControlTest(unittest.TestCase):
         self.d.ring.closed(seg, now - 10)
         self.d.recorder.recording = False  # no flush round trip
         self.free = storage.SAVE_MARGIN + 999
-        r = self.call({"cmd": "save", "seconds": 30})
-        self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
-        self.assertIn("Not enough space to save this clip", r["error"])
-        self.assertEqual(self.d.ring._segments[0].pins, 0)  # released
+        from gi.repository import GLib
+
+        with mock.patch.object(GLib, "idle_add", lambda fn, *a: fn(*a)):   # the notification, at once
+            r = self.call({"cmd": "save", "seconds": 30})
+            self.assertEqual((r["ok"], r["code"]), (False, "no_storage"))
+            self.assertIn("Not enough space to save this clip", r["error"])
+            self.assertEqual(self.d.ring._segments[0].pins, 0)  # released
+            deadline = time.monotonic() + 5
+            while not self.notes and time.monotonic() < deadline:
+                time.sleep(0.01)
         self.assertEqual(len(self.notes), 1)
 
     def test_save_longer_than_the_replay_is_refused(self):
@@ -2255,8 +2262,8 @@ class DaemonBufferTest(unittest.TestCase):
         self.assertTrue(buf.exists())
         now = _t.time()
         captured = {}
-        orig = self.d._export
-        self.d._export = lambda seconds, t_req, when, reply: (captured.update(t=t_req), reply({"ok": True}))
+        orig = self.d._queue_save
+        self.d._queue_save = lambda job, when: (captured.update(t=job.until), job.reply({"ok": True}))
         try:
             self.call({"cmd": "save", "seconds": 5, "until": now - 2.0})
             self.assertAlmostEqual(captured["t"], now - 2.0, places=3)
@@ -2265,7 +2272,7 @@ class DaemonBufferTest(unittest.TestCase):
             self.call({"cmd": "save", "seconds": 5, "until": True})  # not a number: ignored
             self.assertGreater(captured["t"], now - 1)
         finally:
-            self.d._export = orig
+            self.d._queue_save = orig
 
     def test_stop_keeps_service_running(self):
         buf = self.fill()
@@ -4428,7 +4435,7 @@ class DaemonHourTest(unittest.TestCase):
         self.n = 0
         self.t = 1_000_000.0
 
-        def fake_export(sel, out):
+        def fake_export(sel, out, **kw):
             self.exports.append((sel.duration, [s.pins for s in sel.segments], Path(out)))
             Path(out).write_bytes(b"mp4")
             return Path(out)
@@ -4496,8 +4503,8 @@ class DaemonHourTest(unittest.TestCase):
         self.record(59)
         self.free = storage.SAVE_MARGIN          # the clips folder can't take an hour
         self.record(1)
+        self.wait_for(lambda: "disk full" in self.sent[-1][0])     # checked when its turn comes
         self.assertEqual(self.exports, [])
-        self.assertIn("disk full", self.sent[-1][0])
         self.assertIn("Recording continues", self.sent[-1][1])
         self.assertTrue(all(s.pins == 0 for s in self.d.ring._segments))
         self.assertEqual(self.d.recorder.stopped, 0)
@@ -4558,7 +4565,7 @@ class DaemonHourTest(unittest.TestCase):
         self.assertEqual(self.sent[1][0], "Saved the last 15 minutes to Videos")
         self.free = 0                             # the next one doesn't fit
         self.record(15)
-        self.assertEqual(self.sent[-1][0], "Momento: couldn't save the last 15 minutes — disk full")
+        self.wait_for(lambda: self.sent[-1][0] == "Momento: couldn't save the last 15 minutes — disk full")
         self.assertFalse(any("hour" in text for pair in self.sent for text in pair))
 
     def test_30_minute_warning(self):
@@ -4619,7 +4626,7 @@ class DaemonHistoryTest(unittest.TestCase):
         self.assertEqual((st["state"], st["stop_reason"], st["keep_history"]), ("stopped", "user", True))
         self.assertAlmostEqual(st["buffered"], 30.0)
         self.d.cfg["output"]["dir"] = str(Path(self._tmp.name) / "clips")
-        with mock.patch.object(exporter, "export", side_effect=lambda sel, out: Path(out)):
+        with mock.patch.object(exporter, "export", side_effect=lambda sel, out, **kw: Path(out)):
             r = self.call({"cmd": "save", "seconds": 20})
         self.assertTrue(r["ok"], r)
         self.assertAlmostEqual(r["seconds"], 20.0)
@@ -4642,6 +4649,348 @@ class DaemonHistoryTest(unittest.TestCase):
         self.assertEqual((r["restarted"], r["changed"]), (False, {"hour_warning": 3}))
         self.assertEqual(self.d.cfg["buffer"]["warn_minutes"], 3)
         self.assertEqual(self.d.recorder.stopped, 0)
+
+
+@unittest.skipUnless(_gi_available(), "PyGObject not available")
+
+class DaemonSaveQueueTest(unittest.TestCase):
+    """Saves in the daemon's queue: non-blocking replies, order, press time, the cap, failures,
+    pins, shutdown (fake Recorder, fake exporter unless a test says otherwise)."""
+
+    call = DaemonControlTest.call
+    tearDown = DaemonControlTest.tearDown
+
+    def setUp(self):
+        from gi.repository import GLib
+
+        from momento import daemon, exporter
+
+        self.real_export = exporter.export
+        DaemonControlTest.setUp(self)
+        self.buf = Path(self.d.cfg["buffer"]["dir"])
+        self.buf.mkdir(parents=True, exist_ok=True)
+        self.d.ring.recover()
+        self.clips = Path(self._tmp.name) / "clips"
+        self.d.cfg["output"]["dir"] = str(self.clips)
+        self.d.recorder.recording = False       # no flush round trip (FakeRecorder has none)
+        self.n = 0
+        self.t = time.time() - 300
+        self.record(300)                        # five minutes of 10 s segments, ending now
+        self.notes.clear()                      # (the replay's own warnings)
+        self.bodies.clear()
+        self.gate = threading.Event()           # the fake export waits for this
+        self.gate.set()
+        self.exports = []                       # (selection's end, files present, out)
+        self.running = 0
+        self.most = 0                           # most exports running at once
+        self.fail_with = None
+        self.bar = []
+
+        def fake_export(sel, out, cancel=None):
+            self.running += 1
+            self.most = max(self.most, self.running)
+            try:
+                self.exports.append((sel.end, all(Path(s.path).exists() for s in sel.segments), Path(out)))
+                while not self.gate.wait(0.01):
+                    if cancel is not None and cancel.is_set():
+                        raise exporter.ExportCancelled("cancelled")
+                if self.fail_with:
+                    raise exporter.ExportError(self.fail_with)
+                Path(out).write_bytes(b"mp4")
+                return Path(out)
+            finally:
+                self.running -= 1
+        for target, attr, new in ((exporter, "export", fake_export),
+                                  (GLib, "idle_add", lambda fn, *a: fn(*a)),   # results delivered at once
+                                  (daemon.Daemon, "_tell_bar", lambda d, msg: self.bar.append(msg))):
+            patcher = mock.patch.object(target, attr, new)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def record(self, seconds, length=10.0):
+        for _ in range(int(seconds / length)):
+            seg = self.buf / f"seg{self.n:08d}.ts"
+            seg.write_bytes(b"x" * 188)
+            self.d.ring.opened(seg, self.t, session="s", width=1920, height=1080, fps=60, codec="h264", audio=True)
+            self.d.ring.closed(seg, self.t + length)
+            self.n += 1
+            self.t += length
+
+    def wait_for(self, cond, timeout=5):
+        deadline = time.monotonic() + timeout
+        while not cond() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(cond())
+
+    def saves(self):
+        return {j["job"]: j for j in self.d.status()["saves"]}
+
+    def idle(self):
+        self.wait_for(lambda: not self.d.saves.busy() and self.d.saves.running() is None)
+
+    def test_no_wait_returns_the_job_and_status_has_the_result(self):
+        from momento import protocol
+
+        self.gate.clear()
+        r = self.call({"cmd": "save", "seconds": 20, "wait": False})
+        self.assertEqual(r, {"ok": True, "job": 1, "state": "saving"})
+        self.assertEqual(protocol.validate_reply("save", r), [])
+        self.wait_for(lambda: self.saves()[1]["state"] == "saving")
+        self.assertEqual(self.notes, [])                            # nothing to say yet
+        self.gate.set()
+        self.wait_for(lambda: self.saves()[1]["state"] == "saved")
+        job = self.saves()[1]
+        self.assertTrue(Path(job["path"]).exists())
+        self.assertEqual((job["requested"], job["seconds"], job["kind"], job["error"]), (20, 20.0, "clip", None))
+        self.assertIsNotNone(job["finished_at"])
+        self.assertEqual(protocol.validate_reply("status", self.d.status()), [])
+        self.assertEqual(self.notes, ["Saved last 20s"])            # one notification, with the file
+        self.assertEqual(self.bodies[0][0], job["path"])
+        self.assertEqual(self.bar, [{"cmd": "saved", "ok": True, "job": 1}])   # the bar plays the sound
+        self.assertEqual(self.d.ring.pinned(), 0)
+
+    def test_blocking_save_still_answers_with_the_clip(self):
+        r = self.call({"cmd": "save", "seconds": 20})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual((r["job"], r["requested"], r["partial"]), (1, 20, False))
+        self.assertTrue(Path(r["path"]).exists())
+
+    def test_saves_run_one_at_a_time_in_order(self):
+        self.gate.clear()
+        states = [self.call({"cmd": "save", "seconds": s, "wait": False})["state"] for s in (10, 20, 30)]
+        self.assertEqual(states, ["saving", "queued", "queued"])
+        self.wait_for(lambda: len(self.exports) == 1)
+        time.sleep(0.05)
+        self.assertEqual(len(self.exports), 1)                       # the others wait
+        self.assertEqual([j["state"] for j in self.saves().values()], ["saving", "queued", "queued"])
+        self.gate.set()
+        self.wait_for(lambda: [j["state"] for j in self.saves().values()] == ["saved"] * 3)
+        self.assertEqual(self.most, 1)                               # never two exports at once
+        self.assertEqual([self.saves()[i]["seconds"] for i in (1, 2, 3)], [10, 20, 30])
+        self.assertEqual(self.notes, ["Saved last 10s", "Saved last 20s", "Saved last 30s"])
+        # two saves of the same moment are two clips
+        self.call({"cmd": "save", "seconds": 10})
+        self.call({"cmd": "save", "seconds": 10})
+        self.assertEqual(len({p for *_x, p in self.exports}), 5)
+
+    def test_a_queued_save_covers_the_moment_it_was_asked_for(self):
+        self.d.ring.set_max_seconds(60)                              # a short replay: it rolls fast
+        self.gate.clear()
+        self.call({"cmd": "save", "seconds": 30, "wait": False})     # this one holds the queue
+        pressed = self.d.ring.latest_end()
+        self.call({"cmd": "save", "seconds": 60, "wait": False, "until": pressed - 5})
+        self.record(600)                                             # 10 more minutes while it waits
+        self.assertAlmostEqual(self.d.status()["buffered"], 60.0)    # the replay itself rolled on
+        self.assertGreater(self.d.ring.held_bytes(), 0)              # the queued save's footage is held
+        self.gate.set()
+        self.idle()
+        end, present, _out = self.exports[1]
+        self.assertAlmostEqual(end, pressed - 5)                     # its own moment, not "now"
+        self.assertTrue(present)                                     # nothing it needed was deleted
+        self.assertAlmostEqual(self.saves()[2]["seconds"], 60.0)
+        self.assertEqual((self.d.ring.pinned(), self.d.ring.held_bytes()), (0, 0))   # released, then pruned
+        self.assertLessEqual(len(list(self.buf.glob("*.ts"))), 10)
+
+    def test_the_queue_is_capped(self):
+        from momento import protocol, saves
+
+        self.gate.clear()
+        for _ in range(1 + saves.MAX_WAITING):                       # one running + ten waiting
+            self.assertTrue(self.call({"cmd": "save", "seconds": 10, "wait": False})["ok"])
+        r = self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.assertEqual((r["ok"], r["code"], r["error"]), (False, "busy", saves.BUSY))
+        self.assertEqual(protocol.validate_reply("save", r), [])
+        self.assertEqual(self.notes, ["Momento: still saving"])
+        self.assertEqual(self.bodies[0][0], "Still saving your earlier clips, try again in a moment.")
+        self.gate.set()
+        self.idle()
+        self.assertEqual(len(self.exports), 11)
+        r = self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.assertTrue(r["ok"], r)                                  # room again
+
+    def test_failures_are_told_in_plain_words(self):
+        from momento import storage
+
+        self.fail_with = "Invalid data found when processing input"
+        self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.idle()
+        self.assertEqual(self.notes[-1], "Momento: save failed")
+        self.assertEqual(self.bodies[-1][0], "The clip couldn't be written: Invalid data found when processing input")
+        self.assertEqual(self.bar[-1], {"cmd": "saved", "ok": False, "job": 1})
+        self.assertEqual(self.saves()[1]["state"], "failed")
+        self.fail_with = None
+        self.free = storage.SAVE_MARGIN                              # no space, checked when its turn comes
+        self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.idle()
+        self.assertEqual(self.notes[-1], "Momento: not enough disk space")
+        self.assertEqual(self.saves()[2]["code"], "no_storage")
+        r = self.call({"cmd": "save", "seconds": "30m", "wait": False})   # nobody sees this reply
+        self.assertEqual(r["code"], "too_long")
+        self.assertEqual(self.notes[-1], "Momento: clip too long")
+        self.d.ring.clear()
+        self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.idle()
+        self.assertEqual(self.notes[-1], "Momento: nothing to save")
+        self.assertEqual(len(self.notes), 4)                         # one each
+        self.assertEqual(self.d.ring.pinned(), 0)
+
+    def test_stop_during_a_save_keeps_its_footage_until_it_is_done(self):
+        self.gate.clear()
+        self.call({"cmd": "save", "seconds": 30, "wait": False})
+        self.wait_for(lambda: len(self.exports) == 1)
+        r = self.call({"cmd": "stop"})
+        self.assertTrue(r["buffer_cleared"])
+        self.assertEqual(self.d.status()["buffered"], 0)             # the replay is gone at once
+        held = [p for p in self.buf.glob("*.ts")]
+        self.assertEqual(len(held), 3)                               # but not what the save reads
+        self.assertFalse((self.buf / "index.jsonl").exists())        # and it isn't footage any more
+        self.gate.set()
+        self.idle()
+        self.assertEqual(self.saves()[1]["state"], "saved")
+        self.assertEqual(list(self.buf.glob("*.ts")), [])            # deleted once released
+        self.assertEqual(self.d.ring.pinned(), 0)
+
+    def test_held_footage_is_not_counted_as_reclaimable(self):
+        self.gate.clear()
+        self.call({"cmd": "save", "seconds": 300, "wait": False})    # holds all five minutes
+        self.wait_for(lambda: len(self.exports) == 1)
+        self.d.ring.set_max_seconds(60)
+        self.record(120)
+        from momento import storage
+
+        on_disk = storage.dir_bytes(self.buf)
+        held = self.d.ring.held_bytes()
+        self.assertGreater(held, 0)
+        self.assertEqual(self.d.storage_check()["reclaimable"], on_disk - held)
+        self.gate.set()
+        self.idle()
+        self.assertEqual(self.d.ring.held_bytes(), 0)
+
+    def test_shutdown_waits_for_a_save_that_finishes_in_time(self):
+        from momento import saves
+
+        self.gate.clear()
+        self.call({"cmd": "save", "seconds": 10, "wait": False})
+        self.call({"cmd": "save", "seconds": 20, "wait": False})     # waiting: cancelled at once
+        self.wait_for(lambda: len(self.exports) == 1)
+        threading.Timer(0.2, self.gate.set).start()
+        t0 = time.monotonic()
+        with self.assertLogs("momento.daemon", "INFO") as logs:
+            self.d.stop()
+        self.assertLess(time.monotonic() - t0, saves.SHUTDOWN_GRACE_S)
+        self.assertEqual([j["state"] for j in self.saves().values()], ["saved", "cancelled"])
+        self.assertTrue(any("save cancelled: Momento was closing" in line for line in logs.output))
+        self.assertEqual(len(self.exports), 1)
+        self.assertEqual((self.d.ring.pinned(), self.d.saves.running()), (0, None))
+        self.assertEqual(self.notes, [])                             # closing: logged, not notified
+        r = self.call({"cmd": "save", "seconds": 10})                # nothing new once closing
+        self.assertEqual(r["code"], "busy")
+
+    def test_shutdown_cancels_a_long_save_and_removes_the_partial_file(self):
+        """The real exporter's cancel path, with ffmpeg replaced by a shell that never ends."""
+        from momento import exporter, saves
+
+        started = threading.Event()
+        pids = []
+        lower = exporter.lower_priority
+
+        def endless_cut(segments, offset, duration, out, fmt, list_path, cancel=None):
+            exporter.write_list(segments, list_path)
+            started.set()
+            exporter._run(["sh", "-c", f"printf partial > '{out}'; exec sleep 30"], out, cancel)
+
+        with mock.patch.object(exporter, "export", self.real_export), \
+                mock.patch.object(exporter, "_cut", endless_cut), \
+                mock.patch.object(exporter, "lower_priority", lambda pid: (pids.append(pid), lower(pid))), \
+                mock.patch.object(saves, "SHUTDOWN_GRACE_S", 0.3):
+            self.call({"cmd": "save", "seconds": 30, "wait": False})
+            self.assertTrue(started.wait(5))
+            self.wait_for(lambda: any(p.name.endswith(".tmp.mp4") for p in self.clips.iterdir()))
+            t0 = time.monotonic()
+            with self.assertLogs("momento.daemon", "INFO") as logs:
+                self.d.stop()
+            took = time.monotonic() - t0
+        self.assertLess(took, 0.3 + exporter.KILL_GRACE_S + 1)
+        self.assertTrue(any("save cancelled: Momento was closing" in line for line in logs.output), logs.output)
+        self.assertEqual(list(self.clips.iterdir()), [])             # no clip, no temp file, no list
+        self.assertEqual(self.saves()[1]["state"], "cancelled")
+        self.assertEqual((self.d.ring.pinned(), self.d.saves.running()), (0, None))
+        self.assertFalse(any(t.name == "save-queue" for t in threading.enumerate()))
+        self.assertEqual(len(pids), 1)
+        self.assertFalse(Path(f"/proc/{pids[0]}").exists(), "the export's process outlived the cancel")
+
+    def test_leftovers_of_a_crashed_save_are_removed_at_start(self):
+        self.clips.mkdir(parents=True, exist_ok=True)
+        junk = [".Momento_2026-09-27_10-00-00_30s.tmp.mp4", ".Momento_2026-09-27_10-00-00_30s.segments.txt",
+                ".Momento_2026-09-27_10-00-00_30s.part1.mp4"]
+        keep = ["Momento_2026-09-27_10-00-00_30s.mp4", ".hidden.mp4", "notes.txt"]
+        for name in junk + keep:
+            (self.clips / name).write_bytes(b"x")
+        with self.assertLogs("momento.daemon", "INFO") as logs:
+            self.d._clean_export_leftovers()
+        self.assertEqual(sorted(p.name for p in self.clips.iterdir()), sorted(keep))
+        self.assertEqual(len([line for line in logs.output if "leftover" in line]), 1)
+        with self.assertNoLogs("momento.daemon", "INFO"):
+            self.d._clean_export_leftovers()                         # nothing left: nothing said
+
+
+class ExportPriorityTest(unittest.TestCase):
+    def test_ffmpeg_runs_below_the_game(self):
+        """_run lowers the CPU and I/O priority of what it starts (a shell standing in for ffmpeg)."""
+        from momento import exporter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "prio.txt"
+            # give _run a moment to lower the priority, then report it
+            script = f"sleep 0.3; cut -d' ' -f19 /proc/$$/stat > '{out}'; ionice -p $$ >> '{out}' 2>/dev/null || true"
+            exporter._run(["sh", "-c", script], out)
+            lines = out.read_text().split("\n")
+        self.assertEqual(int(lines[0]), exporter.NICE)
+        if len(lines) > 1 and lines[1]:
+            self.assertEqual(lines[1].strip(), "best-effort: prio 7")
+
+    def test_unsupported_priority_is_ignored(self):
+        from momento import exporter
+
+        with mock.patch.object(os, "setpriority", side_effect=PermissionError("no")), \
+                mock.patch.object(exporter.platform, "machine", return_value="sparc"):
+            exporter.lower_priority(os.getpid())   # no exception, nothing changed
+
+    def test_cancel_stops_the_process_and_raises(self):
+        from momento import exporter
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "x.mp4"
+            cancel = threading.Event()
+            threading.Timer(0.2, cancel.set).start()
+            t0 = time.monotonic()
+            with self.assertRaises(exporter.ExportCancelled):
+                exporter._run(["sh", "-c", "exec sleep 30"], out, cancel)
+            self.assertLess(time.monotonic() - t0, 3)
+
+
+class CLISaveWaitTest(unittest.TestCase):
+    def test_save_blocks_by_default_and_no_wait_returns_at_once(self):
+        import contextlib
+        import io
+
+        from momento import cli, ipc
+
+        sent = []
+
+        def request(msg, timeout=None, **kw):
+            sent.append(msg)
+            if msg.get("wait") is False:
+                return {"ok": True, "job": 4, "state": "queued"}
+            return {"ok": True, "job": 4, "path": "/clips/a.mp4", "seconds": 30, "requested": 30, "partial": False}
+        out = io.StringIO()
+        with mock.patch.object(ipc, "request", side_effect=request), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["save", "30s"]), 0)
+            self.assertEqual(cli.main(["save", "--no-wait", "30s"]), 0)
+        self.assertEqual(sent, [{"cmd": "save", "seconds": 30}, {"cmd": "save", "seconds": 30, "wait": False}])
+        self.assertEqual(out.getvalue().splitlines(),
+                         ["/clips/a.mp4",
+                          "Saving (after the saves ahead of it): save #4. A notification says when the clip is ready."])
 
 
 @unittest.skipUnless(_gi_available(), "PyGObject not available")
