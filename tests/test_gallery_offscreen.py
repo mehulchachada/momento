@@ -1998,6 +1998,44 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(p.closed)                                     # its pipeline let go at once
         self.assertIsNone(g.player)
 
+    def test_full_screen_follows_its_settled_size(self):
+        """Full screen's surface settles its size and scale after it is shown (a layer surface
+        gets its fractional scale later): the player is asked again for the view's device size
+        when it paints, so frames stay 1:1 instead of being resampled on the CPU every frame.
+        An unchanged size asks nothing; the stage painting under full screen asks nothing."""
+        gallery = self.gallery_mod
+        gallery.PLAYER_FACTORY = FakeGstPlayer
+        gallery.AUDIO_FACTORY = None
+        FakeGstPlayer.made = []
+        bar = self.bar()
+        g = self.open(bar)
+        p = FakeGstPlayer.made[-1]
+        self.key(Qt.Key_F)
+        self.assertIsNotNone(g.full)
+        pump(self.app, 0.3)
+        view = g.full
+
+        def device():
+            dpr = view.devicePixelRatioF()
+            return round(view.width() * dpr), round(view.height() * dpr)
+
+        self.assertEqual(p.sizes[-1], device())
+        view.resize(view.width() - 150, view.height() - 90)           # the compositor's size
+        view.repaint()
+        self.assertEqual(p.sizes[-1], device())
+        asked = len(p.sizes)
+        view.repaint()
+        g.stage.repaint()
+        self.assertEqual(len(p.sizes), asked)
+        p.frameReady.emit(p.picture())                                # a frame at that size: 1:1
+        img = view.grab().toImage()
+        self.assertEqual(img.pixelColor(img.width() // 2, img.height() // 2).name(), FakeGstPlayer.COLOR.lower())
+        self.key(Qt.Key_Escape)
+        self.assertIsNone(g.full)
+        self.assertEqual(p.sizes[-1], (round(g.stage.width() * g.stage.devicePixelRatioF()),
+                                       round(g.stage.height() * g.stage.devicePixelRatioF())))
+        self.key(Qt.Key_Escape)
+
     def test_frames_repaint_at_most_at_the_screen_rate(self):
         """A frame that comes sooner than the screen's next refresh waits for it (the newest one
         is painted then); frames at the screen's rate paint at once."""
