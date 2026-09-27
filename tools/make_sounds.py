@@ -203,21 +203,6 @@ def s_shot():
     return _mix(buf, tone(2093.0, 2093.0, 0.050, attack=0.001, tau=0.008), gain=0.35)
 
 
-def s_record():
-    # play / resume / start: rising C5 -> G5
-    return tone(523.25, 783.99, 0.230, attack=0.006, tau=0.090)
-
-
-def s_pause():
-    # falling G5 -> C5
-    return tone(783.99, 523.25, 0.230, attack=0.006, tau=0.090)
-
-
-def s_stop():
-    # low and soft: G4 easing down to E4
-    return tone(392.0, 329.63, 0.320, attack=0.008, tau=0.110, partials=WARM)
-
-
 def s_error():
     # refused: two low soft blips on E4
     buf = tone(329.63, 329.63, 0.080, attack=0.004, tau=0.030, partials=WARM)
@@ -230,17 +215,9 @@ def s_delete():
     return _mix(buf, tone(493.88, 493.88, 0.190, attack=0.003, tau=0.060), at=0.070)
 
 
-SOUNDS = {
-    "move": s_move, "select": s_select, "open": s_open, "close": s_close,
-    "gallery_open": s_gallery_open, "gallery_close": s_gallery_close,
-    "save": s_save, "shot": s_shot, "record": s_record, "pause": s_pause,
-    "stop": s_stop, "error": s_error, "delete": s_delete,
-}
-LEVELS = {"move": MOVE_DBFS}
-
-
 # ---------------------------------------------------------------------------
-# candidate record / pause / stop sounds (not the defaults yet: pick with --use)
+# record / pause / stop: three candidates each; set C is what the bar plays
+# (SOUNDS below), the others stay to compare with (--preview) or to build from (--use)
 #
 # Same family as above: sine partials, raised-cosine attack, exponential decay.
 # Each partial here has its own decay (a multiple of the note's tau), so the upper
@@ -356,6 +333,15 @@ VARIANTS = {
         "C": (stop_c, "one low, warm, rounded C4 with a longer decay, easing onto its pitch"),
     },
 }
+
+
+SOUNDS = {
+    "move": s_move, "select": s_select, "open": s_open, "close": s_close,
+    "gallery_open": s_gallery_open, "gallery_close": s_gallery_close,
+    "save": s_save, "shot": s_shot, "record": record_c, "pause": pause_c,
+    "stop": stop_c, "error": s_error, "delete": s_delete,
+}
+LEVELS = {"move": MOVE_DBFS}
 
 
 def render(name: str, variant: str | None = None) -> array.array:
