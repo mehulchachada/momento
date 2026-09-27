@@ -55,14 +55,25 @@ quality = "high"
 # ~= Mbit/s * 0.11 GB (1080p high: ~1.7 GB); 60 minutes ~= Mbit/s * 0.45 GB.
 bitrate_kbps = 0
 
-# H.264 encoder. "auto" tries hardware first, then software:
-#   vah264enc     AMD / Intel via VA-API (modern GStreamer "va" plugin)
+# Video format. Clips are MP4 either way:
+#   "auto"   the smoothest one your graphics chip records well: AV1 on AMD chips
+#            that can record it (RX 7000, Ryzen 7040 and newer, ROG Ally), else H.264
+#   "h264"   plays everywhere
+#   "h265"   smaller files; some older devices can't play it
+#   "av1"    smoothest on newer hardware; some older devices can't play it
+# Only formats your graphics chip records are used: another one falls back to
+# AV1 -> H.265 -> H.264, whichever works. Change it with:  momento set format av1
+format = "auto"
+
+# Encoder. "auto" follows the format above and tries hardware first:
+#   vah264enc / vah265enc / vaav1enc   AMD / Intel via VA-API (GStreamer "va" plugin)
 #   vah264lpenc   same, low-power encoder entry point (some Intel GPUs)
 #   vaapih264enc  AMD / Intel via the older gstreamer-vaapi plugin
-#   nvh264enc     NVIDIA NVENC
+#   nvh264enc     NVIDIA NVENC (nvh265enc, nvav1enc for the other formats)
 #   qsvh264enc    Intel Quick Sync
-#   x264enc       software (CPU heavy; needs gst-plugins-ugly)
-#   openh264enc   software (Cisco OpenH264)
+#   x264enc       software, H.264 only (CPU heavy; needs gst-plugins-ugly)
+#   openh264enc   software, H.264 only (Cisco OpenH264)
+# Naming one encoder here records in its format, whatever "format" says.
 encoder = "auto"
 
 # Draw the mouse pointer into the recording.

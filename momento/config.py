@@ -54,7 +54,12 @@ DEFAULTS = {
         "quality": "high",
         # 0 = derive from resolution + quality; any number overrides (kbps).
         "bitrate_kbps": 0,
-        # auto | vah264enc | vaapih264enc | nvh264enc | qsvh264enc | x264enc | openh264enc
+        # auto | h264 | h265 | av1: the video format. Auto picks the smoothest one this
+        # PC's graphics chip records well (AV1 on AMD chips that can, else H.264).
+        # Clips are MP4 either way.
+        "format": "auto",
+        # auto (follows format) | one element, e.g. vah264enc | vah265enc | vaav1enc |
+        # vaapih264enc | nvh264enc | qsvh264enc | x264enc | openh264enc
         "encoder": "auto",
         "show_cursor": False,
         # window = only the window the user picks (screen-share portal only; the bar

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import config, quality
+from . import codecs, config, quality
 
 DEFAULT_MONITOR = "@DEFAULT_MONITOR@"
 DEFAULT_SOURCE = "@DEFAULT_SOURCE@"
@@ -26,6 +26,8 @@ KEYS = {
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
+    "format": "auto, h264, h265, av1 (auto picks the smoothest one your PC handles well; "
+              "h264 plays everywhere; h265 and av1 some older devices can't play)",
     "bitrate": "video kbps; 0 = automatic",
     "audio_source": "default, off, or an output's monitor source name",
     "mic": "on, off",
@@ -51,7 +53,7 @@ LIVE_KEYS = CONTROLLER_KEYS + ("replay_length", "keep_history", "hour_warning", 
 # is left out on purpose (terminal only: `momento set bitrate`).
 TABS = (
     ("General", ("record", "replay_length", "keep_history")),
-    ("Video", ("resolution", "fps", "quality")),
+    ("Video", ("resolution", "fps", "quality", "format")),
     ("Audio", ("audio_source", "mic", "mic_device")),
     ("Controller", ("controller", "controller_exclusive", "controller_open")),
     ("Misc", ("hour_warning", "instant_bar")),
@@ -179,6 +181,8 @@ def normalize(key: str, value):
         if v not in quality.FPS_CHOICES:
             raise ValueError(f"choose one of: {', '.join(map(str, quality.FPS_CHOICES))}")
         return v
+    if key == "format":
+        return codecs.normalize(value)
     if key == "bitrate":
         if isinstance(value, bool):
             raise ValueError("bitrate is a number of kbps")
@@ -292,6 +296,8 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
         return [("capture", "quality", value)]
     if key == "fps":
         return [("capture", "fps", value)]
+    if key == "format":
+        return [("capture", "format", value)]
     if key == "bitrate":
         return [("capture", "bitrate_kbps", value)]
     if key == "audio_source":
@@ -340,6 +346,7 @@ def current(cfg: dict) -> dict:
         "resolution": quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
         "fps": int(cap.get("fps") or quality.FPS),
+        "format": codecs.configured(cap),
         "bitrate": int(cap.get("bitrate_kbps") or 0),
         "audio_source": "off" if not a.get("desktop") else "default" if dev == DEFAULT_MONITOR else dev,
         "mic": "on" if a.get("microphone") else "off",
@@ -393,27 +400,41 @@ def preview(cfg: dict, changes: dict) -> dict:
     return out
 
 
-def describe(cfg: dict, devices: dict | None = None, source=None) -> dict:
+def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
+             failed=()) -> dict:
     """Everything a settings UI needs: current values, choices, tabs, audio devices.
 
     ``source`` is the size of the recorded picture when the daemon knows it (the
     screen, or the picked window): resolutions taller than it are not worth
     offering (``resolution_allowed``) and would record at its size
     (``resolution_effective``). Unknown: every resolution is allowed.
+
+    ``formats`` is the machine's ``codecs.Detection`` (None: the cached one, if
+    any; without one every format is allowed and Auto's pick is unknown):
+    ``format_allowed`` lists the formats it can record, ``format_auto`` what
+    Auto records in, ``format_effective`` what the saved format records in.
+    ``failed``: formats that failed to start in the daemon (skipped like
+    unavailable ones for Auto and the fallback, still selectable).
     """
     from . import gamepad
 
     values = current(cfg)
     source = quality.source_size(source)
+    det = formats if formats is not None else codecs.cached()
     return {
         "ok": True,
         "values": values,
         "source_size": list(source) if source else None,
         "resolution_allowed": quality.allowed_resolutions(source),
         "resolution_effective": quality.effective_resolution(values["resolution"], source),
+        "format_allowed": codecs.allowed(det),
+        "format_auto": codecs.effective("auto", det, failed) if det is not None else None,
+        "format_effective": (codecs.effective(values["format"], det, failed)
+                             if det is not None or values["format"] != "auto" else None),
         "choices": {"record": list(config.CAPTURE_TARGETS), "replay_length": list(config.REPLAY_MINUTES),
                     "resolution": list(quality.RESOLUTIONS),
                     "quality": list(quality.QUALITIES), "fps": list(quality.FPS_CHOICES),
+                    "format": list(codecs.CHOICES),
                     "controller": ["off"] + [k for k, _l, _b in gamepad.CHORD_PRESETS],
                     "controller_open": list(CONTROLLER_OPEN_LABELS),
                     "keep_history": ["off", "on"], "hour_warning": list(config.WARN_MINUTES),
