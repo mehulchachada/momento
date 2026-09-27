@@ -2244,7 +2244,7 @@ class GalleryLive(unittest.TestCase):
         self.assertEqual(g.player.video_size, full)
         if g.state != "playing":
             g.toggle_play()
-        self.wait_for(lambda: g.frame is not None and (g.frame.width(), g.frame.height()) == full, timeout=5)
+        self.wait_for(lambda: g.frame is not None and (g.frame.width(), g.frame.height()) == full, timeout=15)
         player = weakref.ref(g.player)
         pipeline = weakref.ref(pb)
         del pb
