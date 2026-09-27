@@ -171,7 +171,6 @@ jobs:
           ## Good to know
 
           - **Fedora with AMD graphics:** add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`. Without it, your processor does the recording and games may stutter.
-          - **Arch:** also run \`sudo pacman -S --needed gst-plugin-va layer-shell-qt\`.
 
           ## Tell us how it runs
 

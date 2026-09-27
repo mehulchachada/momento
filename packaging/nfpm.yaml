@@ -176,12 +176,16 @@ overrides:
       - gst-plugins-good
       - gst-plugins-bad
       - gst-libav
+      # GPU recording on AMD and Intel.
+      - gst-plugin-va
+      # The bar above fullscreen games on KDE Plasma, Hyprland, Sway.
+      - layer-shell-qt
       - ffmpeg
       - libpulse
       - xdg-desktop-portal
       - hicolor-icon-theme
-    # nfpm cannot write Arch optdepends; the release notes list the optional
-    # packages (gst-plugin-va, layer-shell-qt, gst-plugins-ugly, xdg-user-dirs).
+    # nfpm cannot write Arch optdepends; the rest (gst-plugins-ugly,
+    # python-evdev, xdg-user-dirs) is left to install.sh / the AUR PKGBUILD.
 
 rpm:
   summary: Instant replay for Linux gaming — save the last 15 s to 60 min

@@ -21,16 +21,18 @@ depends=(
   'gst-plugins-good'
   'gst-plugins-bad'
   'gst-libav'
+  # GPU recording on AMD and Intel
+  'gst-plugin-va'
+  # the bar above fullscreen games on KDE Plasma, Hyprland, Sway
+  'layer-shell-qt'
   'ffmpeg'
   'libpulse'
   'xdg-desktop-portal'
   'hicolor-icon-theme'
 )
 optdepends=(
-  'gst-plugin-va: hardware H.264 encoding on AMD and Intel (recommended)'
   'intel-media-driver: VA-API driver for Intel graphics'
   'gst-plugins-ugly: x264enc software encoder fallback'
-  'layer-shell-qt: clip bar above fullscreen games on KDE Plasma and wlroots'
   'python-evdev: open and use the clip bar with a game controller'
   'xdg-user-dirs: save clips to your (localized) Videos folder'
 )
