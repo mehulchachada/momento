@@ -384,6 +384,66 @@ def apply(changes: dict, path: Path | str | None = None) -> dict:
     return {k: after.get(k, v) for k, v in clean.items() if before.get(k) != after.get(k, v)}
 
 
+def plain_name(key: str) -> str:
+    """A setting's name as the logs write it: "replay_length" -> "replay length"."""
+    return str(key).replace("_", " ")
+
+
+def plain_value(key: str, value) -> str:
+    """A setting's value as the logs write it: replay_length 15 -> "15m", bitrate 0 -> "auto"."""
+    if value is None:
+        return "?"
+    if key == "replay_length":
+        return f"{value}m"
+    if key == "hour_warning":
+        return f"{value} min"
+    if key == "bitrate":
+        return "auto" if not value else f"{value} kbps"
+    return str(value)
+
+
+def diff(before: dict, after: dict) -> dict:
+    """{key: (old, new)} for the settings whose user-facing value differs, in KEYS order.
+
+    ``before`` / ``after`` are ``current()`` values (a key missing from ``after``
+    is not compared, so ``after`` may hold only what a request changed).
+    """
+    return {k: (before.get(k), after[k]) for k in KEYS if k in after and before.get(k) != after[k]}
+
+
+def describe_changes(changes: dict) -> str:
+    """{key: (old, new)} -> "resolution 1080p -> 720p, fps 60 -> 120" (plain names, KEYS order)."""
+    order = [k for k in KEYS if k in changes] + [k for k in changes if k not in KEYS]
+    parts = []
+    for key in order:
+        old, new = changes[key]
+        if old == new:
+            parts.append(f"{plain_name(key)} {plain_value(key, new)} (again)")
+        else:
+            parts.append(f"{plain_name(key)} {plain_value(key, old)} -> {plain_value(key, new)}")
+    return ", ".join(parts)
+
+
+def describe_request(changes) -> str:
+    """What a client asked for, for a log line about a refused request: "fps=75, colour=?".
+
+    The values come from a client and may be anything: unknown keys are named
+    but not shown, values are cut short and never carry a line break.
+    """
+    if not isinstance(changes, dict) or not changes:
+        return "nothing"
+    parts = []
+    for key, value in list(changes.items())[:len(KEYS) + 1]:
+        name = str(key)[:32].replace("\n", " ").replace("\r", " ")
+        if key not in KEYS:
+            parts.append(f"{name}=?")
+            continue
+        text = repr(value) if not isinstance(value, (str, int, float, bool)) else str(value)
+        text = "".join(c if c.isprintable() else "?" for c in text)
+        parts.append(f"{plain_name(key)}={text[:40] + '...' if len(text) > 40 else text}")
+    return ", ".join(parts)
+
+
 def preview(cfg: dict, changes: dict) -> dict:
     """A copy of a loaded config with ``changes`` applied in memory (nothing is written)."""
     import copy

@@ -437,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # With the daemon running, it validates storage and writes the config itself.
         try:
-            r = ipc.request({"cmd": "configure", "changes": clean}, timeout=30)
+            r = ipc.request({"cmd": "configure", "changes": clean, "origin": "set"}, timeout=30)
         except ipc.DaemonNotRunning:
             r = None
         except (ipc.IPCError, OSError) as e:
