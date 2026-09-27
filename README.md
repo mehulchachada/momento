@@ -21,6 +21,8 @@ Instant replay and screenshots. Made for games, handy for anything. One line to 
 
 Momento quietly keeps the last 15 minutes of your game (up to 60). Something great happens? Press **Super + Shift + G** (or **PS / Xbox + D-pad Down**), pick how far back, and the clip is in `~/Videos/Momento` seconds later.
 
+Inspired by the PS5's Create button: the same "save what just happened" instant replay, now on your Linux PC or handheld.
+
 ## Why Momento
 
 | | |
@@ -175,7 +177,7 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | | Format | **Auto** picks one your PC records well: H.264 on most PCs. Or pick one yourself: |
 | | | H.264: plays everywhere. |
 | | | H.265: smaller files. Some older devices can't play it. |
-| | | AV1: smoothest on newer hardware. Some older devices can't play it. |
+| | | AV1: smaller files on newer graphics chips. Some older devices can't play it. |
 | **Audio** | Sound | Your default output, a specific device, or Off |
 | | Mic | **Off**, On (plus which mic) |
 | | Menu sounds | **On**, Off. Soft sounds as you use the bar. They may be heard in a clip saved at that moment. |
@@ -277,6 +279,10 @@ Clips are in `~/Videos/Momento`, screenshots in `~/Videos/Momento/Images`. The n
 
 A little. On our ROG Ally it was about 3–5 FPS in Rematch at 1080p with Frame rate Auto and Standard quality, with only occasional small dips. See [Tested on](#tested-on). Different PC? [Tell us how it runs](https://github.com/mehulchachada/momento/issues/new?template=how-it-runs.yml).
 </details>
+<details><summary><b>Is there a PS5-style instant replay for Linux?</b></summary>
+
+Yes, that's Momento. Like the PS5's Create button (or ShadowPlay / Xbox Game Bar on Windows), it keeps the last minutes of your game in the background, so you can save a clip after something great happens. It works on Linux desktops, handhelds like the ROG Ally, and with Steam, emulators and cloud gaming.
+</details>
 <details><summary><b>Can I use it outside games?</b></summary>
 
 Yes. Record one window or the whole screen: a bug you just hit, the last minutes of a call or a stream. Everything works the same.
@@ -355,3 +361,5 @@ Bug reports, testing and pull requests are welcome. See [CONTRIBUTING.md](CONTRI
 ## License
 
 [MIT](LICENSE) © 2026 Momento contributors
+
+<sub>PS5 and PlayStation are trademarks of Sony Interactive Entertainment. ShadowPlay is a trademark of NVIDIA, Xbox of Microsoft. Momento is an independent project, not affiliated with or endorsed by them.</sub>

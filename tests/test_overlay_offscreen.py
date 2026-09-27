@@ -1252,7 +1252,7 @@ class OverlayOffscreen(unittest.TestCase):
         fmt.buttons[1].setFocus()                                   # moving along the row explains each
         self.assertEqual(fmt.note.text(), "Plays everywhere")
         fmt.buttons[3].setFocus()
-        self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        self.assertEqual(fmt.note.text(), "Smaller files on newer graphics chips. Some older devices can't play it")
         fmt.buttons[0].setFocus()                                   # back on Auto: what it records in
         self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
         fmt.buttons[2].setFocus()
@@ -1376,7 +1376,7 @@ class OverlayOffscreen(unittest.TestCase):
         t0 = time.monotonic()
         fmt.buttons[3].setFocus()                                   # AV1: its one-liner
         self.assertLess(time.monotonic() - t0, 0.05)                # nothing waits for the fade
-        self.assertEqual(note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        self.assertEqual(note.text(), "Smaller files on newer graphics chips. Some older devices can't play it")
         self.assertEqual(note.old[0], "Recording in AV1 on this PC")   # the old text fading out
         self.assertLess(note._t, 1.0)
         fmt.buttons[0].setFocus()                                   # a change mid-fade: no queue

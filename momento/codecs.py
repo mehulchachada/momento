@@ -60,7 +60,7 @@ ALIASES = {"h.264": "h264", "h-264": "h264", "avc": "h264", "x264": "h264",
 HINTS = {
     "h264": "Plays everywhere",
     "h265": "Smaller files. Some older devices can't play it",
-    "av1": "Smoothest on newer hardware. Some older devices can't play it",
+    "av1": "Smaller files on newer graphics chips. Some older devices can't play it",
 }
 
 # When the format to record in fails to start (its encoder errors out before the
