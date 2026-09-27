@@ -93,6 +93,8 @@ Commands (fields are in ``COMMANDS``)
     ``target`` is what is recorded: ``"screen"`` or ``"window"`` (absent: screen);
     ``target_name`` the picked window's title (null when unknown or full screen).
     ``stop_reason`` (``STOP_REASONS`` or null) says why it is ``stopped``;
+    ``pause_reason`` (``PAUSE_REASONS`` or null) why it is ``paused`` when not
+    by the user (``"gallery"``: see ``pause``);
     ``keep_history`` whether a stop keeps the replay.
     ``source_size`` is the recorded picture's ``[width, height]`` in pixels (the
     screen, or the picked window) as the last capture session negotiated it,
@@ -286,6 +288,16 @@ STOP_REASONS = {
     "window_closed": "window mode: the recorded window closed",
 }
 
+# Values of `pause_reason` (status, and the reply to a `pause` with a reason): null
+# when running or paused by the user.
+PAUSE_REASONS = {
+    "gallery": "Full screen mode: the clip bar's gallery is open, so it isn't recorded. `pause` "
+               "with reason \"gallery\" (and the bar's pid) pauses only while recording in Full "
+               "screen; `resume` with the same reason resumes only a pause the gallery still "
+               "holds; a plain pause/resume/stop takes it over; the daemon resumes it itself "
+               "when that bar process exits (checked every 2 s, and at once for the resident bar)",
+}
+
 # Values of `code` in an error reply ({"ok": false, "code": ..., "error": ...}).
 ERROR_CODES = {
     "no_storage": "not enough disk space for a full buffer (configure/resume/pick_window) or for the clip "
@@ -408,6 +420,7 @@ COMMANDS: dict[str, dict] = {
             # The reference daemon always sends these three (absent on older daemons):
             "target_name": (("string", "null"), False),  # window mode: the picked window's title
             "stop_reason": (("string", "null"), False),  # STOP_REASONS while stopped, else null
+            "pause_reason": (("string", "null"), False),  # PAUSE_REASONS while paused by one, else null
             "keep_history": (("boolean",), False),       # a stop keeps the replay
             "resolution": (("string",), True),
             # The reference daemon always sends these two (absent on older daemons):
@@ -451,15 +464,22 @@ COMMANDS: dict[str, dict] = {
         "error": {},
     },
     "pause": {
-        "request": {},
+        "request": {
+            "reason": (("string",), False),   # PAUSE_REASONS ("gallery"); absent: the user's pause
+            "pid": (("integer",), False),     # with reason: the process holding the pause
+        },
         "reply": {
             "ok": (("boolean",), True),
             "state": (("string",), True),
+            # with reason: the pause reason now ("gallery" if it paused or already held, else null)
+            "pause_reason": (("string", "null"), False),
         },
         "error": {},
     },
     "resume": {
-        "request": {},
+        "request": {
+            "reason": (("string",), False),   # "gallery": resume only a pause the gallery holds
+        },
         "reply": {
             "ok": (("boolean",), True),
             "state": (("string",), True),
@@ -634,6 +654,8 @@ def _check_enums(obj: dict) -> list[str]:
         problems.append(f"unknown error code {obj['code']!r}")
     if isinstance(obj.get("stop_reason"), str) and obj["stop_reason"] not in STOP_REASONS:
         problems.append(f"unknown stop_reason {obj['stop_reason']!r}")
+    if isinstance(obj.get("pause_reason"), str) and obj["pause_reason"] not in PAUSE_REASONS:
+        problems.append(f"unknown pause_reason {obj['pause_reason']!r}")
     size = obj.get("source_size")
     if isinstance(size, list) and not (len(size) == 2 and all(_PY["integer"](v) and v > 0 for v in size)):
         problems.append("source_size: expected [width, height] (positive integers) or null")
@@ -685,6 +707,8 @@ def validate_request(msg, commands: dict | None = None) -> list[str]:
     if cmd not in commands:
         return [f"unknown command {cmd!r}"]
     problems = _check_object("", msg, commands[cmd]["request"])
+    if cmd in ("pause", "resume") and isinstance(msg.get("reason"), str) and msg["reason"] not in PAUSE_REASONS:
+        problems.append(f"unknown reason {msg['reason']!r}")
     if cmd == "configure" and commands is COMMANDS and isinstance(msg.get("changes"), dict):
         if not msg["changes"]:
             problems.append("changes must not be empty")

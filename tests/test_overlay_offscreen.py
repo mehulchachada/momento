@@ -121,6 +121,9 @@ class FakeDaemon:
         self.save_msgs = []
         self.configures = []
         self.controls = []
+        self.gallery_controls = []       # pause / resume with reason "gallery" (like the daemon's)
+        self.pause_reason = None
+        self.gallery_pid = None
         self.shots = []                  # (monotonic time, what on_shot() saw) per screenshot request
         self.on_shot = None              # called when a screenshot request arrives (e.g. is the bar visible?)
 
@@ -136,7 +139,7 @@ class FakeDaemon:
                 if not self.extra.get("keep_history"):
                     st["buffered"] = 0
             elif self.paused:
-                st.update(state="paused", recording=False)
+                st.update(state="paused", recording=False, pause_reason=self.pause_reason)
             st.update(self.extra)
             return st
         if msg["cmd"] == "settings":
@@ -159,8 +162,21 @@ class FakeDaemon:
             if not kept:
                 self.extra.pop("buffered", None)
             return {"ok": True, "state": "stopped", "buffer_cleared": not kept}
+        if msg["cmd"] in ("pause", "resume") and msg.get("reason") == "gallery":
+            self.gallery_controls.append(msg["cmd"])
+            st = self.request({"cmd": "status"})
+            if msg["cmd"] == "pause":
+                if st["state"] == "recording" and st.get("target", "screen") == "screen":
+                    self.paused, self.pause_reason, self.gallery_pid = True, "gallery", msg.get("pid")
+                return {"ok": True, "state": "paused" if self.paused else st["state"],
+                        "pause_reason": self.pause_reason}
+            if self.pause_reason == "gallery":
+                self.paused, self.pause_reason = False, None
+                return {"ok": True, "state": "starting"}
+            return {"ok": True, "state": st["state"]}
         if msg["cmd"] in ("pause", "resume", "quit"):
             self.controls.append(msg["cmd"])
+            self.pause_reason = None     # the user's pause / play takes a gallery pause over
             if msg["cmd"] == "resume" and self.resume_reply:
                 return self.resume_reply
             if msg["cmd"] == "pause":

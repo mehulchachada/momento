@@ -413,6 +413,19 @@ class DaemonContractTest(_DaemonCase):
             r = self.check({"cmd": "configure", "changes": {"quality": "ultra"}}, ok=False, code="no_storage")
         self.assertTrue(r["storage"]["low"])
 
+    def test_gallery_pause(self):
+        """Full screen: pause / resume with reason "gallery", conforming both ways."""
+        r = self.check({"cmd": "pause", "reason": "gallery", "pid": os.getpid()}, ok=True)
+        self.assertEqual((r["state"], r["pause_reason"]), ("paused", "gallery"))
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["state"], r["pause_reason"]), ("paused", "gallery"))
+        self.assertIn(self.check({"cmd": "resume", "reason": "gallery"}, ok=True)["state"], ("starting", "recording"))
+        self.assertIsNone(self.check({"cmd": "status"}, ok=True)["pause_reason"])
+        self.check({"cmd": "pause"}, ok=True)                             # the user's: not resumed
+        self.assertIsNone(self.check({"cmd": "pause", "reason": "gallery"}, ok=True)["pause_reason"])
+        self.assertEqual(self.check({"cmd": "resume", "reason": "gallery"}, ok=True)["state"], "paused")
+        self.d._clear_pause_reason()
+
     def test_window_mode(self):
         from momento import config
 
@@ -657,6 +670,12 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(validate_reply("status", {**status, "stop_reason": None, "target_name": "Hades"}), [])
         self.assertTrue(validate_reply("status", {**status, "stop_reason": "bored"}))
         self.assertTrue(validate_reply("status", {**status, "keep_history": "on"}))
+        # the gallery's pause (additive: optional, nullable)
+        self.assertEqual(validate_reply("status", {**status, "state": "paused", "pause_reason": "gallery"}), [])
+        self.assertEqual(validate_reply("status", {**status, "pause_reason": None}), [])
+        self.assertTrue(validate_reply("status", {**status, "pause_reason": "lunch"}))
+        self.assertEqual(validate_reply("pause", {"ok": True, "state": "paused", "pause_reason": "gallery"}), [])
+        self.assertEqual(validate_reply("pause", {"ok": True, "state": "recording", "pause_reason": None}), [])
         settings_ok = {"ok": True, "values": {"record": "window", "resolution": "1080p", "quality": "high",
                                               "fps": 60, "bitrate": 0, "audio_source": "default", "mic": "off",
                                               "mic_device": "default"},
@@ -690,6 +709,10 @@ class ValidatorTest(unittest.TestCase):
         self.assertEqual(validate_request({"cmd": "save", "seconds": "5m"}), [])
         self.assertEqual(validate_request({"cmd": "pick_window"}), [])
         self.assertEqual(validate_request({"cmd": "screenshot"}), [])
+        self.assertEqual(validate_request({"cmd": "pause", "reason": "gallery", "pid": 4242}), [])
+        self.assertEqual(validate_request({"cmd": "resume", "reason": "gallery"}), [])
+        self.assertTrue(validate_request({"cmd": "pause", "reason": "lunch"}))
+        self.assertTrue(validate_request({"cmd": "pause", "reason": "gallery", "pid": "4242"}))
         self.assertEqual(validate_request({"cmd": "configure", "changes": {"record": "window"}}), [])
         self.assertTrue(validate_request({"cmd": "save"}))
         self.assertTrue(validate_request({"cmd": "configure", "changes": {}}))
@@ -704,6 +727,7 @@ class ValidatorTest(unittest.TestCase):
         self.assertIn("record", protocol.SETTING_CHOICES)
         self.assertIn("no_window", protocol.STATES)     # kept for older daemons
         self.assertEqual(set(protocol.STOP_REASONS), {"user", "window_closed"})
+        self.assertEqual(set(protocol.PAUSE_REASONS), {"gallery"})
         self.assertIn("not_recording", protocol.ERROR_CODES)
         self.assertIn("screenshot", protocol.COMMANDS)          # additive: the version stays
         self.assertEqual(protocol.PROTOCOL_VERSION, 1)  # window mode, keep history, screenshots: additive

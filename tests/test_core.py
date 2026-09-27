@@ -968,6 +968,112 @@ class DaemonControlTest(unittest.TestCase):
         self.call({"cmd": "resume"})
         self.assertEqual(rec.started, 2)
 
+    # --- the gallery's pause (Full screen) ------------------------------------------
+    def gallery_pause(self, pid=None):
+        return self.call({"cmd": "pause", "reason": "gallery", "pid": os.getpid() if pid is None else pid})
+
+    def gallery_resume(self):
+        return self.call({"cmd": "resume", "reason": "gallery"})
+
+    def dead_pid(self):
+        import subprocess
+
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def test_gallery_pauses_full_screen_and_resumes(self):
+        rec = self.d.recorder
+        self.assertIsNone(self.d.status()["pause_reason"])
+        self.assertEqual(self.gallery_pause(), {"ok": True, "state": "paused", "pause_reason": "gallery"})
+        st = self.d.status()
+        self.assertEqual((st["state"], st["recording"], st["pause_reason"]), ("paused", False, "gallery"))
+        self.assertEqual(rec.stopped, 1)
+        self.assertEqual(self.gallery_pause()["pause_reason"], "gallery")     # again: still the gallery's
+        self.assertEqual(rec.stopped, 1)
+        self.assertTrue(self.gallery_resume()["ok"])
+        st = self.d.status()
+        self.assertEqual((st["state"], st["pause_reason"]), ("recording", None))
+        self.assertEqual(rec.started, 2)
+        self.gallery_resume()                                              # nothing held: no-op
+        self.assertEqual(rec.started, 2)
+
+    def test_gallery_leaves_window_mode_recording(self):
+        self.d.cfg["capture"]["target"] = "window"
+        rec = self.d.recorder
+        r = self.gallery_pause()
+        self.assertEqual((r["state"], r["pause_reason"]), ("recording", None))
+        self.assertEqual((rec.stopped, self.d.status()["state"]), (0, "recording"))
+        self.gallery_resume()
+        self.assertEqual(rec.started, 1)
+
+    def test_gallery_keeps_a_user_pause_or_stop(self):
+        rec = self.d.recorder
+        self.call({"cmd": "pause"})                                       # the user paused first
+        self.assertIsNone(self.gallery_pause()["pause_reason"])
+        self.gallery_resume()
+        self.assertEqual((self.d.status()["state"], rec.started), ("paused", 1))
+        self.call({"cmd": "stop"})
+        self.assertIsNone(self.gallery_pause()["pause_reason"])
+        self.gallery_resume()
+        st = self.d.status()
+        self.assertEqual((st["state"], st["pause_reason"], rec.started), ("stopped", None, 1))
+
+    def test_user_pause_during_gallery_takes_over(self):
+        rec = self.d.recorder
+        self.gallery_pause()
+        self.assertEqual(self.call({"cmd": "pause"}), {"ok": True, "state": "paused"})
+        self.assertIsNone(self.d.status()["pause_reason"])                 # the user's pause now
+        self.gallery_resume()
+        self.assertEqual((self.d.status()["state"], rec.started), ("paused", 1))
+
+    def test_user_resume_during_gallery_takes_over(self):
+        rec = self.d.recorder
+        self.gallery_pause()
+        self.call({"cmd": "resume"})
+        self.assertEqual((self.d.status()["state"], rec.started), ("recording", 2))
+        self.call({"cmd": "pause"})                                        # and pauses again later
+        self.gallery_resume()                                              # the gallery closing: no-op
+        self.assertEqual((self.d.status()["state"], rec.started), ("paused", 2))
+
+    def test_gallery_pause_resumes_when_the_bar_is_gone(self):
+        rec = self.d.recorder
+        self.assertTrue(self.d._process_alive(os.getpid()))
+        self.gallery_pause()                                               # a live bar: kept
+        self.assertTrue(self.d._check_gallery_owner())
+        self.assertEqual(self.d.status()["pause_reason"], "gallery")
+        self.gallery_resume()
+        self.gallery_pause(pid=self.dead_pid())                            # crashed or killed
+        self.assertEqual(self.d.status()["state"], "paused")
+        self.assertFalse(self.d._check_gallery_owner())
+        st = self.d.status()
+        self.assertEqual((st["state"], st["pause_reason"], rec.started), ("recording", None, 3))
+        self.assertFalse(self.d._gallery_timer)
+
+    def test_gallery_pause_resumes_when_the_resident_bar_exits(self):
+        """The resident bar exits (recycled after the gallery, 75, or crashed) holding it."""
+        import types
+
+        from momento import config
+
+        rec = self.d.recorder
+        self.d._schedule_bar_restart = lambda: None                        # no restart timer here
+        for code in (config.BAR_RECYCLE_EXIT, -9):
+            proc = types.SimpleNamespace(pid=4242)
+            self.d.bar_proc = proc
+            self.gallery_pause(pid=4242)
+            self.assertEqual(self.d.status()["pause_reason"], "gallery")
+            self.d._bar_exited(proc, code)
+            st = self.d.status()
+            self.assertEqual((st["state"], st["pause_reason"]), ("recording", None), code)
+        self.assertEqual(rec.started, 3)
+        other = types.SimpleNamespace(pid=4343)                            # another bar's exit
+        self.d.bar_proc = other
+        self.gallery_pause(pid=4242)
+        self.d._bar_exited(other, 1)
+        self.assertEqual(self.d.status()["pause_reason"], "gallery")
+        self.d._clear_pause_reason()
+
     def test_settings_and_configure(self):
         from momento import config, settings
         from unittest import mock

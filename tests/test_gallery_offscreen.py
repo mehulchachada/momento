@@ -280,8 +280,17 @@ class GalleryOffscreen(unittest.TestCase):
     def bar(self, folder=None, daemon=None):
         bar = self.make(daemon or self.daemon(folder))
         bar.focus_visible = True
+        self.addCleanup(self.drain, bar)          # after close_gallery (cleanups run last first)
         self.addCleanup(bar.close_gallery)
         return bar
+
+    @staticmethod
+    def drain(bar):
+        """Let the bar's gallery pause / resume requests reach this test's fake daemon, not
+        the next test's (ipc.request is swapped per test)."""
+        jobs, bar._gallery_jobs = bar._gallery_jobs, None
+        if jobs is not None:
+            jobs.shutdown(wait=True)
 
     def open(self, bar):
         self.key(Qt.Key_G)
@@ -396,8 +405,9 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(bar.panel.isHidden())
 
     def test_bar_stays_under_the_gallery(self):
-        """The panel opens above the bar; the bar row keeps its layout, buttons and live time."""
-        bar = self.resident()
+        """The panel opens above the bar; the bar row keeps its layout, buttons and live time
+        (window mode: in Full screen the gallery pauses, see test_full_screen_pauses_while_open)."""
+        bar = self.resident(daemon=FakeDaemon(True, extra={"output_dir": str(self.out), "target": "window"}))
         opts = [(o.geometry(), o.isEnabled()) for o in bar.options]
         g = self.open(bar)
         self.assertEqual(bar.stack.currentIndex(), 0)                 # the clip lengths, not a footer
@@ -436,8 +446,9 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(self.exits, [config.BAR_RECYCLE_EXIT])      # and the recycle after a gallery
 
     def test_bar_buttons_under_the_gallery(self):
-        """Pause works with the gallery open; settings / a save fold the gallery away first."""
-        d = self.daemon()
+        """Pause works with the gallery open; settings / a save fold the gallery away first.
+        (Window mode: in Full screen the gallery holds a pause of its own, tested below.)"""
+        d = FakeDaemon(True, extra={"output_dir": str(self.out), "target": "window"})
         bar = self.bar(daemon=d)
         g = self.open(bar)
         QTest.mouseClick(bar.controls[0]["pause"], Qt.LeftButton)
@@ -798,6 +809,90 @@ class GalleryOffscreen(unittest.TestCase):
         self.wait_for(lambda: bar.pads is not None and len(bar.pads.pads) == 2)
         self.assertEqual(bar.pad_symbols(), "playstation")
 
+    # ------------------------------------------------------------ the pause (Full screen)
+    def test_full_screen_pauses_while_open(self):
+        """Full screen: the gallery pauses recording (the label says why) and closing resumes."""
+        daemon = self.daemon()
+        bar = self.bar(daemon=daemon)
+        self.assertEqual(bar.view, "rec")
+        g = self.open(bar)
+        self.wait_for(lambda: daemon.gallery_controls == ["pause"])
+        self.assertEqual(daemon.gallery_pid, os.getpid())
+        self.wait_for(lambda: bar.view == "paused")
+        self.assertEqual((bar.gallery_pause, bar.pause_reason), ("held", "gallery"))
+        self.assertEqual(bar.name.accessibleName(), overlay.GALLERY_PAUSED)
+        self.assertEqual(bar.name.text(), overlay.GALLERY_PAUSED)      # whole, not elided
+        self.assertEqual(bar.time.text(), "")                          # the sentence takes its room
+        self.assertFalse(bar.controls[0]["shot"].isEnabled())           # no frames while paused
+        self.assertTrue(any(o.isEnabled() for o in bar.options))       # saving still works
+        self.assertEqual(daemon.controls, [])                          # not the user's pause
+        pump(self.app, 0.05)
+        self.shot(bar, "17-gallery-paused")
+        self.key(Qt.Key_Escape)                                        # back to the clip view
+        self.assertEqual(bar.mode, "clip")
+        self.wait_for(lambda: daemon.gallery_controls == ["pause", "resume"])
+        self.wait_for(lambda: bar.view == "rec")
+        self.assertFalse(daemon.paused)
+        self.assertIsNone(bar.gallery_pause)
+        self.assertEqual(bar.name.accessibleName(), "Recording Full Screen")
+        del g
+
+    def test_window_mode_keeps_recording(self):
+        daemon = FakeDaemon(True, extra={"output_dir": str(self.out), "target": "window",
+                                         "target_name": "Ember Rift"})
+        bar = self.bar(daemon=daemon)
+        self.open(bar)
+        pump(self.app, 0.2)
+        self.key(Qt.Key_Escape)
+        pump(self.app, 0.1)
+        self.assertEqual((daemon.gallery_controls, daemon.paused, bar.view), ([], False, "rec"))
+
+    def test_a_user_pause_stays(self):
+        daemon = self.daemon(paused=True)
+        bar = self.bar(daemon=daemon)
+        self.assertEqual(bar.view, "paused")
+        self.open(bar)
+        pump(self.app, 0.2)
+        self.assertEqual(bar.name.accessibleName(), "Paused Full Screen")
+        self.key(Qt.Key_Escape)
+        pump(self.app, 0.2)
+        self.assertEqual((daemon.gallery_controls, daemon.paused), ([], True))
+
+    def test_play_during_the_gallery_takes_over(self):
+        """The user presses play while the gallery holds the pause: closing changes nothing."""
+        daemon = self.daemon()
+        bar = self.bar(daemon=daemon)
+        self.open(bar)
+        self.wait_for(lambda: bar.view == "paused")
+        bar.toggle_pause()                                             # play (the bar row stays live)
+        self.wait_for(lambda: daemon.controls == ["resume"])
+        self.assertFalse(daemon.paused)
+        self.wait_for(lambda: not bar.control_busy and bar.view == "rec")
+        bar.toggle_pause()                                             # and the user pauses again
+        self.wait_for(lambda: daemon.controls[:2] == ["resume", "pause"])
+        self.assertEqual(daemon.controls, ["resume", "pause"])
+        self.key(Qt.Key_Escape)
+        self.wait_for(lambda: daemon.gallery_controls == ["pause", "resume"])
+        pump(self.app, 0.1)
+        self.assertTrue(daemon.paused)                                  # the user's pause stays
+        self.assertIsNone(daemon.pause_reason)
+
+    def test_hiding_the_bar_resumes(self):
+        """The bar hides (idle, the hotkey, before a recycle) with the gallery open."""
+        daemon = self.daemon()
+        bar = self.bar(daemon=daemon)
+        bar.resident = True
+        exits = []
+        bar.request_exit = exits.append                                # the recycle, not the loop's end
+        self.open(bar)
+        self.wait_for(lambda: daemon.gallery_controls == ["pause"])
+        bar.dismiss()
+        self.wait_for(lambda: daemon.gallery_controls[:2] == ["pause", "resume"])
+        self.assertEqual(daemon.gallery_controls, ["pause", "resume"], daemon.gallery_controls)
+        self.assertFalse(daemon.paused)
+        pump(self.app, 0.05)
+        self.assertEqual(len(exits), 1)                                # recycled after resuming
+
     def test_keyboard_hints_without_a_controller(self):
         """No controller (the sandbox opens none): the keys, for a clip and a screenshot."""
         gm = self.gallery_mod
@@ -1041,7 +1136,9 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIs(g.leaving, view)
         self.assertEqual(bar.mode, "gallery")
         self.wait_for(lambda: g.leaving is None, timeout=2)
-        self.assertFalse(view.isVisible())
+        import shiboken6
+
+        self.assertFalse(shiboken6.isValid(view) and view.isVisible())   # hidden, or already deleted
 
     def test_gallery_idle_and_leave_rules(self):
         from PySide6.QtCore import QEvent
@@ -1168,8 +1265,8 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(self.exits, [])            # shown again at once: no recycle
 
     # ------------------------------------------------------------ recycle
-    def resident(self, folder=None):
-        bar = self.bar(folder)
+    def resident(self, folder=None, daemon=None):
+        bar = self.bar(folder, daemon=daemon)
         bar.resident = True
         self.exits = []
         bar.request_exit = self.exits.append        # instead of ending the test's event loop

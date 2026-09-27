@@ -123,7 +123,10 @@ That's it. Momento now records in the background until you stop it or the game c
 | The stop button | Stops recording (the bar asks first) |
 | The camera button | Takes a screenshot |
 | **S**, or the gear | Opens [settings](#settings) |
+| **G**, or the gallery button | Shows your saved clips and screenshots above the bar |
 | **Esc** | Closes the bar without saving |
+
+In Full screen mode, recording pauses while the gallery is open so it doesn't end up in your clips, and picks up again when you close it.
 
 The **Super** key is the Windows / start-menu key. Momento uses Super + Shift + G because KDE already uses Super + G.
 

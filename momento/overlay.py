@@ -108,6 +108,9 @@ GALLERY_IDLE_MS = 10_000   # the gallery, untouched (never while a clip plays: p
 GALLERY_RENEW_MS = 15_000  # the gallery keeps the controller grab alive (its watchdog gives up after 60 s)
 GALLERY_HINT_MS = 6_000    # "No clips or screenshots yet": how long the strip stays up
 GALLERY_EMPTY = "No clips or screenshots yet. Saved ones show up here."
+# Full screen: the gallery isn't recorded. In the room of the stopped sentence (dot and
+# time hidden); "Paused while the gallery is open" would need the bar 7 px wider.
+GALLERY_PAUSED = "Paused while in the gallery"
 GALLERY_GAP = 8            # between the gallery's panel and the bar under it
 START_TIMEOUT_S = 10
 START_POLL_S = 0.5
@@ -1440,6 +1443,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.online = None
             self.running = False      # daemon reachable
             self.paused = False
+            self.pause_reason = None  # status pause_reason: "gallery" while the gallery holds it
+            # The pause this bar asked for while its gallery is open (Full screen):
+            # None | "asked" | "held". Its requests go out in order on one worker.
+            self.gallery_pause = None
+            self._gallery_jobs = None
             self.buffered = 0.0
             # From the status: what is recorded ("screen" | "window"), the window's
             # title, and whether a stop keeps the footage (keep_history).
@@ -1602,7 +1610,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                         + [nfm.horizontalAdvance(n) + 8 + tfm.horizontalAdvance(t)
                            for n, t in (("Starting", "00:00"), ("Off", "—"), ("Error", "00:00"),
                                         ("Low storage", "00:00"))])
-            self.stopped_w = block + 16 - 8   # the stopped sentence's room (the name's margin aside)
+            # the room of a sentence (stopped, the gallery's pause; the name's margin aside)
+            self.stopped_w = block + 16 - 8
             head.setFixedWidth(LOGO_SIZE + 12 + 16 + block + 12 + ICON_W + 4 + self.storage_hint.width())
             row.addWidget(head)
             row.addSpacing(10)
@@ -1838,7 +1847,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return self.target_name or SUBJECT["window"]
             return SUBJECT["screen"]
 
+        def gallery_paused_view(self, view=None):
+            return (self.view if view is None else view) == "paused" and self.pause_reason == "gallery"
+
         def view_label(self, view):
+            if view == "paused" and self.pause_reason == "gallery":
+                return GALLERY_PAUSED
             if view in ("rec", "paused"):
                 return f"{self.NAMES[view]} {self.subject()}"
             if view == "stopped":
@@ -1851,9 +1865,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             running = self.running
             dot = RED if view in ("rec", "lowstorage") else MUTED if view == "paused" else DIM
             self.dot.setStyleSheet(f"background: {dot}; border-radius: 4px;")
-            self.dotbox.setHidden(view == "stopped")
+            # a sentence ("Press play to ...", "Paused while the gallery is open") takes
+            # the dot's and the time's room
+            sentence = view == "stopped" or self.gallery_paused_view(view)
+            self.dotbox.setHidden(sentence)
             label = self.view_label(view)
-            room = self.stopped_w if view == "stopped" else self.name_w
+            room = self.stopped_w if sentence else self.name_w
             fm = self.name.fontMetrics()
             shown = label if fm.horizontalAdvance(label) <= room else fm.elidedText(label, Qt.ElideRight, room)
             if self.name.text() != shown:
@@ -1985,6 +2002,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 # an older daemon kept the footage in no_window and cleared it on stop
                 self.keep_history = bool(kept) if kept is not None else state == "no_window"
                 self.paused = state == "paused"
+                self.pause_reason = st.get("pause_reason") if self.paused else None
                 buffered = float(st.get("buffered") or 0.0)
                 # stopped: the footage is saveable only while the history is kept
                 self.buffered = 0.0 if self.stopped and not self.keep_history else buffered
@@ -2008,7 +2026,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.set_view(view, self.buffered > 0)
                 self.set_live({} if self.stopped else st, view == "rec")
                 shown = self.live_seconds()
-                if view == "stopped":
+                if view == "stopped" or self.gallery_paused_view(view):
                     self.set_time("", MUTED)   # the sentence takes the time's place
                 elif view == "lowstorage":
                     # the numbers are in the warning strip right above; keep the head compact
@@ -2220,6 +2238,9 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             threading.Thread(target=work, daemon=True).start()
 
         def on_control(self, cmd, r):
+            if cmd in ("gallery_pause", "gallery_resume"):
+                self.on_gallery_pause(cmd, r)
+                return
             self.control_busy = False
             picks, self.resume_picks = self.resume_picks and cmd == "resume", False
             if picks and r.get("ok"):
@@ -3029,12 +3050,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.idle.setInterval(GALLERY_IDLE_MS)
             self.touch_idle()
             self.pad_renew.start()
+            self.gallery_hold()
 
         def leave_gallery(self):
             """Back from the gallery to the clip view, on the gallery button."""
             self.pad_renew.stop()
             self.mode = "clip"
             self.gallery_btn.set_on(False)
+            self.gallery_release()
             self.idle.setInterval(IDLE_HIDE_MS)
             self.back_to_clip()
             if self.stack.currentIndex() == 0:
@@ -3048,9 +3071,61 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             if self.gallery is not None:
                 self.gallery.close()
             self.gallery_btn.set_on(False)
+            self.gallery_release()
             if self.mode == "gallery":
                 self.mode = "clip"
                 self.idle.setInterval(IDLE_HIDE_MS)
+
+        # Full screen mode records the whole screen, gallery included: recording pauses
+        # while it is open and picks up again when it closes. The daemon keeps the reason
+        # ("gallery"), resumes only a pause the gallery still holds (a pause or play by
+        # the user takes it over), and resumes by itself if this process goes away.
+        def gallery_hold(self):
+            if self.gallery_pause is not None or self.target != "screen" or self.view != "rec":
+                return
+            self.gallery_pause = "asked"
+            self._gallery_send({"cmd": "pause", "reason": "gallery", "pid": os.getpid()})
+
+        def gallery_release(self):
+            if self.gallery_pause is None:
+                return
+            self.gallery_pause = None
+            self._gallery_send({"cmd": "resume", "reason": "gallery"})   # a no-op unless still held
+            if self.pause_reason == "gallery" and self.last_status and self.last_status.get("ok"):
+                # show it right away; the next poll confirms
+                self.apply_status({**self.last_status, "state": "starting", "recording": False,
+                                   "pause_reason": None})
+
+        def _gallery_send(self, msg):
+            if self._gallery_jobs is None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                # one worker: a resume never overtakes its pause; exit waits for the last one
+                self._gallery_jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gallery-pause")
+            gen = self.gen
+
+            def work():
+                try:
+                    r = ipc.request(msg, timeout=10)
+                except Exception as e:  # noqa: BLE001
+                    r = {"ok": False, "error": str(e) or e.__class__.__name__}
+                self.bridge.control.emit(gen, f"gallery_{msg['cmd']}", r)
+            self._gallery_jobs.submit(work)
+
+        def on_gallery_pause(self, what, r):
+            """The answer to the gallery's pause ("gallery_pause") or resume (not a protocol cmd)."""
+            if what == "gallery_pause" and self.gallery_pause == "asked":
+                held = bool(r.get("ok")) and r.get("pause_reason") == "gallery"
+                if held:
+                    self.gallery_pause = "held"
+                elif r.get("ok"):
+                    self.gallery_pause = None   # it didn't pause (window mode, not recording)
+                # no answer: stays "asked", so closing still sends the (harmless) resume
+                if held and self.last_status and self.last_status.get("ok"):
+                    self.apply_status({**self.last_status, "state": "paused", "recording": False,
+                                       "pause_reason": "gallery"})
+            self.status_inflight = False
+            self.refresh_async()
 
         def gallery_yield(self):
             """Before a bar action that takes the bar row or hides the bar (a save, the stop
