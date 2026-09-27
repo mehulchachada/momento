@@ -627,8 +627,11 @@ class Daemon:
                 name = None
             # A restored session may not resolve: then the name from before stays.
             if name and gen == self._name_gen:
+                # A title can be private (a browser tab, a chat): never the words in a log.
+                from .logs import hidden
+
+                log.info("recording window (window title: %s)", hidden(name))
                 self.target_name = str(name)
-                log.info("recording window: %s", self.target_name)
 
         threading.Thread(target=work, name="window-name", daemon=True).start()
 
@@ -1232,6 +1235,7 @@ class Daemon:
         sel = self.ring.select_last(seconds, until=t_req)
         if sel is None:
             result = {"ok": False, "error": "nothing recorded yet"}
+            log.info("clip not saved: nothing recorded yet")
             notify(self.bus, "Momento: nothing to save", "Nothing has been recorded yet.", "dialog-warning")
             reply(result)
             return
@@ -1260,6 +1264,8 @@ class Daemon:
                 }
                 if sel.note:  # e.g. "earlier footage used a different resolution"
                     result["reason"] = sel.note
+                log.info("clip saved: %s (%.0f s of %d s asked)%s", path, sel.duration, seconds,
+                         f"; {sel.note}" if sel.note else "")
             except Exception as e:  # noqa: BLE001
                 log.exception("export failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -1398,7 +1404,9 @@ def main(cfg: dict) -> int:
         log.error("daemon failed to start: %s", e)
         daemon.stop()
         return 1
-    log.info("Momento daemon running (socket %s)", config.SOCKET_PATH)
+    from . import __version__
+
+    log.info("Momento %s daemon running (socket %s)", __version__, config.SOCKET_PATH)
     try:
         loop.run()
     finally:
