@@ -14,7 +14,8 @@ Instant replay and screenshots. Made for games, handy for anything. One line to 
 
 </div>
 
-<!-- PROMO GIF: goes here, e.g. <p align="center"><img src="assets/promo.gif" width="880" alt="..."></p> -->
+<p align="center"><img src="assets/momento-demo.gif" width="880" alt="Momento in action: the bar opens over a race, saves the last 15 seconds, and grows into the gallery to play it back"><br>
+<sub>Game footage: SuperTuxKart by kimden STK, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>, edited.</sub></p>
 
 <p align="center"><img src="assets/clip-bar.png" width="880" alt="The Momento bar: Recording Ember Rift, 12:47 recorded, 742 GB free, the lengths 15s to 60m with 5m selected, and pause, stop, screenshot and settings buttons"></p>
 
