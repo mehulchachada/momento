@@ -27,9 +27,12 @@ source = "auto"
 # Change it with:  momento set record screen      (or Settings -> Record in the bar)
 target = "window"
 
-# Frames per second: 60 or 120. 120 only helps on a 120 Hz (or faster) screen
-# and uses about 1.5x the disk space. Change it with:  momento set fps 120
-fps = 60
+# Frames per second:
+#   "auto"   match your screen (default): 120 on a 120 Hz (or faster) screen,
+#            60 on a 60 Hz one. Smoothest for your game.
+#   60, 120  always this rate. 120 uses about 1.5x the disk space of 60.
+# Change it with:  momento set fps auto      (or 60, or 120)
+fps = "auto"
 
 # Recording resolution (up to 1080p for now; 1440p and 4K are coming later):
 #   "480p" | "720p" | "1080p"
@@ -53,7 +56,7 @@ quality = "high"
 #     native     as 480p, 720p or 1080p, by the size really recorded
 #   (1440p and 4K are not offered yet; a config that still says "1440p" or
 #   "2160p" records at 1080p)
-#   (at 120 fps the automatic bitrate is 1.5x these)
+#   (at 120 fps, e.g. Auto on a 120 Hz screen, the automatic bitrate is 1.5x these)
 # Set a number (e.g. 20000) to override. Disk used by a full 15-minute replay
 # ~= Mbit/s * 0.11 GB (1080p high: ~1.7 GB); 60 minutes ~= Mbit/s * 0.45 GB.
 bitrate_kbps = 0

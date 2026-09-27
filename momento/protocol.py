@@ -104,7 +104,11 @@ Commands (fields are in ``COMMANDS``)
     cap below); ``bitrate_kbps`` is the bitrate of what is really recorded.
     ``format`` is the video format setting (``FORMAT_CHOICES``) and
     ``format_effective`` the one really recorded (see Video formats below),
-    null while Auto's pick is not known yet.
+    null while Auto's pick is not known yet. ``fps`` is the frame rate setting
+    (``FPS_CHOICES``: ``"auto"``, 60 or 120; older daemons send only 60 or 120)
+    and ``fps_effective`` the rate really recorded (see Frame rate below);
+    ``refresh_hz`` the recorded screen's refresh rate as its stream announced
+    it, null until known (forgotten like ``source_size``).
 ``save`` {seconds}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
@@ -175,7 +179,9 @@ Commands (fields are in ``COMMANDS``)
     ``format_auto`` (what Auto records in here, null while unknown),
     ``format_effective`` (what the saved ``format`` records in) and
     ``format_crashed`` (formats whose start crashed Momento here, skipped
-    until picked again).
+    until picked again). ``fps`` and ``fps_effective`` are what the saved frame
+    rate records at, ``refresh_hz`` as in ``status``; ``storage.required`` has a
+    key per ``FPS_CHOICES`` entry, ``"auto"`` counted at ``fps_effective``.
 
 Game controllers use no IPC of their own: the daemon watches for the
 ``[controller] open_chord`` and acts like the hotkey (toggles the bar); the
@@ -249,6 +255,16 @@ Momento switched to H.264"). A ``configure`` that picks it again retries it
 (recording restarts in it even when it was already the saved format; the
 reply's ``changed`` then holds ``format``).
 
+Frame rate: ``FPS_CHOICES`` (auto, 60, 120; default auto). Auto records at
+120 fps when the recorded screen runs at ``AUTO_HIGH_HZ`` (100) Hz or more
+(120, 144, 165 Hz) and at 60 otherwise (60, 75, 90 Hz, or while the refresh is
+not known); never above 120. The refresh comes from the screen-cast stream's
+caps (``max-framerate``, else ``framerate``) at the first frame of each capture
+session. A client that has no ``refresh_hz`` yet MAY apply the rule to the
+refresh of the screen it is on (the clip bar does, for its note and estimate).
+120 fps costs 1.5x the video bitrate of 60 (rounded to whole Mbps), in the
+storage math too.
+
 Storage math: full buffer = (video kbps + audio kbps, audio counted only when
 desktop sound or the mic is on) * 1000 / 8 * max_seconds * 1.05; required =
 full buffer + 1 GiB reserve; a start fits when free + reclaimable >= required,
@@ -305,6 +321,10 @@ RESOLUTION_CHOICES = ("480p", "720p", "1080p", "native")
 MAX_HEIGHT = 1080
 # The video formats (settings choices.format, in order). Same as codecs.CHOICES.
 FORMAT_CHOICES = ("auto", "h264", "h265", "av1")
+# The frame rate setting (settings choices.fps, in order), and the refresh rate from
+# which Auto records at 120 fps. Same as quality.FPS_CHOICES / quality.AUTO_HIGH_HZ.
+FPS_CHOICES = ("auto", 60, 120)
+AUTO_HIGH_HZ = 100
 MAX_REQUEST_BYTES = 1 << 20  # daemon socket; the clip-bar socket allows 64 KiB
 CLIP_BAR_MAX_REQUEST_BYTES = 1 << 16
 
@@ -395,7 +415,7 @@ SETTING_VALUES = {
     "replay_length": (("integer",), False),
     "resolution": (("string",), True),     # one of choices.resolution ("480p" | "720p" | "1080p" | "native")
     "quality": (("string",), True),
-    "fps": (("integer",), True),
+    "fps": (("integer", "string"), True),  # one of choices.fps: "auto" (default) | 60 | 120
     "bitrate": (("integer",), True),       # video kbps, 0 = automatic
     "format": (("string",), False),        # one of choices.format: "auto" (default) | "h264" | "h265" | "av1"
     "audio_source": (("string",), True),   # "default" | "off" | monitor source name
@@ -417,7 +437,7 @@ SETTING_CHOICES = {
     "replay_length": (("array",), False),  # [15, 30, 60]
     "resolution": (("array",), True),
     "quality": (("array",), True),
-    "fps": (("array",), True),
+    "fps": (("array",), True),             # ["auto", 60, 120] (older daemons: [60, 120])
     "format": (("array",), False),         # ["auto", "h264", "h265", "av1"]
     "controller": (("array",), False),     # ["off", "ps_down"]: what the bar offers
     "keep_history": (("array",), False),   # ["off", "on"]
@@ -474,7 +494,10 @@ COMMANDS: dict[str, dict] = {
             "source_size": (("array", "null"), False),     # [width, height] of the recorded picture, or null
             "quality": (("string",), True),
             "bitrate_kbps": (("integer",), True),   # effective video bitrate
-            "fps": (("integer",), True),
+            "fps": (("integer", "string"), True),   # the setting: "auto" | 60 | 120 (older daemons: 60 | 120)
+            # The reference daemon always sends these two (absent on older daemons):
+            "fps_effective": (("integer",), False),       # 60 | 120: the rate really recorded
+            "refresh_hz": (("number", "null"), False),    # the recorded screen's refresh, null until known
             # The reference daemon always sends these two (absent on older daemons):
             "format": (("string",), False),                # the setting (FORMAT_CHOICES)
             "format_effective": (("string", "null"), False),  # "h264" | "h265" | "av1" really recorded
@@ -589,7 +612,9 @@ COMMANDS: dict[str, dict] = {
             "values": ((SETTING_VALUES,), True),
             "choices": ((SETTING_CHOICES,), True),
             "devices": ((AUDIO_DEVICES,), True),
-            "fps": (("integer",), True),
+            "fps": (("integer",), True),          # what the saved frame rate records at: 60 | 120
+            "fps_effective": (("integer",), False),       # the same (named like status)
+            "refresh_hz": (("number", "null"), False),    # as in status
             "max_seconds": (("integer",), True),
             "config": (("string",), True),        # path of config.toml
             "storage": ((STORAGE_REQUIREMENTS,), True),
@@ -718,6 +743,13 @@ def _check_enums(obj: dict) -> list[str]:
     crashed = obj.get("format_crashed")
     if isinstance(crashed, list) and not all(f in FORMAT_CHOICES[1:] for f in crashed):
         problems.append(f"format_crashed: expected formats of {', '.join(FORMAT_CHOICES[1:])}, got {crashed!r}")
+    fps = obj.get("fps")
+    if (_PY["integer"](fps) or _PY["string"](fps)) and fps not in FPS_CHOICES:
+        problems.append(f"fps: expected one of {', '.join(map(str, FPS_CHOICES))}, got {obj['fps']!r}")
+    if _PY["integer"](obj.get("fps_effective")) and obj["fps_effective"] not in FPS_CHOICES[1:]:
+        problems.append(f"fps_effective: expected 60 or 120, got {obj['fps_effective']!r}")
+    if _PY["number"](obj.get("refresh_hz")) and not obj["refresh_hz"] > 0:
+        problems.append(f"refresh_hz: expected a positive number or null, got {obj['refresh_hz']!r}")
     if isinstance(obj.get("pause_reason"), str) and obj["pause_reason"] not in PAUSE_REASONS:
         problems.append(f"unknown pause_reason {obj['pause_reason']!r}")
     size = obj.get("source_size")

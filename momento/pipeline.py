@@ -41,6 +41,19 @@ size (``resolution_effective`` says which was used). The config is left alone.
 Never taller than ``quality.MAX_HEIGHT`` (1080) either: ``native`` scales a
 taller picture down to fit (``quality.native_size``, aspect kept).
 
+Frame rate: ``[capture] fps`` is 60, 120 or "auto" (the default), which follows
+the refresh rate of the screen being recorded (``quality.auto_fps``: 120 from
+100 Hz up, else 60). The refresh comes from the stream itself: PipeWire
+screencasts announce it in their caps (KWin and Mutter as ``max-framerate``,
+the output's refresh, with ``framerate`` 0/1; wlroots as ``framerate``). The
+pipeline is built at the last known refresh (``refresh_hz``: from an earlier
+session, or the daemon; unknown: 60 fps) and the first caps settle it. Only
+videorate's output caps (the "rate" capsfilter) and the encoder's GOP and
+bitrate change then, before any frame reaches them; the RECONFIGURE event that
+change sends upstream is dropped at videorate, which converts any input rate,
+so the compositor's stream is never renegotiated and nothing restarts. A
+refresh change mid-session is only logged: the next start records at it.
+
 Everything here runs on the GLib main loop of the caller.
 """
 
@@ -242,12 +255,14 @@ class _Variant:
 
 def describe_capture(size: tuple[int, int] | None, fps: int, quality_name: str, kbps: int, fmt: str | None,
                      encoder: str, zero_copy: bool, window: bool, source: str, *, kbps_by_hand: bool = False,
-                     fallback: tuple[str, str] | None = None, stage: str | None = None) -> str:
+                     fallback: tuple[str, str] | None = None, stage: str | None = None,
+                     fps_why: str | None = None) -> str:
     """Everything that defines a recording, as the log's one line says it::
 
-        1280x720 @ 120 fps, ultra, 22000 kbps, AV1 (vaav1enc, zero-copy), full screen, portal
+        1280x720 @ 120 fps (auto: 120 Hz screen), ultra, 22000 kbps, AV1 (vaav1enc, zero-copy), full screen, portal
 
     ``size`` is the picture really recorded (None: not known before the first frame).
+    ``fps_why``: why this frame rate, for fps "auto" ("auto: 120 Hz screen").
     ``window``: one window is recorded (never its title), else the full screen.
     ``fallback``: (wanted, got) when the wanted format didn't start.
     """
@@ -257,7 +272,7 @@ def describe_capture(size: tuple[int, int] | None, fps: int, quality_name: str, 
     if fallback:
         fmt_part += f"; {codecs.label(fallback[0])} didn't start"
     fmt_part += ")"
-    parts = [f"{shown} @ {fps} fps", str(quality_name), f"{kbps} kbps" + (" (set by hand)" if kbps_by_hand else ""),
+    parts = [f"{shown} @ {fps} fps" + (f" ({fps_why})" if fps_why else ""), str(quality_name), f"{kbps} kbps" + (" (set by hand)" if kbps_by_hand else ""),
              fmt_part, "window" if window else "full screen", source or "?"]
     if stage:
         parts.append(f"debug stage {stage}")
@@ -314,6 +329,9 @@ class Recorder:
     # The test source says its size in advance, as a portal does; tests turn this
     # off to exercise the runtime fallback (the size learnt from the first caps).
     test_size_known = True
+    # The test source's screen refresh (Hz), announced in its caps as a KWin
+    # screencast does (max-framerate); None: its caps say only its own frame rate.
+    test_refresh: float | None = None
 
     def __init__(
         self,
@@ -331,6 +349,11 @@ class Recorder:
         self.source_name = ""
         self.encoder_name = ""
         self.buffer_dir = Path(cfg["buffer"]["dir"])
+        # The frame rate: the setting ("auto" | 60 | 120) and the one recorded. For
+        # auto it follows refresh_hz, the recorded screen's refresh rate: the last one
+        # known (the daemon may set it before start()), settled by the first caps.
+        self.fps_setting = quality.fps_setting(cfg["capture"])
+        self.refresh_hz: float | None = None
         self.fps = quality.fps(cfg["capture"])
         # The preset recorded (an older config's 1440p/2160p records at 1080p).
         self.size_name = quality.configured(cfg["capture"])
@@ -371,6 +394,7 @@ class Recorder:
         self._open: dict[str, float] = {}
         self._flush_waiters: list[list] = []  # [request_wall, callback, timeout_id]
         self._size_caps: str | None = None      # caps of the "size" capsfilter, without width/height
+        self._rate_mem = "video/x-raw"          # the "rate" capsfilter's media type (VAMemory: zero-copy)
         self._locked_size: tuple[int, int] | None = None
         # The source's size before the pipeline is built (the portal's stream size,
         # the test source's size, or the real size after a restart); None: unknown.
@@ -382,7 +406,7 @@ class Recorder:
         self._stage: str | None = None  # the MOMENTO_DEBUG_STAGE of the pipeline last built
         self._frame_waiters: list[dict] = []    # grab_frame() requests still waiting for a frame
         self._variant: _Variant | None = None   # the variant of the pipeline last built
-        self._logged: tuple | None = None       # (size, kbps) the last "recording:" line said
+        self._logged: tuple | None = None       # _log_key() of the last "recording:" line
 
     # --- public API -------------------------------------------------------------
 
@@ -759,8 +783,10 @@ class Recorder:
         if src == "test":
             # Named caps so a test can change the "window" size mid-stream.
             w, h = self.test_size
+            hz = quality.refresh_hz(self.test_refresh)
+            rate = f",max-framerate={round(hz)}/1" if hz else ""
             return ("videotestsrc name=src is-live=true pattern=ball ! "
-                    f"capsfilter name=testcaps caps=video/x-raw,width={w},height={h}")
+                    f"capsfilter name=testcaps caps=video/x-raw,width={w},height={h}{rate}")
         if src == "x11":
             return f"ximagesrc name=src use-damage=false show-pointer={'true' if cap.get('show_cursor') else 'false'}"
         if src == "gamescope":
@@ -802,6 +828,13 @@ class Recorder:
         source's own; None while that isn't known yet."""
         return self._locked_size or self.size or self.source_size
 
+    def fps_why(self) -> str | None:
+        """Why this frame rate, for fps "auto": "auto: 120 Hz screen" (None for a fixed rate)."""
+        if self.fps_setting != "auto":
+            return None
+        hz = quality.hz_label(self.refresh_hz)
+        return f"auto: {hz} Hz screen" if hz else "auto: screen refresh not known yet"
+
     def capture_summary(self) -> str:
         """The current (or last) capture, as its "recording:" log line says it."""
         v = self._variant
@@ -810,12 +843,16 @@ class Recorder:
             self.recorded_size(), self.fps, str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(), self._kbps,
             self.format_effective, self.encoder_name or (v.encoder if v else "?"), bool(v and v.zero_copy),
             self.window_mode, self.source_name, kbps_by_hand=int(cap.get("bitrate_kbps") or 0) > 0,
-            fallback=self.format_fallback, stage=self._stage)
+            fallback=self.format_fallback, stage=self._stage, fps_why=self.fps_why())
+
+    def _log_key(self) -> tuple:
+        """What the "recording:" line says that the first frame may change."""
+        return self.recorded_size(), self._kbps, self.fps, self.fps_why()
 
     def _log_capture(self, note: str = "") -> None:
         """One line with everything that defines this recording (at every pipeline start,
-        and again when the first frame changes its size or bitrate)."""
-        self._logged = (self.recorded_size(), self._kbps)
+        and again when the first frame changes its size, bitrate or frame rate)."""
+        self._logged = self._log_key()
         log.info("recording: %s%s", self.capture_summary(), note)
 
     def _output_size(self) -> tuple[int, int] | None:
@@ -826,6 +863,10 @@ class Recorder:
         """The "size" capsfilter's caps for the current plan."""
         out = self._output_size()
         return self._size_caps + (f",width={out[0]},height={out[1]}" if out else "")
+
+    def _rate_caps(self) -> str:
+        """The "rate" capsfilter's caps (right after videorate) for the current frame rate."""
+        return f"{self._rate_mem},framerate={self.fps}/1"
 
     def _log_size(self, kbps: int) -> None:
         w_h = self.source_size
@@ -843,7 +884,6 @@ class Recorder:
     def _video_chain(self, v: _Variant, tail: str | None = None) -> str:
         """The video chain after the source; ``tail`` replaces the encoder onwards (debug stages)."""
         tail = tail or self._encoder_tail(v)
-        fps = f"{self.fps}/1"
         # Scaling keeps the aspect ratio; a screen of another shape gets black bars.
         # (A window that is resized mid-stream is scaled into the same frame.)
         # Always there: native may have to scale a picture taller than
@@ -856,26 +896,30 @@ class Recorder:
         if v.zero_copy or v.encoder in VA_ENCODERS:
             self._size_caps = "video/x-raw(memory:VAMemory),format=NV12"
         elif v.encoder in ("x264enc", "openh264enc"):
-            self._size_caps = f"video/x-raw,format=I420,framerate={fps}"
+            self._size_caps = "video/x-raw,format=I420"
         elif codecs.format_of(v.encoder) != "h264":
             # NVENC / Quick Sync H.265 and AV1 also take 10-bit input; keep them 8-bit
             # (a 10-bit stream may not play everywhere; the VA paths are NV12 as well).
-            self._size_caps = f"video/x-raw,format=NV12,framerate={fps}"
+            self._size_caps = "video/x-raw,format=NV12"
         else:
-            self._size_caps = f"video/x-raw,framerate={fps}"
+            self._size_caps = "video/x-raw"
+        # The frame rate lives in one named capsfilter ("rate") right after videorate
+        # ("vrate"): the first caps may change it (fps auto, _pin_size) without the
+        # source renegotiating, since videorate takes any input rate.
+        self._rate_mem = "video/x-raw(memory:VAMemory)" if v.zero_copy else "video/x-raw"
+        rate = f'videorate name=vrate ! capsfilter name=rate caps="{self._rate_caps()}"'
         sized = f'capsfilter name=size caps="{self._output_caps()}"'
         if v.zero_copy:
             # Copy each frame into our own VA surface right away (GPU colour
             # conversion + scaling) so the compositor gets its buffer back within
             # a millisecond. KWin shares only 3-4 buffers; holding them in a
             # queue/videorate made it skip every other frame (~30 fps real motion).
-            return (f"vapostproc add-borders=true ! {sized} ! "
-                    f"{queue.format(8)} ! videorate ! video/x-raw(memory:VAMemory),framerate={fps} ! {tail}")
+            return f"vapostproc add-borders=true ! {sized} ! {queue.format(8)} ! {rate} ! {tail}"
         conv = f"{queue.format(3)} ! "
         if v.encoder in VA_ENCODERS:
-            conv += f"videoconvert ! videorate ! video/x-raw,framerate={fps} ! vapostproc add-borders=true ! {sized}"
+            conv += f"videoconvert ! {rate} ! vapostproc add-borders=true ! {sized}"
         else:
-            conv += f"videoconvert ! {scale}videorate ! {sized}"
+            conv += f"videoconvert ! {scale}{rate} ! {sized}"
         return f"{conv} ! {tail}"
 
     def _encoder_tail(self, v: _Variant) -> str:
@@ -999,9 +1043,11 @@ class Recorder:
             _set(src, keepalive_time=250, on_disconnect="error")
         # Sees the source's caps before they travel on: checks its size, and pins
         # the output size at runtime when it wasn't known in advance (fallback).
+        vrate = pipeline.get_by_name("vrate")
         src.get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._pin_size,
                                             (pipeline.get_by_name("size"), pipeline.get_by_name("enc"),
-                                             v.encoder))
+                                             v.encoder, pipeline.get_by_name("rate"),
+                                             vrate.get_static_pad("sink") if vrate is not None else None))
 
     def _build_capture_only(self, v: _Variant) -> Gst.Pipeline:
         """``MOMENTO_DEBUG_STAGE=capture`` (``MOMENTO_DEBUG_CAPTURE_ONLY=1``): the source into a fakesink.
@@ -1080,12 +1126,64 @@ class Recorder:
 
     def _prepare_size(self) -> None:
         """Before a pipeline is built: plan its output size from the known source size
-        (None: learnt from the first caps) and the encoder bitrate that goes with it."""
+        (None: learnt from the first caps), its frame rate from the last known screen
+        refresh, and the encoder bitrate that goes with them."""
         self._source_seen = False
         self._plan_size(self._known_size)
+        self._plan_fps(None)
         # The bitrate of the size really recorded (unknown: the preset's, until the caps tell).
-        self._kbps = quality.bitrate_kbps(self.cfg["capture"], self.source_size)
+        self._kbps = quality.bitrate_kbps(self.cfg["capture"], self.source_size, self.refresh_hz)
         self._log_size(self._kbps)
+
+    def _plan_fps(self, refresh) -> bool:
+        """The frame rate for a screen of ``refresh`` Hz (None: the last one known stays).
+
+        Sets ``refresh_hz`` (when ``refresh`` is known) and ``fps``: the setting, or for
+        "auto" what that refresh records at. Returns whether ``fps`` changed.
+        """
+        refresh = quality.refresh_hz(refresh)
+        if refresh is not None:
+            self.refresh_hz = refresh
+        old, self.fps = self.fps, quality.fps(self.cfg["capture"], self.refresh_hz)
+        return self.fps != old
+
+    def _caps_refresh(self, st: Gst.Structure) -> float | None:
+        """The screen refresh (Hz) a video source's caps announce, None when they don't.
+
+        KWin and Mutter screencasts say it as ``max-framerate`` (the output's refresh;
+        ``framerate`` is 0/1, variable), wlroots' portal as ``framerate``. Only
+        PipeWire sources (and the test source) count: another source's framerate is
+        its own choice (x11), not the screen's.
+        """
+        if self.source_name not in ("portal", "gamescope", "test"):
+            return None
+        for field in ("max-framerate", "framerate"):
+            ok, num, den = st.get_fraction(field)
+            if ok and num > 0 and den > 0:
+                return quality.refresh_hz(num / den)
+        return None
+
+    def _apply_rate_caps(self, rate, guard) -> bool:
+        """Give the "rate" capsfilter the current frame rate, unless it has it already.
+
+        ``guard`` is videorate's sink pad: the RECONFIGURE event the change sends
+        upstream is dropped there, so the source (the compositor's stream) is not
+        renegotiated; videorate converts from whatever rate comes in. Returns
+        whether the caps changed.
+        """
+        if rate is None:
+            return False
+        want = Gst.Caps.from_string(self._rate_caps())
+        have = rate.get_property("caps")
+        if isinstance(have, Gst.Caps) and have.is_equal(want):
+            return False
+        probe = guard.add_probe(Gst.PadProbeType.EVENT_UPSTREAM, _drop_reconfigure) if guard is not None else 0
+        try:
+            rate.set_property("caps", want)
+        finally:
+            if probe:
+                guard.remove_probe(probe)
+        return True
 
     def _pin_size(self, pad: Gst.Pad, info: Gst.PadProbeInfo, data: tuple):
         """Streaming thread: check the source's first caps against the plan.
@@ -1099,33 +1197,58 @@ class Recorder:
         compositor, see ``_may_be_renegotiation``). Later resizes (a window) are
         scaled into the session's size. The encoder gets the bitrate of the size
         really recorded.
+
+        The frame rate (fps auto) is settled here too: the caps' refresh
+        (``_caps_refresh``) picks it, and when that differs from the plan the
+        "rate" capsfilter and the encoder's GOP and bitrate change, without the
+        source renegotiating (``_apply_rate_caps``). ``data`` is (size capsfilter,
+        encoder, encoder name[, rate capsfilter, videorate's sink pad]).
         """
-        capsfilter, enc, encoder = data
+        capsfilter, enc, encoder = data[:3]
+        rate, guard = (data[3], data[4]) if len(data) > 4 else (None, None)
         event = info.get_event()
         if event is None or event.type != Gst.EventType.CAPS:
             return Gst.PadProbeReturn.OK
-        st = event.parse_caps().get_structure(0)
+        caps = event.parse_caps()
+        st = caps.get_structure(0)
         ok_w, w = st.get_int("width")
         ok_h, h = st.get_int("height")
         if not (ok_w and ok_h and w > 0 and h > 0):
             return Gst.PadProbeReturn.OK
         if not self._source_seen:
             self._source_seen = True
-            if self.source_size == (w, h):
-                return Gst.PadProbeReturn.OK  # as planned: the capsfilter is already right
-            if self.source_size is not None:
-                log.info("source is %dx%d, not the %dx%d the portal announced", w, h, *self.source_size)
-            self._plan_size((w, h))
-            self._apply_output_caps(capsfilter)
-            kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h))
-            if enc is not None and kbps != self._kbps:
-                self._kbps = kbps
-                self._encoder_settings(enc, encoder, kbps)
-            self._log_size(kbps)
-            if self._logged is not None and self._logged != (self.recorded_size(), self._kbps):
+            # What the compositor announces (the frame rate fields tell the screen's
+            # refresh), once per pipeline: the log says what fps auto was based on.
+            log.info("source's first caps: %s", caps.to_string())
+            refresh = self._caps_refresh(st)
+            fps_changed = self._plan_fps(refresh)
+            if fps_changed:
+                self._apply_rate_caps(rate, guard)
+                log.info("screen refresh %s Hz: recording at %d fps (fps auto; set by the first frame, "
+                         "no restart)", quality.hz_label(refresh), self.fps)
+            size_changed = self.source_size != (w, h)
+            if size_changed:
+                if self.source_size is not None:
+                    log.info("source is %dx%d, not the %dx%d the portal announced", w, h, *self.source_size)
+                self._plan_size((w, h))
+                self._apply_output_caps(capsfilter)
+            if size_changed or fps_changed:
+                kbps = quality.bitrate_kbps(self.cfg["capture"], (w, h), self.refresh_hz)
+                if enc is not None and (kbps != self._kbps or fps_changed):
+                    self._kbps = kbps
+                    self._encoder_settings(enc, encoder, kbps)   # the GOP follows the frame rate
+                if size_changed:
+                    self._log_size(kbps)
+            if self._logged is not None and self._logged != self._log_key():
                 self._log_capture(" (set by the first frame)")
         elif self._locked_size is not None and (w, h) != self._locked_size:
             log.info("source resized to %dx%d; scaled into %dx%d", w, h, *self._locked_size)
+        else:
+            refresh = self._caps_refresh(st)
+            if (refresh is not None and self.fps_setting == "auto"
+                    and quality.auto_fps(refresh) != self.fps):
+                log.info("screen refresh now %s Hz: recording stays at %d fps until capture restarts",
+                         quality.hz_label(refresh), self.fps)
         return Gst.PadProbeReturn.OK
 
     def _apply_output_caps(self, capsfilter) -> bool:
@@ -1472,6 +1595,14 @@ class Recorder:
             self.on_state(state, message)
         except Exception:  # noqa: BLE001 - a UI callback must not kill capture
             log.exception("on_state callback failed")
+
+
+def _drop_reconfigure(_pad: Gst.Pad, info: Gst.PadProbeInfo):
+    """Upstream event probe: drop a RECONFIGURE (see Recorder._apply_rate_caps)."""
+    event = info.get_event()
+    if event is not None and event.type == Gst.EventType.RECONFIGURE:
+        return Gst.PadProbeReturn.DROP
+    return Gst.PadProbeReturn.OK
 
 
 def _vbr(enc: Gst.Element) -> str:

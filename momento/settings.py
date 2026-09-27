@@ -26,7 +26,8 @@ KEYS = {
     "resolution": ", ".join(quality.RESOLUTIONS) + " (480p: smallest files, softest picture; "
                   "native: your screen's shape, up to 1080p)",
     "quality": ", ".join(quality.QUALITIES),
-    "fps": ", ".join(map(str, quality.FPS_CHOICES)),
+    "fps": "auto, 60, 120 (auto matches your screen: 120 on a 120 Hz screen, 60 on a 60 Hz one; "
+           "the default)",
     "format": "auto, h264, h265, av1 (auto picks a format your PC records well, H.264 on most PCs; "
               "h264 plays everywhere; h265 and av1 some older devices can't play)",
     "bitrate": "video kbps; 0 = automatic",
@@ -167,12 +168,9 @@ def normalize(key: str, value):
         return v
     if key == "fps":
         try:
-            v = int(str(value).strip().lower().removesuffix("fps").strip())
+            return quality.fps_setting({"fps": value if value not in (None, "", 0) else "?"})
         except ValueError:
-            v = None
-        if v not in quality.FPS_CHOICES:
-            raise ValueError(f"choose one of: {', '.join(map(str, quality.FPS_CHOICES))}")
-        return v
+            raise ValueError(f"choose one of: {', '.join(map(str, quality.FPS_CHOICES))}") from None
     if key == "format":
         return codecs.normalize(value)
     if key == "bitrate":
@@ -334,6 +332,14 @@ def writes(key: str, value) -> list[tuple[str, str, object]]:
     raise ValueError(f"unknown setting {key!r}")
 
 
+def _fps_value(cap: dict):
+    """The frame rate setting ("auto", 60, 120); a hand-edited value it can't be is shown as is."""
+    try:
+        return quality.fps_setting(cap)
+    except ValueError:
+        return cap.get("fps")
+
+
 def current(cfg: dict) -> dict:
     """User-facing values of a loaded config."""
     cap, a = cfg["capture"], cfg["audio"]
@@ -346,7 +352,7 @@ def current(cfg: dict) -> dict:
         # an older config's 1440p/2160p reads as what it records at (1080p)
         "resolution": quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
         "quality": str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
-        "fps": int(cap.get("fps") or quality.FPS),
+        "fps": _fps_value(cap),
         "format": codecs.configured(cap),
         "bitrate": int(cap.get("bitrate_kbps") or 0),
         "audio_source": "off" if not a.get("desktop") else "default" if dev == DEFAULT_MONITOR else dev,
@@ -459,7 +465,7 @@ def preview(cfg: dict, changes: dict) -> dict:
 
 
 def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
-             failed=()) -> dict:
+             failed=(), refresh=None) -> dict:
     """Everything a settings UI needs: current values, choices, tabs, audio devices.
 
     ``source`` is the size of the recorded picture when the daemon knows it (the
@@ -475,6 +481,10 @@ def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
     unavailable ones for Auto and the fallback, still selectable).
     ``format_crashed``: formats whose start crashed Momento here (skipped the
     same way; picking one again retries it).
+
+    ``refresh`` is the recorded screen's refresh rate in Hz when the daemon knows
+    it (``refresh_hz``): ``fps_effective`` (and ``fps``) is what the saved frame
+    rate records at (Auto: 120 on a screen of 100 Hz or more, else 60).
     """
     from . import gamepad
 
@@ -503,7 +513,10 @@ def describe(cfg: dict, devices: dict | None = None, source=None, formats=None,
         # python-evdev importable: without it the controller settings are saved but unused
         "controller_available": gamepad.available(),
         "devices": list_audio_devices() if devices is None else devices,
-        "fps": quality.fps(cfg["capture"]),
+        # what the saved frame rate records at (Auto: by the screen's refresh rate)
+        "fps": quality.fps(cfg["capture"], refresh),
+        "fps_effective": quality.fps(cfg["capture"], refresh),
+        "refresh_hz": quality.refresh_hz(refresh),
         "max_seconds": int(cfg["buffer"]["max_seconds"]),
         "config": cfg.get("_path") or str(config.default_path()),
     }

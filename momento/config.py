@@ -41,8 +41,9 @@ DEFAULTS = {
     "capture": {
         # auto | portal | gamescope | x11 | test
         "source": "auto",
-        # 60 | 120 frames per second (120 needs a 120 Hz display to be useful).
-        "fps": 60,
+        # auto | 60 | 120 frames per second. Auto follows the recorded screen's refresh
+        # rate: 120 on a screen of 100 Hz or more (120, 144, 165 Hz), else 60.
+        "fps": "auto",
         # 480p | 720p | 1080p | native (screen size, scaled down to at most 1080 lines).
         # 1440p / 2160p are not offered yet (quality.MAX_HEIGHT); an older config
         # that has them records at 1080p.

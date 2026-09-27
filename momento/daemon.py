@@ -260,6 +260,11 @@ class Daemon:
         # reloads and restarts of capture; forgotten when another window is
         # picked or the Record setting changes.
         self.source_size: tuple[int, int] | None = None
+        # The recorded screen's refresh rate (Hz) as the last session's stream said it;
+        # None until known. fps "auto" records at 120 from 100 Hz up, else 60
+        # (quality.fps), and the storage math counts that. Handed to every new
+        # Recorder, so a restart plans at it; forgotten with source_size.
+        self.refresh_hz: float | None = None
         # Disk-space guard: set while capture is blocked (state "no_storage").
         self.storage_error: str | None = None
         self._storage_reason: str | None = None  # "start" (never fit) | "low" (ran low while recording)
@@ -308,7 +313,7 @@ class Daemon:
             from .portal import register_app_id
 
             register_app_id(self.bus, config.APP_ID)
-        self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
+        self.recorder = self._new_recorder(Recorder)
         self.hours.reset()
         if self._waits_for_play():
             # Window mode never records on its own at login (that would mean a
@@ -548,6 +553,10 @@ class Daemon:
             if size is not None and size != self.source_size:
                 self.source_size = size
                 log.info("recording a %dx%d picture", *size)
+            hz = quality.refresh_hz(getattr(self.recorder, "refresh_hz", None))
+            if hz is not None and hz != self.refresh_hz:
+                self.refresh_hz = hz
+                log.info("the recorded screen runs at %s Hz", quality.hz_label(hz))
         if state == "recording":
             self._tell_format_fallback()
             self._tell_format_crash()
@@ -632,6 +641,18 @@ class Daemon:
             return None
         return fmt if self._crashed(fmt) else None
 
+    def fps_effective(self) -> int:
+        """The frame rate recorded: the setting, or for "auto" what the screen's refresh
+        (``refresh_hz``) records at (60 while it is unknown)."""
+        return quality.fps(self.cfg["capture"], self.refresh_hz)
+
+    def _new_recorder(self, recorder_class):
+        """A Recorder for the current settings that plans with the last known screen refresh."""
+        rec = recorder_class(self.cfg, self.ring, self._on_state, bus=self.bus)
+        if self.refresh_hz is not None:
+            rec.refresh_hz = self.refresh_hz
+        return rec
+
     def format_effective(self, cfg: dict | None = None) -> str | None:
         """The format recording is (or would be) in: the running recorder's, else the plan
         from the machine's detection; None while Auto's pick is still unknown."""
@@ -691,6 +712,7 @@ class Daemon:
         self._name_token = None
         self._name_gen += 1
         self.source_size = None
+        self.refresh_hz = None   # a window may be on another screen
 
     def _look_up_target_name(self) -> None:
         """Once per portal session: the picked window's title, from its restore token."""
@@ -816,7 +838,7 @@ class Daemon:
         """
         if reclaimable is None:
             reclaimable = storage.dir_bytes(self.buffer_dir)
-        return storage.check(cfg or self.cfg, reclaimable, self.source_size)
+        return storage.check(cfg or self.cfg, reclaimable, self.source_size, self.refresh_hz)
 
     def _start_recorder(self, reclaimable: int | None = None, interactive: bool = False) -> bool:
         """Start capture if a full buffer fits on disk; otherwise enter "no_storage".
@@ -895,8 +917,8 @@ class Daemon:
         except Exception:  # noqa: BLE001 - a warning must never break a command or the timer
             log.exception("low-storage check failed")
             return
-        src = self.source_size   # what the settings ask, at the size really recorded
-        need = (storage.required_bytes(self.cfg, src), storage.history_bytes(self.cfg, src))
+        src, hz = self.source_size, self.refresh_hz   # what the settings ask, as really recorded
+        need = (storage.required_bytes(self.cfg, src, hz), storage.history_bytes(self.cfg, src, hz))
         if not chk["low"]:
             if self._low_notified and (need != self._low_need or self._clear_of_low(chk)):
                 log.info("storage: room for a full %s again", storage.span(self.ring.max_seconds))
@@ -916,7 +938,7 @@ class Daemon:
         if self._low_disk == "output" and chk["disk"] != "output":
             # the clips disk recovered; this check describes the buffer disk, so look there
             out = storage.output_dir(self.cfg)
-            need = storage.history_bytes(self.cfg, self.source_size) + storage.RESERVE
+            need = storage.history_bytes(self.cfg, self.source_size, self.refresh_hz) + storage.RESERVE
             return out is None or storage.free_bytes(out) >= need + storage.REARM_MARGIN
         return chk["available"] >= chk["needed"] + storage.REARM_MARGIN
 
@@ -989,7 +1011,7 @@ class Daemon:
         self._set_replay_length(cfg["buffer"]["max_seconds"])
         self._sync_bar()
         self._sync_controller()
-        self.recorder = Recorder(self.cfg, self.ring, self._on_state, bus=self.bus)
+        self.recorder = self._new_recorder(Recorder)
         started = False
         if not self.paused:
             started = self._start_recorder(interactive=interactive)
@@ -1004,7 +1026,7 @@ class Daemon:
         """Current settings + choices + audio devices (pactl runs off the main loop)."""
         fallback = self.cfg
         path = self._cfg_path()
-        source = self.source_size
+        source, refresh = self.source_size, self.refresh_hz
 
         def work() -> None:
             try:
@@ -1014,8 +1036,10 @@ class Daemon:
                     cfg = fallback
                 # the format detection runs at start; wait for it here (a worker thread)
                 det = codecs.DETECTOR.wait(timeout=30) or codecs.UNKNOWN
-                result = settings.describe(cfg, source=source, formats=det, failed=codecs.DETECTOR.failed)
-                result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source)
+                result = settings.describe(cfg, source=source, formats=det, failed=codecs.DETECTOR.failed,
+                                           refresh=refresh)
+                result["storage"] = storage.requirements(cfg, storage.dir_bytes(storage.buffer_dir(cfg)), source,
+                                                         refresh)
             except Exception as e:  # noqa: BLE001
                 log.exception("settings failed")
                 result = {"ok": False, "error": str(e) or e.__class__.__name__}
@@ -1035,10 +1059,10 @@ class Daemon:
             saved = config.load(self._cfg_path())
             new = settings.preview(saved, changes)
             quality.bitrate_kbps(new["capture"])
-            source = self.source_size
+            source, refresh = self.source_size, self.refresh_hz
             if config.capture_target(new["capture"]) != config.capture_target(saved["capture"]):
-                source = None  # another kind of picture: its size is not known yet
-            chk = storage.check(new, storage.dir_bytes(self.buffer_dir), source)
+                source = refresh = None  # another kind of picture: its size (and screen) not known yet
+            chk = storage.check(new, storage.dir_bytes(self.buffer_dir), source, refresh)
         except (OSError, ValueError) as e:
             log.info("settings change refused (%s): %s (asked: %s)", origin, e, settings.describe_request(changes))
             reply({"ok": False, "error": str(e)})
@@ -1046,8 +1070,8 @@ class Daemon:
         # Refuse settings that need more room than there is. A change that doesn't
         # raise the requirement (a smaller size, another mic) always goes through.
         if (not chk["ok"] and not msg.get("force")
-                and storage.required_bytes(new, source) > storage.required_bytes(saved, source)):
-            what = storage.label(new)
+                and storage.required_bytes(new, source, refresh) > storage.required_bytes(saved, source, refresh)):
+            what = storage.label(new, refresh=refresh)
             if new["buffer"]["max_seconds"] != saved["buffer"]["max_seconds"]:
                 what = f"{storage.span(new['buffer']['max_seconds'])} at {what}"   # "60 min at 1080p High"
             error = (f"{what} needs {storage.human(chk['required'])} free, "
@@ -1299,8 +1323,12 @@ class Daemon:
                                                                  self.source_size),
             "source_size": list(self.source_size) if self.source_size else None,
             "quality": self.cfg["capture"]["quality"],
-            "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"], self.source_size),
-            "fps": quality.fps(self.cfg["capture"]),
+            "bitrate_kbps": quality.bitrate_kbps(self.cfg["capture"], self.source_size, self.refresh_hz),
+            # The frame rate setting ("auto" | 60 | 120) and the rate really recorded:
+            # auto follows the screen's refresh (refresh_hz, null until known: 60).
+            "fps": quality.fps_setting(self.cfg["capture"]),
+            "fps_effective": self.fps_effective(),
+            "refresh_hz": self.refresh_hz,
             # The format setting, and what is really recorded (a fallback when the
             # one picked failed to start); null while Auto's pick is unknown.
             "format": codecs.configured(self.cfg["capture"]),

@@ -1436,9 +1436,10 @@ class DaemonControlTest(unittest.TestCase):
             r = self.call({"cmd": "settings"})
         st = r["storage"]
         self.assertEqual(st["free"], self.free)
-        self.assertEqual(st["current"], "1080p/high/60")
-        self.assertEqual(len(st["required"]), 4 * 3 * 2)       # 480p, 720p, 1080p, native
-        self.assertEqual(st["required"]["1080p/high/60"], storage.required_bytes(self.d.cfg))
+        self.assertEqual(st["current"], "1080p/high/auto")     # fps auto, the default
+        self.assertEqual(len(st["required"]), 4 * 3 * 3)       # 480p, 720p, 1080p, native x auto, 60, 120
+        self.assertEqual(st["required"]["1080p/high/auto"], storage.required_bytes(self.d.cfg))
+        self.assertEqual(st["required"]["1080p/high/auto"], st["required"]["1080p/high/60"])  # refresh unknown
 
 
 class SizedRecorder(FakeRecorder):
@@ -1535,7 +1536,7 @@ class DaemonResolutionCapTest(unittest.TestCase):
         self.assertEqual(r["choices"]["resolution"], ["480p", "720p", "1080p", "native"])
         self.assertEqual(r["resolution_allowed"], ["480p", "720p", "1080p", "native"])
         self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("1080p", "1080p"))
-        self.assertEqual(r["storage"]["current"], "1080p/high/60")
+        self.assertEqual(r["storage"]["current"], "1080p/high/auto")
         self.assertEqual(r["storage"]["required"]["native/high/60"], r["storage"]["required"]["1080p/high/60"])
         # 4K can't be chosen again
         r = self.call({"cmd": "configure", "changes": {"resolution": "4k"}})
@@ -1664,13 +1665,15 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(chk["path"], cfg["buffer"]["dir"])
             self.assertTrue(storage.check(cfg, reclaimable=100)["ok"])
             req = storage.requirements(cfg, reclaimable=7)
-        self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/high/60"))
+        self.assertEqual((req["free"], req["reclaimable"], req["current"]), (need - 100, 7, "1080p/high/auto"))
         self.assertEqual(req["required"]["1080p/high/60"], need)
+        self.assertEqual(req["required"]["1080p/high/auto"], need)            # refresh unknown: 60 fps
         self.assertLess(req["required"]["720p/standard/60"], req["required"]["1080p/ultra/120"])
         self.assertLess(req["required"]["480p/high/60"], req["required"]["720p/high/60"])
         self.assertEqual(sorted(req["required"]), sorted(f"{r}/{q}/{f}" for r in ("480p", "720p", "1080p", "native")
-                                                         for q in ("standard", "high", "ultra") for f in (60, 120)))
-        self.assertEqual(len(req["required"]), 24)        # 480p, 720p, 1080p, native x 3 x 2
+                                                         for q in ("standard", "high", "ultra")
+                                                         for f in ("auto", 60, 120)))
+        self.assertEqual(len(req["required"]), 36)        # 480p, 720p, 1080p, native x 3 x (auto, 60, 120)
         self.assertEqual(cfg["capture"]["resolution"], "1080p")  # not mutated
 
     def test_full_span_need(self):
@@ -4850,9 +4853,10 @@ class SettingsChangeLogTest(unittest.TestCase):
         self.assertEqual(list(changes), ["replay_length", "resolution", "quality", "fps", "format", "bitrate",
                                          "keep_history"])
         self.assertEqual(settings.describe_changes(changes),
-                         "replay length 15m -> 30m, resolution 1080p -> 720p, quality high -> ultra, fps 60 -> 120, "
+                         "replay length 15m -> 30m, resolution 1080p -> 720p, quality high -> ultra, fps auto -> 120, "
                          "format auto -> av1, bitrate auto -> 12000 kbps, keep history off -> on")
-        self.assertEqual(settings.diff(before, {"fps": 60}), {})
+        self.assertEqual(settings.diff(before, {"fps": "auto"}), {})           # auto: the default
+        self.assertEqual(settings.describe_changes(settings.diff(before, {"fps": 60})), "fps auto -> 60")
         self.assertEqual(settings.describe_request({"fps": "75\n", "colour": "red"}), "fps=75?, colour=?")
 
     def test_a_change_from_the_bar_is_one_line(self):
@@ -4861,12 +4865,12 @@ class SettingsChangeLogTest(unittest.TestCase):
                                             "mic": "off"}})                            # mic: already off
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.about_settings(lines),
-                         ["settings changed: resolution 1080p -> 720p, quality high -> ultra, fps 60 -> 120, "
+                         ["settings changed: resolution 1080p -> 720p, quality high -> ultra, fps auto -> 120, "
                           "format auto -> av1 (from the bar)"])
 
     def test_origin(self):
         lines, _r = self.logged({"cmd": "configure", "origin": "set", "changes": {"fps": 120}})
-        self.assertEqual(self.about_settings(lines), ["settings changed: fps 60 -> 120 (from momento set)"])
+        self.assertEqual(self.about_settings(lines), ["settings changed: fps auto -> 120 (from momento set)"])
         lines, _r = self.logged({"cmd": "configure", "origin": "evil\nline", "changes": {"fps": 60}})
         self.assertEqual(self.about_settings(lines), ["settings changed: fps 120 -> 60 (from a client)"])
         lines, _r = self.logged({"cmd": "configure", "changes": {"keep_history": "on"}})    # live: no restart
@@ -4886,7 +4890,7 @@ class SettingsChangeLogTest(unittest.TestCase):
         lines, r = self.logged({"cmd": "configure", "origin": "bar", "changes": {"fps": 75}})
         self.assertFalse(r["ok"])
         self.assertEqual(self.about_settings(lines),
-                         ["settings change refused (from the bar): fps: choose one of: 60, 120 (asked: fps=75)"])
+                         ["settings change refused (from the bar): fps: choose one of: auto, 60, 120 (asked: fps=75)"])
         lines, r = self.logged({"cmd": "configure", "origin": "set", "changes": {"resolution": "1440p"}})
         self.assertFalse(r["ok"])
         self.assertEqual(len(self.about_settings(lines)), 1)
@@ -4907,7 +4911,7 @@ class SettingsChangeLogTest(unittest.TestCase):
         lines, r = self.logged({"cmd": "reload"})
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.about_settings(lines),
-                         ["settings changed: resolution 1080p -> 720p, fps 60 -> 120 (config reload)"])
+                         ["settings changed: resolution 1080p -> 720p, fps auto -> 120 (config reload)"])
         lines, _r = self.logged({"cmd": "reload"})
         self.assertEqual(self.about_settings(lines),
                          ["settings unchanged (config reload): restarting capture with the same settings"])
@@ -4931,6 +4935,225 @@ class SettingsChangeLogTest(unittest.TestCase):
         self.assertEqual(daemon.clip_params(Selection([seg], 0.0, 10.0, 0.0, 10.0)), "AV1 1280x720 @ 120 fps")
         old = Segment(Path("seg00000001.ts"), 0.0, 10.0, fps=59.94)                  # an older index line
         self.assertEqual(daemon.clip_params(Selection([old], 0.0, 10.0, 0.0, 10.0)), "format ? size ? @ 59.94 fps")
+
+
+class AutoFpsRuleTest(unittest.TestCase):
+    """fps "auto" (the default) follows the recorded screen's refresh rate."""
+
+    def test_the_rule(self):
+        from momento import quality
+
+        for hz, fps in ((60, 60), (75, 60), (90, 60), (99.9, 60), (100, 120), (119.88, 120), (120, 120),
+                        (144, 120), (165, 120), (240, 120), (59.94, 60)):
+            with self.subTest(hz=hz):
+                self.assertEqual(quality.auto_fps(hz), fps)
+                self.assertEqual(quality.fps({"fps": "auto"}, hz), fps)
+                self.assertEqual(quality.fps({}, hz), fps)                    # auto is the default
+        for unknown in (None, 0, -60, float("nan"), float("inf"), "120", True):
+            with self.subTest(unknown=unknown):
+                self.assertEqual(quality.auto_fps(unknown), 60)              # unknown: 60
+        self.assertEqual(quality.hz_label(119.88), "120")
+        self.assertIsNone(quality.hz_label(None))
+
+    def test_the_setting(self):
+        from momento import config, quality
+
+        self.assertEqual(config.DEFAULTS["capture"]["fps"], "auto")
+        self.assertEqual(quality.FPS_CHOICES, ("auto", 60, 120))
+        for value, setting in ((None, "auto"), ("", "auto"), ("auto", "auto"), ("AUTO", "auto"), (60, 60),
+                               (120, 120), ("120", 120), ("60 fps", 60), (120.0, 120)):
+            self.assertEqual(quality.fps_setting({"fps": value}), setting, value)
+        for bad in (75, 90, 144, "fast", True, 60.5, [60]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                quality.fps({"fps": bad}, 120)
+
+    def test_explicit_configs_are_unchanged(self):
+        """An explicit 60 or 120 records at that rate whatever the screen runs at."""
+        from momento import quality
+
+        for hz in (None, 60, 120, 144):
+            self.assertEqual(quality.fps({"fps": 60}, hz), 60)
+            self.assertEqual(quality.fps({"fps": 120}, hz), 120)
+            self.assertEqual(quality.bitrate_kbps({"fps": 60, "resolution": "1080p", "quality": "high"}, None, hz),
+                             15_000)
+            self.assertEqual(quality.bitrate_kbps({"fps": 120, "resolution": "1080p", "quality": "high"}, None, hz),
+                             22_000)
+
+    def test_bitrate_and_storage_at_auto(self):
+        import copy
+
+        from momento import config, quality, storage
+
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["capture"].update(resolution="1080p", quality="high", fps="auto")
+        at = {f: copy.deepcopy(cfg) for f in (60, 120)}
+        for f, c in at.items():
+            c["capture"]["fps"] = f
+        self.assertEqual(quality.bitrate_kbps(cfg["capture"], None, 120), 22_000)    # 15 Mbps x 1.5
+        self.assertEqual(quality.bitrate_kbps(cfg["capture"], None, 60), 15_000)
+        self.assertEqual(quality.bitrate_kbps(cfg["capture"]), 15_000)               # unknown: 60 fps
+        for hz, f in ((144, 120), (120, 120), (90, 60), (60, 60), (None, 60)):
+            with self.subTest(hz=hz):
+                self.assertEqual(storage.buffer_bytes(cfg, None, hz), storage.buffer_bytes(at[f]))
+                self.assertEqual(storage.required_bytes(cfg, None, hz), storage.required_bytes(at[f]))
+        self.assertEqual(storage.label(cfg, refresh=120), "1080p High 120 fps")
+        self.assertEqual(storage.label(cfg, refresh=60), "1080p High")
+        self.assertEqual(storage.label(cfg), "1080p High")
+        self.assertEqual(storage.current_key(cfg), "1080p/high/auto")
+        with mock.patch.object(storage, "free_bytes", return_value=10**13):
+            chk = storage.check(cfg, 0, None, 120)
+            req = storage.requirements(cfg, 0, None, 120)
+        self.assertEqual((chk["required"], chk["label"]), (storage.required_bytes(at[120]), "1080p High 120 fps"))
+        self.assertEqual(req["required"]["1080p/high/auto"], req["required"]["1080p/high/120"])
+        self.assertLess(req["required"]["1080p/high/60"], req["required"]["1080p/high/auto"])
+
+    def test_settings(self):
+        from momento import config, settings
+
+        self.assertEqual(settings.validate({"fps": "auto"}), {"fps": "auto"})
+        self.assertEqual(settings.validate({"fps": "Auto"}), {"fps": "auto"})
+        self.assertEqual(settings.validate({"fps": "120"}), {"fps": 120})
+        for bad in (75, "", None, True):
+            with self.assertRaisesRegex(ValueError, "choose one of: auto, 60, 120"):
+                settings.validate({"fps": bad})
+        self.assertEqual(settings.writes("fps", "auto"), [("capture", "fps", "auto")])
+        cfg = config.load(Path(tempfile.gettempdir()) / "momento-no-such-config.toml")
+        self.assertEqual(settings.current(cfg)["fps"], "auto")
+        d = settings.describe(cfg, devices={"outputs": [], "inputs": []}, refresh=144)
+        self.assertEqual(d["choices"]["fps"], ["auto", 60, 120])
+        self.assertEqual((d["values"]["fps"], d["fps"], d["fps_effective"], d["refresh_hz"]), ("auto", 120, 120, 144))
+        d = settings.describe(cfg, devices={"outputs": [], "inputs": []})
+        self.assertEqual((d["fps"], d["fps_effective"], d["refresh_hz"]), (60, 60, None))
+        cfg["capture"]["fps"] = 75                                      # a hand edit it can't be: shown as is
+        self.assertEqual(settings.current(cfg)["fps"], 75)
+
+    def test_set_fps_auto(self):
+        import contextlib
+        import io
+
+        from momento import cli, config, ipc
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text("[capture]\nfps = 60\n")
+            self.assertEqual(config.load(path)["capture"]["fps"], 60)     # an explicit 60 stays 60
+            out = io.StringIO()
+            with mock.patch.object(ipc, "request", side_effect=ipc.DaemonNotRunning("no")), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["--config", str(path), "set", "fps", "auto"]), 0)
+                self.assertIn("fps = auto", out.getvalue())
+                self.assertEqual(config.load(path)["capture"]["fps"], "auto")
+                self.assertEqual(cli.main(["--config", str(path), "set", "fps", "120"]), 0)
+                self.assertEqual(config.load(path)["capture"]["fps"], 120)
+                self.assertEqual(cli.main(["--config", str(path), "set", "fps", "75"]), 1)
+            self.assertIn('fps = 120', path.read_text())
+        with mock.patch.object(ipc, "request", return_value={"ok": True, "changed": {"fps": "auto"},
+                                                             "restarted": True, "paused": False,
+                                                             "state": "starting"}) as req, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["set", "fps", "auto"]), 0)
+        self.assertEqual(req.call_args[0][0]["changes"], {"fps": "auto"})
+
+    def test_cli_says_what_auto_records_at(self):
+        from momento import cli
+
+        self.assertEqual(cli.fps_line("auto", 120, 120), "120 fps (auto: your screen is 120 Hz)")
+        self.assertEqual(cli.fps_line("auto", 120, 144), "120 fps (auto: your screen is 144 Hz)")
+        self.assertEqual(cli.fps_line("auto", None, None), "60 fps (auto: matches your screen)")
+        self.assertEqual(cli.fps_line(120, 120, 60), "120 fps")
+        self.assertEqual(cli.fps_line(60), "60 fps")                       # an older daemon's status
+        _code, text = CLIStatusTest.run_cli(self, ["status"], [{**CLIStatusTest.ST, "fps": "auto", "fps_effective": 120,
+                                                                "refresh_hz": 120, "bitrate_kbps": 15000}])
+        self.assertIn("video: 1080p, recording at 720p (your screen's size), 120 fps (auto: your screen is 120 Hz), "
+                      "high (15 Mbps)", text)
+
+
+class RefreshRecorder(FakeRecorder):
+    """A fake recorder whose stream announces the screen's refresh, as the real one learns it."""
+
+    hz = 120.0
+    hints = []
+
+    def start(self, interactive=False):
+        RefreshRecorder.hints.append(getattr(self, "refresh_hz", None))   # what the daemon handed over
+        self.refresh_hz = RefreshRecorder.hz
+        super().start(interactive)
+
+
+class DaemonAutoFpsTest(unittest.TestCase):
+    """The daemon reports fps / fps_effective / refresh_hz and counts storage at the effective rate."""
+
+    setUp = DaemonControlTest.setUp
+    tearDown = DaemonControlTest.tearDown
+    call = DaemonControlTest.call
+
+    def use(self, hz):
+        RefreshRecorder.hz, RefreshRecorder.hints = hz, []
+        sys.modules["momento.pipeline"].Recorder = RefreshRecorder
+        self.d.recorder = RefreshRecorder(self.d.cfg, self.d.ring, self.d._on_state)
+        self.d.recorder.start()
+
+    def test_status_before_the_refresh_is_known(self):
+        st = self.call({"cmd": "status"})
+        self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), ("auto", 60, None))
+        self.assertEqual(st["bitrate_kbps"], 15_000)
+        self.assertEqual(protocol_problems("status", st), [])
+
+    def test_status_and_storage_on_a_120_hz_screen(self):
+        from momento import storage
+
+        with self.assertLogs("momento.daemon", "INFO") as cm:
+            self.use(120.0)
+        self.assertIn("the recorded screen runs at 120 Hz", [r.getMessage() for r in cm.records])
+        st = self.call({"cmd": "status"})
+        self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), ("auto", 120, 120.0))
+        self.assertEqual(st["bitrate_kbps"], 22_000)
+        self.assertEqual(st["storage"]["label"], "1080p High 120 fps")
+        cfg120 = {**self.d.cfg, "capture": {**self.d.cfg["capture"], "fps": 120}}
+        self.assertEqual(st["storage"]["required"], storage.required_bytes(cfg120))
+        self.assertEqual(protocol_problems("status", st), [])
+        with mock.patch.object(settings_module(), "list_audio_devices",
+                               return_value={"outputs": [], "inputs": []}):
+            r = self.call({"cmd": "settings"})
+        self.assertEqual((r["values"]["fps"], r["fps_effective"], r["refresh_hz"]), ("auto", 120, 120.0))
+        self.assertEqual(r["storage"]["current"], "1080p/high/auto")
+        self.assertEqual(r["storage"]["required"]["1080p/high/auto"], r["storage"]["required"]["1080p/high/120"])
+        # a reload hands the known refresh to the new recorder: it plans at 120 from the start
+        r = self.call({"cmd": "configure", "changes": {"quality": "standard"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(RefreshRecorder.hints[-1], 120.0)
+        self.assertEqual(r["storage"]["label"], "1080p Standard 120 fps")
+
+    def test_explicit_60_on_a_120_hz_screen(self):
+        self.use(144.0)
+        r = self.call({"cmd": "configure", "changes": {"fps": 60}})
+        self.assertTrue(r["ok"], r)
+        st = self.call({"cmd": "status"})
+        self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), (60, 60, 144.0))
+        self.assertEqual(st["bitrate_kbps"], 15_000)
+
+    def test_a_60_hz_screen(self):
+        self.use(60.0)
+        st = self.call({"cmd": "status"})
+        self.assertEqual((st["fps"], st["fps_effective"], st["refresh_hz"]), ("auto", 60, 60.0))
+
+    def test_another_window_forgets_the_refresh(self):
+        self.use(120.0)
+        self.d._forget_target_name()
+        self.assertIsNone(self.d.refresh_hz)
+        self.assertEqual(self.call({"cmd": "status"})["fps_effective"], 60)
+
+
+def settings_module():
+    from momento import settings
+
+    return settings
+
+
+def protocol_problems(cmd, reply):
+    from momento import protocol
+
+    return protocol.validate_reply(cmd, reply)
 
 
 class CaptureLogTest(unittest.TestCase):
@@ -5037,8 +5260,135 @@ class CaptureLogTest(unittest.TestCase):
         self.assertEqual(lines, ["recording: 1280x720 @ 60 fps, high, 10000 kbps, H.264 (vah264enc, zero-copy), "
                                  "full screen, portal (set by the first frame)"])
         rec._source_seen = False                                    # the same size again: nothing new to say
-        with mock.patch.object(rec, "_encoder_settings"), self.assertNoLogs("momento.pipeline", "INFO"):
-            rec._pin_size(None, info, (capsfilter, object(), "vah264enc"))
+        with mock.patch.object(rec, "_encoder_settings"):
+            self.assertEqual(self.lines(lambda: rec._pin_size(None, info, (capsfilter, object(), "vah264enc"))), [])
+
+
+    def first_caps(self, rec, caps, encoder="vaav1enc"):
+        """Feed the source's first caps to Recorder._pin_size (a real "size" and "rate"
+        capsfilter as built, no pipeline). Returns (the "recording:" lines logged, the
+        bitrate the encoder got then or None, the rate capsfilter)."""
+        Gst = self.pipeline.Gst
+        info = mock.Mock()
+        info.get_event.return_value = Gst.Event.new_caps(Gst.Caps.from_string(caps))
+        size = Gst.ElementFactory.make("capsfilter", None)
+        size.set_property("caps", Gst.Caps.from_string(rec._output_caps()))
+        rate = Gst.ElementFactory.make("capsfilter", None)
+        rate.set_property("caps", Gst.Caps.from_string(rec._rate_caps()))
+        with mock.patch.object(rec, "_encoder_settings") as settings:
+            lines = self.lines(lambda: rec._pin_size(None, info, (size, object(), encoder, rate, None)))
+        return lines, (settings.call_args[0][2] if settings.called else None), rate
+
+    KWIN_120 = "video/x-raw,width=1920,height=1080,framerate=0/1,max-framerate=120/1"
+
+    def test_auto_logs_the_screen_refresh(self):
+        """fps auto: the line says why ("auto: 120 Hz screen"); the first caps settle it."""
+        rec = self.recorder([("vaav1enc", True)], fps="auto")
+        self.assertEqual(self.lines(rec._build_and_play),
+                         ["recording: 1280x720 @ 60 fps (auto: screen refresh not known yet), ultra, 15000 kbps, "
+                          "AV1 (vaav1enc, zero-copy), full screen, portal"])
+        lines, kbps, rate = self.first_caps(rec, self.KWIN_120)
+        self.assertEqual(lines, ["recording: 1280x720 @ 120 fps (auto: 120 Hz screen), ultra, 22000 kbps, "
+                                 "AV1 (vaav1enc, zero-copy), full screen, portal (set by the first frame)"])
+        self.assertEqual((rec.fps, rec.refresh_hz, kbps), (120, 120.0, 22000))   # GOP + bitrate follow
+        self.assertEqual(rate.get_property("caps").get_structure(0).get_fraction("framerate")[1:], (120, 1))
+
+    def test_auto_plans_with_the_known_refresh(self):
+        """A refresh known before the start (an earlier session, the daemon): built at its
+        rate, and the same first caps change nothing."""
+        rec = self.recorder([("vaav1enc", True)], fps="auto")
+        rec.refresh_hz = 120.0
+        self.assertEqual(self.lines(rec._build_and_play),
+                         ["recording: 1280x720 @ 120 fps (auto: 120 Hz screen), ultra, 22000 kbps, "
+                          "AV1 (vaav1enc, zero-copy), full screen, portal"])
+        self.assertIn("framerate=120/1", rec._video_chain(self.pipeline._Variant("vaav1enc", True)))
+        lines, kbps, rate = self.first_caps(rec, self.KWIN_120)
+        self.assertEqual((lines, kbps), ([], None))
+        # the screen was switched to 60 Hz meanwhile: back to 60 at the first frame
+        rec._pipeline = None
+        self.lines(rec._build_and_play)
+        lines, kbps, _rate = self.first_caps(rec, "video/x-raw,width=1920,height=1080,framerate=0/1,"
+                                                  "max-framerate=60/1")
+        self.assertEqual(lines, ["recording: 1280x720 @ 60 fps (auto: 60 Hz screen), ultra, 15000 kbps, "
+                                 "AV1 (vaav1enc, zero-copy), full screen, portal (set by the first frame)"])
+
+    def test_a_60_hz_screen_says_so(self):
+        rec = self.recorder([("vaav1enc", True)], fps="auto")
+        self.lines(rec._build_and_play)
+        lines, kbps, _rate = self.first_caps(rec, "video/x-raw,width=1920,height=1080,framerate=60/1")  # wlroots
+        self.assertEqual(lines, ["recording: 1280x720 @ 60 fps (auto: 60 Hz screen), ultra, 15000 kbps, "
+                                 "AV1 (vaav1enc, zero-copy), full screen, portal (set by the first frame)"])
+        self.assertIsNone(kbps)                                     # nothing to change on the encoder
+
+    def test_explicit_rate_ignores_the_screen(self):
+        rec = self.recorder([("vaav1enc", True)])                 # fps = 120 (setUp)
+        self.lines(rec._build_and_play)
+        lines, kbps, _rate = self.first_caps(rec, "video/x-raw,width=1920,height=1080,framerate=0/1,"
+                                                  "max-framerate=60/1")
+        self.assertEqual((lines, kbps, rec.fps, rec.refresh_hz), ([], None, 120, 60.0))
+        self.assertIsNone(rec.fps_why())
+
+    def test_first_caps_are_logged(self):
+        rec = self.recorder([("vaav1enc", True)], fps="auto")
+        self.lines(rec._build_and_play)
+        Gst = self.pipeline.Gst
+        info = mock.Mock()
+        info.get_event.return_value = Gst.Event.new_caps(Gst.Caps.from_string(self.KWIN_120))
+        with self.assertLogs("momento.pipeline", "INFO") as cm, mock.patch.object(rec, "_encoder_settings"):
+            rec._pin_size(None, info, (None, None, "vaav1enc"))
+        [line] = [r.getMessage() for r in cm.records if r.getMessage().startswith("source's first caps")]
+        self.assertIn("max-framerate=(fraction)120/1", line)       # what the compositor announced
+
+    def test_caps_refresh(self):
+        Gst = self.pipeline.Gst
+        rec = self.recorder([("vaav1enc", True)])
+
+        def hz(caps, source="portal"):
+            rec.source_name = source
+            return rec._caps_refresh(Gst.Caps.from_string(caps).get_structure(0))
+        self.assertEqual(hz(self.KWIN_120), 120.0)                                  # KWin / Mutter
+        self.assertEqual(hz("video/x-raw,framerate=0/1,max-framerate=144/1"), 144.0)
+        self.assertEqual(hz("video/x-raw,framerate=60/1"), 60.0)                    # wlroots
+        self.assertAlmostEqual(hz("video/x-raw,framerate=120000/1001"), 119.88, places=2)
+        self.assertIsNone(hz("video/x-raw,framerate=0/1"))                          # variable, no max
+        self.assertIsNone(hz("video/x-raw,width=1920,height=1080"))
+        self.assertEqual(hz("video/x-raw,framerate=0/1,max-framerate=120/1", "gamescope"), 120.0)
+        self.assertIsNone(hz("video/x-raw,framerate=30/1", "x11"))                   # the grabber's own rate
+
+
+class RateCapsTest(unittest.TestCase):
+    """Changing the frame rate after videorate never reaches the source (no renegotiation)."""
+
+    def test_reconfigure_is_dropped_at_videorate(self):
+        import copy
+
+        from momento import config, pipeline
+        from momento.ringbuffer import RingBuffer
+
+        Gst = pipeline.Gst
+        cfg = copy.deepcopy(config.DEFAULTS)
+        rec = pipeline.Recorder(cfg, RingBuffer(3600), lambda s, m: None)
+        for guarded in (True, False):
+            with self.subTest(guarded=guarded):
+                p = Gst.parse_launch("videotestsrc name=src num-buffers=1 ! video/x-raw,width=64,height=64 ! "
+                                     "videorate name=vrate ! capsfilter name=rate caps=video/x-raw,framerate=60/1 ! "
+                                     "fakesink")
+                seen = []
+
+                def probe(_pad, info):
+                    if info.get_event().type == Gst.EventType.RECONFIGURE:
+                        seen.append(1)
+                    return Gst.PadProbeReturn.OK
+                p.get_by_name("src").get_static_pad("src").add_probe(Gst.PadProbeType.EVENT_UPSTREAM, probe)
+                self.addCleanup(p.set_state, Gst.State.NULL)
+                p.set_state(Gst.State.PAUSED)
+                p.get_state(5 * Gst.SECOND)
+                rec.fps = 120
+                guard = p.get_by_name("vrate").get_static_pad("sink") if guarded else None
+                self.assertTrue(rec._apply_rate_caps(p.get_by_name("rate"), guard))
+                self.assertFalse(rec._apply_rate_caps(p.get_by_name("rate"), guard))   # already there
+                self.assertEqual(len(seen), 0 if guarded else 1)
+                p.set_state(Gst.State.NULL)
 
 
 if __name__ == "__main__":

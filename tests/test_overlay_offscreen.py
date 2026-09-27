@@ -35,6 +35,8 @@ REAL_REQUEST = ipc.request  # the resident bar's control socket is always reache
 # The offscreen screen is 800x600, which would cap every resolution: no screen size
 # unless a test sets one (the Resolution cap tests do).
 overlay.SCREEN_SIZE = lambda: None
+# Nor a refresh rate (the offscreen screen says 60 Hz): the Frame rate tests set one.
+overlay.SCREEN_REFRESH = lambda: None
 
 STATUS = {"ok": True, "state": "recording", "recording": True, "buffered": 754.0,
           "max_seconds": 3600, "source": "portal", "encoder": "vah264enc",
@@ -63,7 +65,7 @@ NEW_CHOICES = {"keep_history": ["off", "on"], "hour_warning": [10, 5, 3], "insta
                "replay_length": [15, 30, 60], "sounds": ["on", "off"]}
 
 
-def settings_reply(devices=DEVICES, free=None, source=None, **values):
+def settings_reply(devices=DEVICES, free=None, source=None, refresh=None, **values):
     cfg = config.load(Path("/nonexistent/momento-test.toml"))
     cfg["buffer"]["max_seconds"] = 3600   # the fake daemon keeps 60 minutes (STATUS) unless told otherwise
     raw = {}
@@ -73,7 +75,7 @@ def settings_reply(devices=DEVICES, free=None, source=None, **values):
                 cfg.setdefault(section, {})[key] = val
         except ValueError:
             raw[k] = v                   # a key this settings module does not know yet
-    data = settings.describe(cfg, devices=devices, source=source)
+    data = settings.describe(cfg, devices=devices, source=source, refresh=refresh)
     for k, v in NEW_VALUES.items():
         data["values"].setdefault(k, v)
         data["choices"].setdefault(k, list(NEW_CHOICES[k]))
@@ -83,7 +85,7 @@ def settings_reply(devices=DEVICES, free=None, source=None, **values):
         secs = data["max_seconds"]
         data["storage"] = {"free": free, "reclaimable": 0, "required": {
             f"{r}/{q}/{f}": quality.buffer_gb(quality.bitrate_kbps(
-                {"resolution": r, "quality": q, "fps": f}), secs) * 1e9
+                {"resolution": r, "quality": q, "fps": f}, None, refresh), secs) * 1e9
             for r in quality.RESOLUTIONS for q in quality.QUALITIES for f in quality.FPS_CHOICES}}
         v = data["values"]
         data["storage"]["current"] = f"{v['resolution']}/{v['quality']}/{v['fps']}"
@@ -108,7 +110,8 @@ SHORT_HISTORY = {**SHORT_SPAN, "ok": True, "free": 11_300_000_000, "needed": 15_
 
 class FakeDaemon:
     def __init__(self, running=True, fail=False, devices=DEVICES, paused=False, extra=None, free=None,
-                 resume_reply=None, values=None, configure_reply=None, storage=OK_STORAGE, source=None):
+                 resume_reply=None, values=None, configure_reply=None, storage=OK_STORAGE, source=None,
+                 refresh=None):
         self.running, self.fail, self.devices, self.paused = running, fail, devices, paused
         self.extra = dict(extra or {})   # merged into every status reply
         self.free = free                 # settings: free bytes for the storage check
@@ -117,6 +120,7 @@ class FakeDaemon:
         self.configure_reply = configure_reply
         self.storage = storage           # status: the storage block (None = an older daemon)
         self.source = source             # settings: the recorded picture's size (None: not known yet)
+        self.refresh = refresh           # settings: the recorded screen's refresh, Hz (None: not known yet)
         self.stopped = False
         self.saves = []
         self.save_msgs = []
@@ -144,7 +148,8 @@ class FakeDaemon:
             st.update(self.extra)
             return st
         if msg["cmd"] == "settings":
-            return settings_reply(self.devices, free=self.free, source=self.source, **self.values)
+            return settings_reply(self.devices, free=self.free, source=self.source, refresh=self.refresh,
+                                  **self.values)
         if msg["cmd"] == "configure":
             self.configures.append(msg["changes"])
             time.sleep(0.3)
@@ -477,7 +482,7 @@ class OverlayOffscreen(unittest.TestCase):
                          ["480p", "720p", "1080p", "Native"])  # up to 1080p for now
         self.key(Qt.Key_Left)                    # 720p
         self.assertIn("4.5 GB for 60 min", bar.foot.text())
-        self.key(Qt.Key_Down)                    # frame rate row (stays 60 fps)
+        self.key(Qt.Key_Down)                    # frame rate row (stays Auto)
         self.assertTrue(bar.row("fps").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Right)                   # ultra
@@ -897,11 +902,13 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertIn("Needs", bar.foot.text())
         self.assertTrue(bar.apply_btn.isEnabled())         # no change is not a raise
         self.key(Qt.Key_PageDown)                           # Video: Resolution
-        self.key(Qt.Key_Down)                               # frame rate
+        self.key(Qt.Key_Down)                               # frame rate (Auto: 60 fps, refresh unknown)
+        self.key(Qt.Key_Right)
         self.key(Qt.Key_Right)                              # 120 fps: raises the requirement
         self.assertEqual(bar.row("fps").value, 120)
         self.assertFalse(bar.apply_btn.isEnabled())
         self.key(Qt.Key_Left)
+        self.key(Qt.Key_Left)                               # back to Auto
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Left)                               # quality: high, still > 6.0 GB
         self.assertEqual(bar.row("quality").value, "high")
@@ -931,26 +938,93 @@ class OverlayOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         return bar, bar.row("resolution")
 
-    def test_120_fps_note(self):
-        """Frame rate 120: a one-line note says when it helps; 60: no note."""
-        bar, _res = self.open_video(FakeDaemon(True))
+    def refresh(self, hz):
+        """The bar's own screen runs at ``hz`` (None: unknown)."""
+        self.addCleanup(setattr, overlay, "SCREEN_REFRESH", overlay.SCREEN_REFRESH)
+        overlay.SCREEN_REFRESH = lambda: hz
+
+    def assert_note_fits(self, row):
+        self.assertFalse(row.note.elided, row.note.text())                  # fits the row, whole
+        self.assertLessEqual(row.note.geometry().right(), row.width())
+        self.assertGreaterEqual(row.note.x(), row.buttons[-1].geometry().right() + overlay.NOTE_GAP)
+
+    def test_frame_rate_auto_matches_the_screen(self):
+        """Frame rate: Auto (the default), 60 fps, 120 fps; Auto says which screen it matches."""
+        bar, _res = self.open_video(FakeDaemon(True, refresh=120.0))
         fps = bar.row("fps")
-        self.assertEqual((fps.value, fps.note.text()), (60, ""))
+        self.assertEqual([b.text() for b in fps.buttons], ["Auto", "60 fps", "120 fps"])
+        self.assertEqual((fps.value, fps.note.text(), fps.note.kind), ("auto", "Matching your 120 Hz screen", "info"))
+        self.assertIs(type(fps.note), type(bar.row("resolution").note))   # the same style
+        self.assert_note_fits(fps)
+        self.assertIn("120 fps \u00b7 ~9.9 GB for 60 min", bar.foot.text())   # 22 Mbps at 1080p High
+        pump(self.app, 0.05)
+        self.shot(bar, "settings-video-auto-fps", "v7")
         self.key(Qt.Key_Down)                           # the Frame rate row
+        self.key(Qt.Key_Right)                          # 60 fps: no note
+        self.assertEqual((fps.value, fps.note.text()), (60, ""))
+        self.assertIn("60 fps \u00b7 ~6.8 GB for 60 min", bar.foot.text())
+        self.key(Qt.Key_Right)                          # 120 fps on a 120 Hz screen: nothing to warn about
+        self.assertEqual((fps.value, fps.note.text()), (120, ""))
+        self.key(Qt.Key_Left)
+        self.key(Qt.Key_Left)                           # back to Auto
+        self.assertEqual(fps.note.text(), "Matching your 120 Hz screen")
+        self.assertEqual(bar.changes(), {})
+
+    def test_frame_rate_on_a_60_hz_screen(self):
+        """120 picked by hand on a screen below 100 Hz: the old note says it won't help."""
+        bar, _res = self.open_video(FakeDaemon(True, refresh=60.0))
+        fps = bar.row("fps")
+        self.assertEqual(fps.note.text(), "Matching your 60 Hz screen")
+        self.assertIn("60 fps \u00b7 ~6.8 GB", bar.foot.text())
+        self.key(Qt.Key_Down)
+        self.key(Qt.Key_Right)
         self.key(Qt.Key_Right)                          # 120 fps
         self.assertEqual(fps.value, 120)
-        self.assertEqual((fps.note.text(), fps.note.kind), (overlay.FPS_NOTE, "info"))
-        self.assertEqual(fps.note.text(), "120 fps only helps if your game runs above 100 fps")
-        self.assertIs(type(fps.note), type(bar.row("resolution").note))   # the same style
-        self.assertFalse(fps.note.elided)                                 # fits the row, whole
-        self.assertLessEqual(fps.note.geometry().right(), fps.width())
-        self.assertGreaterEqual(fps.note.x(), fps.buttons[-1].geometry().right() + overlay.NOTE_GAP)
+        self.assertEqual((fps.note.text(), fps.note.kind),
+                         ("Your screen is 60 Hz \u00b7 120 fps only helps above 100 Hz", "info"))
+        self.assert_note_fits(fps)
         pump(self.app, 0.05)
-        self.shot(bar, "settings-video-120fps", "v7")
-        self.key(Qt.Key_Left)                           # back to 60: the note goes
-        self.assertEqual(fps.note.text(), "")
-        bar2, _ = self.open_video(FakeDaemon(True, values={"fps": 120}))   # a saved 120: shown at once
-        self.assertEqual(bar2.row("fps").note.text(), overlay.FPS_NOTE)
+        self.shot(bar, "settings-video-120fps-60hz", "v7")
+        bar2, _ = self.open_video(FakeDaemon(True, refresh=60.0, values={"fps": 120}))   # a saved 120: at once
+        self.assertEqual(bar2.row("fps").note.text(), "Your screen is 60 Hz \u00b7 120 fps only helps above 100 Hz")
+
+    def test_frame_rate_notes(self):
+        for hz, note in ((144.0, "120 fps for your 144 Hz screen"), (165.0, "120 fps for your 165 Hz screen"),
+                         (75.0, "60 fps for your 75 Hz screen"), (90.0, "60 fps for your 90 Hz screen"),
+                         (119.88, "Matching your 120 Hz screen"), (59.94, "Matching your 60 Hz screen"),
+                         (None, "Matches your screen's refresh rate")):
+            with self.subTest(hz=hz):
+                bar, _res = self.open_video(FakeDaemon(True, refresh=hz))
+                self.assertEqual(bar.row("fps").note.text(), note)
+                self.assert_note_fits(bar.row("fps"))
+                self.assertIn(f"{quality.auto_fps(hz)} fps \u00b7", bar.foot.text())
+
+    def test_frame_rate_uses_the_bars_screen_until_the_daemon_knows(self):
+        self.refresh(120.0)                              # Qt says the bar's screen runs at 120 Hz
+        bar, _res = self.open_video(FakeDaemon(True, free=100e9))
+        self.assertEqual(bar.row("fps").note.text(), "Matching your 120 Hz screen")
+        self.assertIn("120 fps \u00b7 ~9.9 GB for 60 min", bar.foot.text())
+        # the fit check counts Auto like the estimate: at 120 fps
+        v = bar.pending()
+        self.assertEqual(bar.storage_need(v), bar.storage_need({**v, "fps": 120}))
+        self.assertGreater(bar.storage_need(v), bar.storage_need({**v, "fps": 60}))
+        bar2, _res = self.open_video(FakeDaemon(True, refresh=60.0))      # the daemon's word wins
+        self.assertEqual(bar2.row("fps").note.text(), "Matching your 60 Hz screen")
+
+    def test_frame_rate_row_with_an_older_daemon(self):
+        """No Auto in the choices (an older daemon): 60 fps / 120 fps as before."""
+        daemon = FakeDaemon(True, values={"fps": 60})
+        real = daemon.request
+
+        def older(msg, **kw):
+            r = real(msg, **kw)
+            if msg["cmd"] == "settings":
+                r["choices"]["fps"] = [60, 120]
+            return r
+        daemon.request = older
+        bar, _res = self.open_video(daemon)
+        self.assertEqual([b.text() for b in bar.row("fps").buttons], ["60 fps", "120 fps"])
+        self.assertEqual(bar.row("fps").note.text(), "")
 
     def test_resolution_capped_by_the_screen(self):
         self.screen((1280, 720))                       # nothing recorded yet: the bar's own screen
@@ -1047,6 +1121,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertTrue(res.buttons[1].hasFocus())      # the nearest choice: 720p (not chosen)
         self.assertEqual(res.value, "1080p")
         self.key(Qt.Key_Down)                           # other rows: the saved 1080p stays
+        self.key(Qt.Key_Right)
         self.key(Qt.Key_Right)                          # 120 fps
         self.assertEqual(bar.changes(), {"fps": 120})
         self.key(Qt.Key_Up)

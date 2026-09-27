@@ -35,30 +35,32 @@ def audio_kbps(cfg: dict) -> int:
     return int(a.get("bitrate_kbps") or DEFAULT_AUDIO_KBPS)
 
 
-def buffer_bytes(cfg: dict, source=None) -> int:
+def buffer_bytes(cfg: dict, source=None, refresh=None) -> int:
     """Disk used by a full ring buffer (video + audio, with mux overhead).
 
     ``source``: the recorded picture's size, when known; a resolution taller
     than it is counted at the size actually recorded (see quality.bitrate_kbps).
+    ``refresh``: the recorded screen's refresh rate (Hz), when known: fps "auto"
+    is counted at the frame rate it records at (``quality.fps``).
     """
-    kbps = quality.bitrate_kbps(cfg["capture"], source) + audio_kbps(cfg)
+    kbps = quality.bitrate_kbps(cfg["capture"], source, refresh) + audio_kbps(cfg)
     seconds = int(cfg["buffer"]["max_seconds"])
     return int(kbps * 1000 / 8 * seconds * MUX_OVERHEAD)
 
 
-def required_bytes(cfg: dict, source=None) -> int:
+def required_bytes(cfg: dict, source=None, refresh=None) -> int:
     """Free space needed before capture may start: a full buffer + RESERVE."""
-    return buffer_bytes(cfg, source) + RESERVE
+    return buffer_bytes(cfg, source, refresh) + RESERVE
 
 
 def keep_history(cfg: dict) -> bool:
     return bool((cfg.get("buffer") or {}).get("keep_history"))
 
 
-def history_bytes(cfg: dict, source=None) -> int:
+def history_bytes(cfg: dict, source=None, refresh=None) -> int:
     """keep_history: room one saved span (the hour, at the default length) takes in
     the output folder. The export copies the footage, so about a full buffer; 0 when off."""
-    return buffer_bytes(cfg, source) if keep_history(cfg) else 0
+    return buffer_bytes(cfg, source, refresh) if keep_history(cfg) else 0
 
 
 def _existing(path) -> Path:
@@ -107,13 +109,15 @@ def same_disk(a, b) -> bool:
         return True
 
 
-def check(cfg: dict, reclaimable: int = 0, source=None) -> dict:
+def check(cfg: dict, reclaimable: int = 0, source=None, refresh=None) -> dict:
     """Would a full buffer for ``cfg`` fit, and is there room for a full span of recording?
 
     ``reclaimable`` is the size of our own current buffer segments, which a
     (re)start deletes before recording, so it counts as free. ``source`` is the
     recorded picture's size, when known: a resolution taller than it is counted
     (and labelled) at the size really recorded (see buffer_bytes, label).
+    ``refresh`` is the recorded screen's refresh rate (Hz), when known: fps
+    "auto" is counted (and labelled) at the frame rate it records at.
 
     ``ok`` answers the first question (capture may start). ``low`` answers the
     second: ``available`` < ``needed``, where needed is a full buffer + RESERVE,
@@ -123,11 +127,11 @@ def check(cfg: dict, reclaimable: int = 0, source=None) -> dict:
     """
     path = buffer_dir(cfg)
     free = free_bytes(path)
-    required = required_bytes(cfg, source)
+    required = required_bytes(cfg, source, refresh)
     reclaimable = max(0, int(reclaimable))
     room = free + reclaimable
     needed, available, disk, counted = required, room, "buffer", False
-    history = history_bytes(cfg, source)
+    history = history_bytes(cfg, source, refresh)
     out = output_dir(cfg)
     if history:
         if out is None or same_disk(path, out):
@@ -139,10 +143,11 @@ def check(cfg: dict, reclaimable: int = 0, source=None) -> dict:
     return {"ok": room >= required, "free": free, "required": required,
             "reclaimable": reclaimable, "path": path,
             "low": available < needed, "needed": needed, "available": available,
-            "history": counted, "disk": disk, "label": label(cfg, source)}
+            "history": counted, "disk": disk, "label": label(cfg, source, refresh)}
 
 
-def combo_key(resolution: str, quality_name: str, fps: int) -> str:
+def combo_key(resolution: str, quality_name: str, fps) -> str:
+    """"1080p/high/60", "1080p/high/auto": one choice of resolution, quality and frame rate setting."""
     return f"{resolution}/{quality_name}/{fps}"
 
 
@@ -150,15 +155,17 @@ def current_key(cfg: dict) -> str:
     cap = cfg["capture"]
     return combo_key(quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION)),
                      str(cap.get("quality", quality.DEFAULT_QUALITY)).lower(),
-                     quality.fps(cap))
+                     quality.fps_setting(cap))
 
 
-def requirements(cfg: dict, reclaimable: int = 0, source=None) -> dict:
+def requirements(cfg: dict, reclaimable: int = 0, source=None, refresh=None) -> dict:
     """Required bytes for every resolution/quality/fps choice, for a settings UI.
 
     Everything else (audio, buffer length, an explicit bitrate) comes from ``cfg``.
     An option fits when ``free + reclaimable >= required[key]``. With a known
-    ``source`` size, a resolution taller than it costs what is really recorded.
+    ``source`` size, a resolution taller than it costs what is really recorded;
+    fps "auto" costs what it records at on a screen of ``refresh`` Hz (60 fps's
+    cost while that is unknown).
     """
     required = {}
     for res in quality.RESOLUTIONS:
@@ -166,18 +173,19 @@ def requirements(cfg: dict, reclaimable: int = 0, source=None) -> dict:
             for f in quality.FPS_CHOICES:
                 c = copy.deepcopy(cfg)
                 c["capture"].update(resolution=res, quality=q, fps=f)
-                required[combo_key(res, q, f)] = required_bytes(c, source)
+                required[combo_key(res, q, f)] = required_bytes(c, source, refresh)
     path = buffer_dir(cfg)
     return {"required": required, "current": current_key(cfg), "free": free_bytes(path),
             "reclaimable": max(0, int(reclaimable)), "reserve": RESERVE, "path": path}
 
 
-def label(cfg: dict, source=None) -> str:
+def label(cfg: dict, source=None, refresh=None) -> str:
     """'1080p Ultra', '1080p High 120 fps', '1080p at 50 Mbps' (explicit bitrate).
 
     With a known ``source`` size, a resolution taller than it is named by what is
     really recorded: 1080p on a 1280x720 window is '720p High'. An older config's
-    1440p/2160p is named by what it records at ('1080p High').
+    1440p/2160p is named by what it records at ('1080p High'). The frame rate is
+    the one recorded (fps "auto" on a 120 Hz screen: '120 fps'), named when not 60.
     """
     cap = cfg["capture"]
     text = quality.offered(cap.get("resolution", quality.DEFAULT_RESOLUTION))
@@ -188,8 +196,8 @@ def label(cfg: dict, source=None) -> str:
         text += f" at {explicit / 1000:g} Mbps"
     else:
         text += " " + str(cap.get("quality", quality.DEFAULT_QUALITY)).lower().capitalize()
-    f = quality.fps(cap)
-    if f != quality.FPS:
+    f = quality.fps(cap, refresh)
+    if f != 60:
         text += f" {f} fps"
     return text
 
