@@ -285,6 +285,245 @@ class DetectorTest(unittest.TestCase):
         self.assertIn("vaav1enc name=enc ! fakesink", desc)
 
 
+class CrashGuardTest(unittest.TestCase):
+    """A format whose start kills the process (a driver abort) is caught at the next start."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.guard = codecs.StartGuard(self.tmp / codecs.GUARD_NAME)
+        self.cache = self.tmp / "formats.json"
+        self.key = {"probe": codecs.PROBE_VERSION, "encoders": ["vaav1enc", "vah264enc", "vah265enc"],
+                    "driver": "Mesa 26.2.1"}
+
+    def detector(self, key=None):
+        present = ("vah264enc", "vah265enc", "vaav1enc")
+        return codecs.Detector(probe=lambda names: {n: True for n in names},
+                               key=lambda: (present, [], key or self.key), path=self.cache)
+
+    def dead_marker(self, fmt="av1", key="same"):
+        """The marker a process that died left behind (its pid no longer runs Momento)."""
+        self.guard.begin(fmt, "vaav1enc" if fmt == "av1" else "vah265enc", self.key if key == "same" else key)
+        data = self.guard.read()
+        data["pid"] = 2 ** 22 + 12345          # above any pid_max default: not running
+        self.guard.path.write_text(json.dumps(data))
+
+    # --- the marker ---
+
+    def test_marker_lifecycle(self):
+        self.assertIsNone(self.guard.read())
+        self.guard.begin("av1", "vaav1enc", self.key)
+        data = self.guard.read()
+        self.assertEqual((data["format"], data["encoder"], data["key"], data["pid"]),
+                         ("av1", "vaav1enc", self.key, os.getpid()))
+        self.guard.clear()                                  # stable, or a clean stop
+        self.assertFalse(self.guard.path.exists())
+        self.guard.begin("h265", "vah265enc")
+        self.guard.begin("h264", "vah264enc")               # H.264: nothing to guard (nothing to fall back to)
+        self.assertFalse(self.guard.path.exists())
+
+    def test_recover_takes_a_dead_process_marker_once(self):
+        self.dead_marker("av1")
+        got = self.guard.recover()
+        self.assertEqual((got["format"], got["key"]), ("av1", self.key))
+        self.assertFalse(self.guard.path.exists())
+        self.assertIsNone(self.guard.recover())            # counted once
+
+    def test_recover_leaves_a_running_process_alone(self):
+        self.dead_marker("av1")
+        with mock.patch.object(codecs, "_momento_alive", return_value=True):
+            self.assertIsNone(self.guard.recover())
+            self.guard.clear()                              # not ours either
+        self.assertTrue(self.guard.path.exists())
+
+    def test_nothing_to_recover_after_a_clean_stop(self):
+        self.guard.begin("av1", "vaav1enc", self.key)
+        self.guard.clear()
+        self.assertIsNone(self.guard.recover())
+
+    def test_broken_marker_is_ignored(self):
+        self.guard.path.write_text("{not json")
+        self.assertIsNone(self.guard.recover())
+
+    # --- counting it ---
+
+    def test_a_crash_before_detection_is_counted_before_anyone_plans(self):
+        det = self.detector()
+        det.record_crash("av1", self.key)                   # daemon start: detection not run yet
+        with self.assertLogs("momento.codecs", "WARNING") as logs:
+            got = det.wait(timeout=5)
+        self.assertTrue(got.is_crashed("av1"))
+        self.assertIn("AV1 crashed Momento", "\n".join(logs.output))
+        self.assertEqual(json.loads(self.cache.read_text())["crashes"], {"av1": 1})
+        # the next start (manual AV1, Auto) records in the next format of the fallback order
+        self.assertEqual(codecs.plan("av1", got), ["h265", "h264"])
+        self.assertEqual(codecs.effective("auto", got), "h264")
+        self.assertEqual(codecs.allowed(got), ["auto", "h264", "h265", "av1"])   # still pickable
+
+    def test_a_crash_after_detection(self):
+        det = self.detector()
+        det.wait(timeout=5)
+        with self.assertLogs("momento.codecs", "WARNING"):
+            det.record_crash("h265", self.key)
+        self.assertEqual(det.ready().crashed(), ["h265"])
+        self.assertEqual(codecs.plan("h265", det.ready()), ["h264"])
+
+    def test_fallback_order_skips_every_crashed_format(self):
+        det = codecs.Detection(vendor="amd", present=AMD_VCN4.present, works=dict(AMD_VCN4.works),
+                               crashes={"av1": 1})
+        self.assertEqual(codecs.plan("av1", det), ["h265", "h264"])
+        det.crashes["h265"] = 1
+        self.assertEqual(codecs.plan("av1", det), ["h264"])
+        self.assertEqual(codecs.plan("h265", det), ["h264"])
+        # without hardware H.264 (stock Fedora), Auto moves on too, down to software H.264
+        fedora = codecs.Detection(vendor="amd", present=FEDORA_RDNA3.present, works=dict(FEDORA_RDNA3.works),
+                                  crashes={"av1": 1})
+        self.assertEqual((fedora.auto(), codecs.plan("auto", fedora)), ("h264", ["h264"]))
+        self.assertEqual(fedora.auto(skip_crashed=False), "av1")
+        self.assertEqual(codecs.crash_blocked("auto", fedora), "av1")
+        self.assertEqual(codecs.crash_blocked("av1", det), "av1")
+        self.assertIsNone(codecs.crash_blocked("h264", det))
+        self.assertIsNone(codecs.crash_blocked("auto", det))  # Auto wanted H.264 anyway
+
+    def test_the_crash_stays_with_this_driver_only(self):
+        det = self.detector()
+        det.record_crash("av1", self.key)
+        with self.assertLogs("momento.codecs", "WARNING"):
+            det.wait(timeout=5)
+        again = self.detector()                             # the next process: from the cache
+        self.assertTrue(again.wait(timeout=5).is_crashed("av1"))
+        newer = self.detector(key={**self.key, "driver": "Mesa 26.3.0"})   # a driver update: tested afresh
+        self.assertEqual(newer.wait(timeout=5).crashes, {})
+
+    def test_a_crash_with_another_driver_is_not_counted(self):
+        det = self.detector()
+        det.record_crash("av1", {**self.key, "driver": "Mesa 26.1.0"})
+        self.assertFalse(det.wait(timeout=5).is_crashed("av1"))
+
+    def test_a_crash_without_a_detection_skips_it_for_this_process(self):
+        def boom():
+            raise RuntimeError("no GStreamer")
+        det = codecs.Detector(probe=lambda n: {}, key=boom, path=self.cache)
+        det.record_crash("av1", None)
+        with self.assertLogs("momento.codecs", "WARNING"):
+            got = det.wait(timeout=5)
+        self.assertEqual((det.failed, det.crashed_unknown), ({"av1"}, {"av1"}))
+        self.assertEqual(codecs.plan("av1", got, det.failed), ["h265", "h264"])
+        self.assertTrue(det.clear_crash("av1"))                # picked again
+        self.assertEqual((det.failed, det.crashed_unknown), (set(), set()))
+
+    def test_h264_is_never_counted(self):
+        det = self.detector()
+        det.record_crash("h264", self.key)
+        self.assertEqual(det.wait(timeout=5).crashes, {})
+
+    def test_picking_it_again_clears_the_flag(self):
+        det = self.detector()
+        det.record_crash("av1", self.key)
+        with self.assertLogs("momento.codecs", "WARNING"):
+            det.wait(timeout=5)
+        self.assertTrue(det.clear_crash("av1"))
+        self.assertFalse(det.ready().is_crashed("av1"))
+        self.assertEqual(codecs.plan("av1", det.ready()), ["av1", "h265", "h264"])
+        self.assertNotIn("av1", json.loads(self.cache.read_text()).get("crashes", {}))
+        self.assertFalse(det.clear_crash("av1"))            # nothing left to clear
+
+    def test_words(self):
+        self.assertEqual(codecs.crash_message("av1", "h264"), "AV1 stopped working on this PC, so Momento switched to H.264")
+        self.assertEqual(codecs.crash_message("av1", None), "AV1 stopped working on this PC")
+        self.assertEqual(codecs.crashed_note(["av1"]), "AV1 stopped working here. Pick it again to retry")
+        self.assertEqual(codecs.crashed_note(["av1", "h265"]),
+                         "H.265 and AV1 stopped working here. Pick one again to retry")
+        self.assertEqual(codecs.crashed_note([]), "")
+
+    def test_old_cache_without_crashes_reads(self):
+        data = AMD_VCN4.to_json()
+        data.pop("crashes")
+        self.assertEqual(codecs.Detection.from_json(data).crashes, {})
+
+
+class RecorderStartGuardTest(unittest.TestCase):
+    """The recorder writes the marker as a pipeline starts, and removes it once stable or stopped."""
+
+    def setUp(self):
+        from momento import pipeline
+
+        self.p = pipeline
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.guard = codecs.StartGuard(Path(self._tmp.name) / codecs.GUARD_NAME)
+        self.detector = codecs.Detector(key=lambda: None)
+        for patch in (mock.patch.object(codecs, "START_GUARD", self.guard),
+                      mock.patch.object(codecs, "DETECTOR", self.detector),
+                      mock.patch.object(pipeline, "_have", lambda name: name != "vah264lpenc")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.cfg = copy.deepcopy(config.DEFAULTS)
+        self.cfg["capture"].update(source="test", target="screen", format="av1")
+        self.cfg["buffer"]["dir"] = str(Path(self._tmp.name) / "buffer")
+
+    def started(self, encoder="vaav1enc"):
+        """A recorder whose pipeline "started" with ``encoder`` (a fake pipeline: nothing runs)."""
+        rec = self.p.Recorder(self.cfg, RingBuffer(3600), lambda s, m: None)
+        self.addCleanup(rec._cancel_retry)
+        self.addCleanup(rec._cancel_stable)
+        rec._detection = codecs.Detection(vendor="amd", present=AMD_VCN4.present, works=dict(AMD_VCN4.works),
+                                          key={"driver": "Mesa 26.2.1"})
+        rec._variants, rec._variant_idx = [self.p._Variant(encoder, True)], 0
+        fake = mock.MagicMock()
+        fake.get_by_name.return_value.get_factory.return_value.get_name.return_value = encoder
+        fake.set_state.return_value = self.p.Gst.StateChangeReturn.ASYNC
+        rec._build = mock.Mock(return_value=fake)
+        rec._build_and_play()
+        rec._pipeline = fake
+        return rec
+
+    def test_marker_written_just_before_the_start(self):
+        rec = self.started()
+        data = self.guard.read()
+        self.assertEqual((data["format"], data["encoder"], data["key"]), ("av1", "vaav1enc", {"driver": "Mesa 26.2.1"}))
+        self.assertEqual(rec.format_effective, "av1")
+
+    def test_h264_start_leaves_no_marker(self):
+        self.guard.begin("av1", "vaav1enc")                 # e.g. AV1 errored out, H.264 is next
+        self.started("vah264enc")
+        self.assertIsNone(self.guard.read())
+
+    def test_stable_after_stable_seconds_clears_it(self):
+        rec = self.started()
+        with mock.patch.object(self.p.GLib, "timeout_add_seconds", return_value=7) as timer:
+            rec.recording = True
+            rec._arm_stable()
+        self.assertEqual(timer.call_args.args[:2], (codecs.STABLE_SECONDS, rec._format_stable))
+        self.assertTrue(self.guard.path.exists())           # not yet
+        rec._stable_id = 0
+        with self.assertLogs("momento.pipeline", "INFO"):
+            rec._format_stable(rec._session)
+        self.assertIsNone(self.guard.read())
+
+    def test_a_timer_from_an_older_session_does_nothing(self):
+        rec = self.started()
+        rec.recording = True
+        rec._format_stable("an-older-session")
+        self.assertTrue(self.guard.path.exists())
+
+    def test_clean_stop_clears_it(self):
+        rec = self.started()
+        rec._pipeline = None                                # nothing to tear down
+        rec.stop()
+        self.assertIsNone(self.guard.read())
+
+    def test_an_error_keeps_it(self):
+        # an error can be the way to a driver abort: only a clean stop or stability clear it
+        rec = self.started()
+        rec._pipeline = None
+        with mock.patch.object(self.p.GLib, "timeout_add_seconds", return_value=0), \
+                mock.patch.object(self.p.GLib, "source_remove"):
+            rec._error_and_retry("encoder error")
+        self.assertEqual(self.guard.read()["format"], "av1")
+
+
 class FormatSettingTest(unittest.TestCase):
     """[capture] format and the "format" setting."""
 

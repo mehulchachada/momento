@@ -328,6 +328,7 @@ class Recorder:
         self._detection: codecs.Detection | None = None
         self._awaiting_formats = False           # start() waits for codecs.DETECTOR
         self._start_gen = 0
+        self._stable_id = 0                      # timer: the format has recorded STABLE_SECONDS
 
         self._pipeline: Gst.Pipeline | None = None
         self._bus_watch = None
@@ -444,6 +445,10 @@ class Recorder:
         self._begin()
 
     def stop(self) -> None:
+        # A clean stop: whatever format was starting didn't crash us (START_GUARD).
+        # First, before the drain below, which a stuck driver could make slow.
+        codecs.START_GUARD.clear()
+        self._cancel_stable()
         self._stop_requested = True
         self._awaiting_formats = False
         self._start_gen += 1
@@ -679,6 +684,11 @@ class Recorder:
         bus.add_signal_watch()
         self._bus_watch = bus.connect("message", self._on_message)
         self._settle_from = time.monotonic()
+        # AV1 / H.265: leave a marker until this start has proven stable, so a driver
+        # that kills the process here is caught at the next daemon start (START_GUARD).
+        self._cancel_stable()
+        codecs.START_GUARD.begin(self.format_effective, self.encoder_name,
+                                 getattr(self._detection, "key", None))
         if pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._teardown(graceful=False)
             self._next_variant_or_fail(f"{variant}: failed to enter PLAYING")
@@ -1117,6 +1127,7 @@ class Recorder:
                 if new == Gst.State.PLAYING and not self.recording and self._pipeline.get_by_name("mux") is None:
                     # A debug stage without a mux: no segments will ever open; report it as running.
                     self.recording = True
+                    self._arm_stable()
                     self._set_state("recording")
         elif t == Gst.MessageType.ERROR:
             err, dbg = msg.parse_error()
@@ -1151,6 +1162,7 @@ class Recorder:
             if not self._got_fragment:
                 self._got_fragment = True
                 self.recording = True
+                self._arm_stable()
                 self._set_state("recording")
         else:
             start = self._open.pop(location, None)
@@ -1276,9 +1288,35 @@ class Recorder:
             _once(waiter[1])()
         return False
 
+    # --- the crash guard ------------------------------------------------------------
+
+    def _arm_stable(self) -> None:
+        """Recording started: once it has run codecs.STABLE_SECONDS, the format is
+        taken as stable here and the start marker goes."""
+        self._cancel_stable()
+        if self.format_effective not in codecs.GUARDED:
+            return
+        self._stable_id = GLib.timeout_add_seconds(codecs.STABLE_SECONDS, self._format_stable, self._session)
+
+    def _format_stable(self, session: str | None) -> bool:
+        self._stable_id = 0
+        if session == self._session and self._pipeline is not None and self.recording:
+            codecs.START_GUARD.clear()
+            log.info("%s has recorded for %d s: stable here", codecs.label(self.format_effective),
+                     codecs.STABLE_SECONDS)
+        return False
+
+    def _cancel_stable(self) -> None:
+        if self._stable_id:
+            GLib.source_remove(self._stable_id)
+            self._stable_id = 0
+
     # --- teardown / retry ------------------------------------------------------------
 
     def _teardown(self, graceful: bool, source_lost: bool = False) -> None:
+        # (The start marker stays: an error on the way to a driver abort must still
+        # count. The next start replaces it, a clean stop removes it.)
+        self._cancel_stable()
         pipeline = self._pipeline
         if pipeline is None:
             return

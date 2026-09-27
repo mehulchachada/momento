@@ -553,6 +553,104 @@ class DaemonContractTest(_DaemonCase):
             self.assertIn("unknown command", r["error"])
 
 
+class DaemonCrashGuardTest(_DaemonCase):
+    """A format start that killed the last process: counted, told once, retried by picking it again."""
+
+    KEY = {"driver": "Mesa 26.2.1", "gpus": [{"vendor": "0x1002", "device": "0x15bf"}]}
+
+    def setUp(self):
+        super().setUp()
+        from momento import codecs
+
+        self.codecs = codecs
+        self.guard = codecs.StartGuard(self.tmp / codecs.GUARD_NAME)
+        self.detector = codecs.Detector(key=lambda: None, path=self.tmp / "formats.json")
+        self.detector._result = codecs.Detection(
+            vendor="amd", present=("vah264enc", "vah265enc", "vaav1enc"), key=self.KEY,
+            works={"vah264enc": True, "vah265enc": True, "vaav1enc": True})
+        for p in (mock.patch.object(codecs, "START_GUARD", self.guard),
+                  mock.patch.object(codecs, "DETECTOR", self.detector)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def died_starting(self, fmt="av1", key=None):
+        """Leave the marker a process that died while starting ``fmt`` would."""
+        self.guard.path.write_text(json.dumps({"format": fmt, "encoder": "vaav1enc", "key": key or self.KEY,
+                                               "pid": 2 ** 22 + 12345, "started": time.time()}))
+
+    def crash_notices(self):
+        from momento import daemon
+
+        return [c.args[1:3] for c in daemon.notify.call_args_list
+                if len(c.args) > 2 and "stopped working" in c.args[2]]
+
+    def test_a_crash_is_counted_and_told_once(self):
+        self.check({"cmd": "configure", "changes": {"format": "av1"}}, ok=True)   # AV1 picked
+        self.died_starting("av1")
+        with self.assertLogs("momento", "WARNING") as logs:
+            self.d._check_last_start()
+        self.assertIn("without a clean stop", "\n".join(logs.output))
+        self.assertFalse(self.guard.path.exists())
+        self.assertTrue(self.detector.ready().is_crashed("av1"))
+        self.assertEqual(json.loads((self.tmp / "formats.json").read_text())["crashes"], {"av1": 1})
+        st = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((st["format"], st["format_effective"]), ("av1", "h265"))   # the next of AV1 -> H.265 -> H.264
+        self.assertEqual(st["format_reason"], "AV1 stopped working on this PC, so Momento switched to H.265")
+        rec = self.d.recorder
+        rec.format_effective = "h265"
+        self.d._on_state("recording", None)
+        self.d._on_state("recording", None)
+        self.assertEqual(self.crash_notices(), [("Momento: recording in H.265",
+                                                 "AV1 stopped working on this PC, so Momento switched to H.265.")])
+        r = self.check({"cmd": "settings"}, ok=True)
+        self.assertEqual((r["format_crashed"], r["format_effective"]), (["av1"], "h265"))
+        self.assertIn("av1", r["format_allowed"])           # still pickable, to retry
+
+    def test_auto_says_nothing(self):
+        # Auto records in H.264 on this GPU anyway: a crashed AV1 changes nothing it does
+        self.died_starting("av1")
+        with self.assertLogs("momento", "WARNING"):
+            self.d._check_last_start()
+        st = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((st["format"], st["format_effective"], st["format_reason"]), ("auto", "h264", None))
+
+    def test_a_clean_restart_is_not_counted(self):
+        self.guard.begin("av1", "vaav1enc", self.KEY)      # recording in AV1, not stable yet
+        self.d.stop()                                      # SIGTERM (restart, logout, shutdown) or quit
+        self.assertFalse(self.guard.path.exists())
+        self.d._check_last_start()                         # the next daemon start
+        self.assertFalse(self.detector.ready().is_crashed("av1"))
+        self.assertEqual(self.crash_notices(), [])
+
+    def test_a_crash_on_another_driver_is_not_counted(self):
+        self.d.cfg["capture"]["format"] = "av1"
+        self.died_starting("av1", key={**self.KEY, "driver": "Mesa 26.1.0"})
+        with self.assertLogs("momento", "WARNING"):
+            self.d._check_last_start()
+        self.assertFalse(self.detector.ready().is_crashed("av1"))
+        self.d.recorder.format_effective = "av1"
+        self.d._on_state("recording", None)
+        self.assertEqual(self.crash_notices(), [])
+        self.assertIsNone(self.check({"cmd": "status"})["format_reason"])
+
+    def test_picking_it_again_retries(self):
+        r = self.check({"cmd": "configure", "changes": {"format": "av1"}}, ok=True)   # saved: AV1
+        self.assertEqual(r["changed"], {"format": "av1"})
+        self.died_starting("av1")
+        with self.assertLogs("momento", "WARNING"):
+            self.d._check_last_start()
+        self.assertEqual(self.check({"cmd": "status"})["format_effective"], "h265")
+        before = self.d.recorder
+        r = self.check({"cmd": "configure", "changes": {"format": "AV1"}}, ok=True)   # the same value again
+        self.assertEqual((r["changed"], r["restarted"]), ({"format": "av1"}, True))
+        self.assertIsNot(self.d.recorder, before)          # recording restarted, in AV1
+        self.assertFalse(self.detector.ready().is_crashed("av1"))
+        st = self.check({"cmd": "status"})
+        self.assertEqual((st["format_effective"], st["format_reason"]), ("av1", None))
+        r = self.check({"cmd": "configure", "changes": {"format": "av1"}}, ok=True)   # not crashed: nothing to do
+        self.assertEqual((r["changed"], r["restarted"]), ({}, False))
+
+
 class CoverageTest(_DaemonCase):
     """protocol.COMMANDS and daemon.handle() know the same commands."""
 
