@@ -1,9 +1,9 @@
 # nfpm config: builds the noarch .deb, .rpm and Arch .pkg.tar.zst attached to
 # every GitHub release (see .github/workflows/release.yml).
 #
-#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p deb       -t dist/
-#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p rpm       -t dist/
-#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p archlinux -t dist/
+#   VERSION=1.0.0 nfpm package -f packaging/nfpm.yaml -p deb       -t dist/
+#   VERSION=1.0.0 nfpm package -f packaging/nfpm.yaml -p rpm       -t dist/
+#   VERSION=1.0.0 nfpm package -f packaging/nfpm.yaml -p archlinux -t dist/
 #
 # Run from the repository root. Paths below are relative to it.
 #

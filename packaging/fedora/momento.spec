@@ -12,7 +12,7 @@
 %global appid io.github.mehulchachada.Momento
 
 Name:           momento
-Version:        0.1.0
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        Instant replay for Linux gaming: save the last 15 s to 60 min
 
@@ -101,5 +101,5 @@ appstreamcli validate --no-net %{buildroot}%{_metainfodir}/%{appid}.metainfo.xml
 %{_userunitdir}/momento.service
 
 %changelog
-* Sat Sep 26 2026 Mehul Chachada <mehulchachada@users.noreply.github.com> - 0.1.0-1
-- First release
+* Sun Sep 27 2026 Mehul Chachada <mehulchachada@users.noreply.github.com> - 1.0.0-1
+- Momento 1.0

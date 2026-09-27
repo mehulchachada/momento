@@ -1,8 +1,8 @@
-# Release: push a tag like v0.1.0 and this builds the distro packages, the
+# Release: push a tag like v1.0.0 and this builds the distro packages, the
 # source tarball and SHA256SUMS, smoke-tests the packages, and creates a
 # *draft* GitHub Release with them attached. Check it, then press Publish.
 #
-#   git tag -a v0.1.0 -m "Momento 0.1.0" && git push origin v0.1.0
+#   git tag -a v1.0.0 -m "Momento 1.0" && git push origin v1.0.0
 #
 # The tag must match momento/__init__.py's __version__.
 name: release

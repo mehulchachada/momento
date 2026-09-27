@@ -3,7 +3,7 @@
 # AUR package for Momento.
 # After bumping pkgver: updpkgsums && makepkg --printsrcinfo > .SRCINFO
 pkgname=momento
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='Instant replay for Linux games - save the last 15 seconds to 60 minutes with one button'
 arch=('any')
@@ -39,7 +39,7 @@ optdepends=(
 makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 checkdepends=('ffmpeg')
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-# Placeholder until v0.1.0 is released: run `updpkgsums` (or copy the value
+# Placeholder until v1.0.0 is released: run `updpkgsums` (or copy the value
 # from the release's SHA256SUMS).
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 
