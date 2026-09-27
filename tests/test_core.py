@@ -4025,9 +4025,9 @@ class HistorySettingsTest(unittest.TestCase):
         self.assertEqual(d["choices"]["instant_bar"], ["on", "off"])
         self.assertEqual(d["tabs"], [["General", ["record", "replay_length", "keep_history"]],
                                      ["Video", ["resolution", "fps", "quality", "format"]],
-                                     ["Audio", ["audio_source", "mic", "mic_device"]],
+                                     ["Audio", ["audio_source", "mic", "mic_device", "sounds"]],
                                      ["Controller", ["controller"]],
-                                     ["Misc", ["hour_warning", "instant_bar", "sounds"]]])
+                                     ["Misc", ["hour_warning", "instant_bar"]]])
         for _name, keys in self.settings.TABS:
             for key in keys:
                 self.assertIn(key, d["values"])
@@ -4130,7 +4130,7 @@ class HistorySettingsTest(unittest.TestCase):
                           "sounds"})
 
     def test_sounds_setting(self):
-        """Settings -> Misc -> Sounds: [ui] sounds, on by default, live, read by the bar."""
+        """Settings -> Audio -> Menu sounds: [ui] sounds, on by default, live, read by the bar."""
         cfg = self.config.load(self.path)
         self.assertIs(self.config.DEFAULTS["ui"]["sounds"], True)
         self.assertEqual(self.settings.current(cfg)["sounds"], "on")

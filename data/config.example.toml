@@ -163,7 +163,7 @@ keep_bar_loaded = true
 
 # Soft sounds in the clip bar: moving around it, saving, pause, play and stop.
 # Momento records your desktop's sound, so a clip saved right then may have them.
-# Change it with:  momento set sounds off    (or Settings -> Misc -> Sounds)
+# Change it with:  momento set sounds off    (or Settings -> Audio -> Menu sounds)
 sounds = true
 
 [controller]

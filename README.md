@@ -161,10 +161,10 @@ Open with the **gear** (**S**, or **Y** on a controller), pick what you want, th
 | | | AV1: smoothest on newer hardware. Some older devices can't play it. |
 | **Audio** | Sound | Your default output, a specific device, or Off |
 | | Mic | **Off**, On (plus which mic) |
+| | Menu sounds | **On**, Off. Soft sounds as you use the bar. They may be heard in a clip saved at that moment. |
 | **Controller** | Controller | **PS / Xbox + Down**, Off |
 | **Misc** | Hour warning | **10**, 5 or 3 minutes' notice before your replay is full |
 | | Instant bar | **On**: the bar opens instantly (about 100 MB). Off: saves that memory. |
-| | Sounds | **On**, Off. Soft sounds as you use the bar. Bar sounds may be heard in clips saved at that moment. |
 | | Problem? | **Make a report** for a [GitHub issue](#something-wrong); **Open logs** shows the log files |
 
 Clips are always MP4. Formats your PC can't record are greyed out.

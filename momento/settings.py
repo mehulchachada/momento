@@ -52,9 +52,9 @@ LIVE_KEYS = CONTROLLER_KEYS + ("replay_length", "keep_history", "hour_warning", 
 TABS = (
     ("General", ("record", "replay_length", "keep_history")),
     ("Video", ("resolution", "fps", "quality", "format")),
-    ("Audio", ("audio_source", "mic", "mic_device")),
+    ("Audio", ("audio_source", "mic", "mic_device", "sounds")),
     ("Controller", ("controller",)),
-    ("Misc", ("hour_warning", "instant_bar", "sounds")),
+    ("Misc", ("hour_warning", "instant_bar")),
 )
 
 # What gets recorded: user-facing value -> label (the bar, `momento settings`).

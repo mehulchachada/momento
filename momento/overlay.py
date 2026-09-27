@@ -30,7 +30,7 @@ screenshots, browsed and played in a panel that opens right above the bar
 part lives in ``momento.gallery`` and is imported on the first open only, so a
 resident bar that never shows it never loads QtMultimedia.
 
-Sounds (Settings -> Misc -> Sounds, ``[ui] sounds``): soft UI sounds from
+Sounds (Settings -> Audio -> Menu sounds, ``[ui] sounds``): soft UI sounds from
 ``momento.sfx`` for moving the focus, choosing, open / close, save, screenshot,
 play / pause / stop, refusals and deletes. Only for what the user did: one
 input plays at most one of them (``Bar.with_sounds``), automatic changes (the
@@ -225,9 +225,9 @@ RECORD_TEXT = {"screen": "Full screen", "window": "Window"}
 # for an older daemon / settings module without them.
 DEFAULT_TABS = (("General", ("record", "replay_length", "keep_history")),
                 ("Video", ("resolution", "fps", "quality")),
-                ("Audio", ("audio_source", "mic", "mic_device")),
+                ("Audio", ("audio_source", "mic", "mic_device", "sounds")),
                 ("Controller", ("controller",)),
-                ("Misc", ("hour_warning", "instant_bar", "sounds")))
+                ("Misc", ("hour_warning", "instant_bar")))
 
 
 def _gb(n) -> str:
@@ -872,7 +872,7 @@ ROW_TITLES = {"record": "Record", "replay_length": "Replay length", "keep_histor
               "resolution": "Resolution",
               "fps": "Frame rate", "quality": "Quality", "audio_source": "Sound", "mic": "Mic",
               "mic_device": "Mic device", "controller": "Controller", "hour_warning": "Hour warning",
-              "instant_bar": "Instant bar", "sounds": "Sounds"}
+              "instant_bar": "Instant bar", "sounds": "Menu sounds"}
 ROW_ICONS["format"] = "film"
 ROW_TITLES["format"] = "Format"
 # Settings -> Misc: not a setting, two actions (a report file for GitHub, the logs folder).
@@ -2217,7 +2217,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             gen = self.gen
             QTimer.singleShot(ms, lambda: fn() if gen == self.gen else None)
 
-        # ---------------- sounds (momento.sfx; Settings -> Misc -> Sounds)
+        # ---------------- sounds (momento.sfx; Settings -> Audio -> Menu sounds)
         def sounds_start(self):
             """On every show: read [ui] sounds; the first show makes the player, which
             loads its sounds in the background (never on this thread)."""

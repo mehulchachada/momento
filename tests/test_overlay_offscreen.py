@@ -494,6 +494,8 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.y() + bar.height(), bottom0)
         self.key(Qt.Key_Down)
         self.assertTrue(bar.row("mic_device").buttons[0].hasFocus())
+        self.key(Qt.Key_Down)                    # menu sounds
+        self.assertTrue(bar.row("sounds").buttons[0].hasFocus())
         self.key(Qt.Key_Down)
         self.assertTrue(bar.apply_btn.hasFocus())
         pump(self.app, 0.05)
@@ -1571,9 +1573,9 @@ class OverlayOffscreen(unittest.TestCase):
             self.assertEqual(b.mapTo(bar, b.rect().topLeft()).y(), bar.tab_btns[0].mapTo(bar, b.rect().topLeft()).y())
         want = {"General": ["record", "replay_length", "keep_history"],
                 "Video": ["resolution", "fps", "quality", "format"],
-                "Audio": ["audio_source", "mic", "mic_device"],
+                "Audio": ["audio_source", "mic", "mic_device", "sounds"],
                 "Controller": ["controller"],
-                "Misc": ["hour_warning", "instant_bar", "sounds", "report"]}
+                "Misc": ["hour_warning", "instant_bar", "report"]}
         heights = set()
         for i, name in enumerate(bar.tab_names):
             bar.switch_tab(i, "row")
@@ -1633,9 +1635,9 @@ class OverlayOffscreen(unittest.TestCase):
             self.assertEqual(img.pixelColor(8, y).name(), above.name())     # inset from the edges
         # the Audio tab: Mic device shows (and gets its line) only with the mic on
         bar.switch_tab(bar.tab_names.index("Audio"), "row")
-        self.assertEqual([r.has_divider() for r in bar.visible_rows()], [False, True])
-        bar.row("mic").buttons[1].click()
         self.assertEqual([r.has_divider() for r in bar.visible_rows()], [False, True, True])
+        bar.row("mic").buttons[1].click()
+        self.assertEqual([r.has_divider() for r in bar.visible_rows()], [False, True, True, True])
         self.assertFalse(bar.row("mic_device").isHidden())
 
     def test_settings_new_rows(self):
@@ -1653,7 +1655,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual([r.findChild(QLabel).text() for r in bar.rows],
                          ["Record", "Replay length", "Keep history", "Resolution", "Frame rate", "Quality",
                           "Format", "Sound", "Mic",
-                          "Mic device", "Controller", "Hour warning", "Instant bar", "Sounds", "Problem?"])
+                          "Mic device", "Menu sounds", "Controller", "Hour warning", "Instant bar", "Problem?"])
         for r in bar.rows:                         # every title fits its column
             lbl = r.findChild(QLabel)
             self.assertLessEqual(lbl.fontMetrics().horizontalAdvance(lbl.text()), lbl.width())
@@ -1761,7 +1763,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.enterContext(mock.patch.object(logs, "open_folder", side_effect=lambda p: opened.append(Path(p)) or True))
         for _ in range(6):
             self.key(Qt.Key_PageDown)                                   # Misc
-        self.assertEqual([r.key for r in bar.visible_rows()], ["hour_warning", "instant_bar", "sounds", "report"])
+        self.assertEqual([r.key for r in bar.visible_rows()], ["hour_warning", "instant_bar", "report"])
         row = bar.row("report")
         self.assertEqual((row.findChild(QLabel).text(), [b.text() for b in row.buttons], row.icon.kind),
                          ("Problem?", ["Make a report", "Open logs"], "report"))
@@ -1771,7 +1773,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(bar.height(), h0 + self.PANEL + 1)
         self.assertNotIn("report", bar.pending())
         self.assertEqual(bar.changes(), {})
-        for _ in range(3):
+        for _ in range(2):
             self.key(Qt.Key_Down)                                       # Problem?: Make a report
         self.assertTrue(row.buttons[0].hasFocus())
         self.key(Qt.Key_Return)                                         # runs the report, not Apply
