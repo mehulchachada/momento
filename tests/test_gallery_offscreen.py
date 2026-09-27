@@ -1051,6 +1051,65 @@ class GalleryOffscreen(unittest.TestCase):
         bar.on_pad_action("accept")
         self.assertEqual([c[0] for c in calls], ["Replay_0.mp4"])
 
+    # ------------------------------------------------------------ sounds
+    def listen(self, bar):
+        """The bar's sounds, recorded by name (nothing is played)."""
+        from momento import sfx
+
+        heard, t = [], [0.0]
+
+        class Rec:
+            def play(self, name, pcm):
+                heard.append(name)
+
+        def clock():
+            t[0] += 1.0                   # never a move too soon
+            return t[0]
+        bar.sounds = sfx.Sounds(backend=Rec, sync=True, clock=clock)
+        return heard
+
+    def test_sounds(self):
+        """Open / close, moving, choosing, a delete and a refused one; the idle timeout is silent."""
+        folder = self.scratch()
+        bar = self.bar_under_test = self.bar(folder)
+        self.trash_mock()
+        heard = self.listen(bar)
+        g = self.open(bar)
+        self.assertEqual(heard, ["gallery_open"])                     # once it opens, not at the press
+        del heard[:]
+        self.key(Qt.Key_Right)                                        # the next item
+        self.key(Qt.Key_Down)                                         # stage -> player
+        self.key(Qt.Key_Return)                                       # play / pause
+        self.key(Qt.Key_Home)                                         # the newest again
+        bar.on_pad_action("up")                                       # the controller: the same
+        self.assertEqual(heard, ["move", "move", "select", "move", "move"])
+        del heard[:]
+        self.key(Qt.Key_Delete)                                       # the question
+        self.key(Qt.Key_Escape)                                       # Cancel
+        self.key(Qt.Key_Delete)
+        bar.on_idle()                                                 # timed out: no sound
+        self.assertEqual(heard, ["select", "select", "select"])
+        del heard[:]
+        self.key(Qt.Key_Delete)
+        self.key(Qt.Key_Left)                                         # Cancel -> Delete
+        self.key(Qt.Key_Return)
+        self.assertEqual(heard, ["select", "move", "delete"])
+        del heard[:]
+        g.folder = str(Path(self._tmp.name) / "Elsewhere")            # a delete that is refused
+        g.ask_delete()
+        g.confirm_delete()
+        self.assertEqual(heard, ["select", "error"])
+        del heard[:]
+        self.key(Qt.Key_Escape)                                       # back to the bar
+        self.assertEqual((bar.mode, heard), ("clip", ["gallery_close"]))
+
+    def test_sounds_nothing_saved_yet(self):
+        bar = self.bar(self.empty)
+        heard = self.listen(bar)
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: not bar.hintbar.isHidden())
+        self.assertEqual(heard, ["select"])
+
     # ------------------------------------------------------------ focus rows
     def test_rows_up_and_down(self):
         bar = self.bar()
