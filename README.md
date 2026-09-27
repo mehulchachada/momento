@@ -172,7 +172,7 @@ Clips are always MP4. Formats your PC can't record are greyed out.
 <details><summary><b>See every tab</b></summary>
 
 <p align="center"><img src="assets/settings-general.png" width="880" alt="Settings, General tab: Record, Replay length, Keep history"></p>
-<p align="center"><img src="assets/settings-audio.png" width="880" alt="Settings, Audio tab: Sound and Mic"></p>
+<p align="center"><img src="assets/settings-audio.png" width="880" alt="Settings, Audio tab: Sound, Mic, Mic device and Menu sounds"></p>
 <p align="center"><img src="assets/settings-controller.png" width="880" alt="Settings, Controller tab: PS / Xbox + Down or Off"></p>
 <p align="center"><img src="assets/settings-misc.png" width="880" alt="Settings, Misc tab: Hour warning and Instant bar"></p>
 </details>
