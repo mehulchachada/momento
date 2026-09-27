@@ -1,5 +1,5 @@
 """Command line: momento daemon | overlay | save 5m | screenshot | status | settings | set KEY VALUE | pause | resume |
-quit | logs."""
+quit | logs | report."""
 
 from __future__ import annotations
 
@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("-n", "--lines", type=_positive, metavar="N", help="only the last N lines")
     lg.add_argument("-f", "--follow", action="store_true", help="keep showing new lines as they come (Ctrl+C stops)")
     lg.add_argument("--open", action="store_true", help="open the folder with the log files")
+    sub.add_parser("report", help="make a problem report file to attach to a GitHub issue",
+                   description="Writes ~/Momento-report-<date>.txt: your Momento version and settings, "
+                               "facts about this PC and Momento's recent log. Your home folder, user name, "
+                               "computer name, email and IP addresses and window titles are left out. "
+                               "Nothing is uploaded.")
     return p
 
 
@@ -231,6 +236,18 @@ def main(argv: list[str] | None = None) -> int:
         from . import logs
 
         return logs.main(args)
+
+    if args.command == "report":
+        from . import report
+
+        try:
+            path = report.write(config_path=args.config)
+        except OSError as e:
+            print(f"momento: couldn't write the report: {e}", file=sys.stderr)
+            return 1
+        print(path)
+        print("Attach this file to your issue on GitHub")
+        return 0
 
     if args.command == "overlay":
         from . import overlay
