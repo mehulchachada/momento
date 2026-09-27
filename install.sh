@@ -261,18 +261,19 @@ h264_notes() {
     case "$FAMILY" in
         fedora)
             if [ "$GPU_AMD" = 1 ] && [ "$UBLUE" = 0 ]; then
-                note "AMD on Fedora: Fedora's Mesa has H.264 encoding switched off. For GPU encoding enable"
-                note "RPM Fusion (https://rpmfusion.org/Configuration) and run:"
-                note "  sudo dnf install mesa-va-drivers-freeworld"
+                note "AMD on Fedora: for smooth recording, your graphics card needs an extra driver."
+                note "Add RPM Fusion (https://rpmfusion.org/Configuration), then run:"
+                note "  sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld"
             fi
             if [ "$GPU_NVIDIA" = 1 ] && [ "$UBLUE" = 0 ]; then
-                note "NVIDIA: NVENC needs the proprietary driver (RPM Fusion akmod-nvidia)."
+                note "NVIDIA: install the official NVIDIA driver (RPM Fusion) so your graphics card can record."
             fi ;;
         suse)
-            note "openSUSE: the default repos leave out H.264 GPU encoding. For it, add Packman"
-            note "and run: sudo zypper dup --from packman --allow-vendor-change" ;;
+            note "openSUSE: for smooth recording, add Packman"
+            note "(https://en.opensuse.org/Additional_package_repositories#Packman), then run:"
+            note "  sudo zypper dup --from packman --allow-vendor-change" ;;
         arch|debian)
-            if [ "$GPU_NVIDIA" = 1 ]; then note "NVIDIA: NVENC (nvh264enc) needs the proprietary driver."; fi ;;
+            if [ "$GPU_NVIDIA" = 1 ]; then note "NVIDIA: install the official NVIDIA driver so your graphics card can record."; fi ;;
     esac
 }
 
@@ -348,7 +349,7 @@ PY
 }
 
 need()    { bad "$2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING+=("$1"); }
-optneed() { warn "optional: $2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING_OPT+=("$1"); }
+optneed() { warn "nice to have: $2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING_OPT+=("$1"); }
 
 check_deps() {
     local found gst_ok=0
@@ -359,7 +360,7 @@ check_deps() {
         : # no Python at all; reported below
     else case "$PYTHON" in
         /usr/bin/*|/bin/*|"$VENV_DIR"/*) ;;
-        *) warn "using a non-system Python ($PYTHON); it usually can't see distro PyGObject/PySide6 — try MOMENTO_PYTHON=/usr/bin/python3" ;;
+        *) warn "using a non-system Python ($PYTHON); it usually can't see distro PyGObject/PySide6 — try MOMENTO_PYTHON=/usr/bin/python3 (if unsure, ignore this)" ;;
     esac; fi
 
     if py_try 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
@@ -392,10 +393,10 @@ check_deps() {
         if found="$(gst_has_any mpegtsmux)"; then ok "GStreamer: $found"; else need bad "GStreamer: mpegtsmux"; fi
         if found="$(gst_has_any h264parse)"; then ok "GStreamer: $found"; else need bad "GStreamer: h264parse"; fi
         if found="$(gst_has_any vah264enc vah264lpenc vaapih264enc nvh264enc qsvh264enc)"; then
-            HW_ENC=1; ok "GStreamer H.264 encoder: $found (GPU)"
+            HW_ENC=1; ok "Records on your graphics card ($found)"
         elif found="$(gst_has_any x264enc openh264enc)"; then
-            ok "GStreamer H.264 encoder: $found (software)"
-            warn "no GPU H.264 encoder usable — recording works but costs CPU"
+            ok "Records on your processor ($found)"
+            warn "Your graphics card can't record yet, so your processor will. Games may stutter."
             [ "${QUIET:-0}" = 1 ] || h264_notes
         else
             need h264 "GStreamer H.264 encoder"
@@ -492,7 +493,7 @@ install_system_deps() {
         steamos:*) deps_steamos; return 0 ;;
         nixos:*) deps_nixos; return 0 ;;
         unknown:*)
-            warn "unrecognised distro ($OS_NAME): install the packages listed above yourself."
+            warn "Momento doesn't know the packages of $OS_NAME. Install the parts listed above with your package manager."
             return 0 ;;
     esac
 
@@ -543,7 +544,7 @@ install_system_deps() {
     # shellcheck disable=SC2086
     if [ -n "$extra" ]; then
         if $extra; then INSTALLED_PKGS="${INSTALLED_PKGS:+$INSTALLED_PKGS }$EXTRA"; ok "installed: $EXTRA"
-        else warn "optional packages failed to install (Momento still works): $EXTRA"; fi
+        else warn "Some extras couldn't be installed (Momento still works): $EXTRA"; fi
     fi
 }
 
@@ -760,7 +761,7 @@ do_enable() {
         ENABLED=1
         ok "momento.service enabled and started (and starts at every login)"
     else
-        bad "momento.service failed to start — see: journalctl --user -u momento.service -e"
+        bad "Momento didn't start. To see why, run: journalctl --user -u momento.service -e"
     fi
 }
 
@@ -771,7 +772,7 @@ summary() {
     if [ -n "$INSTALLED_PKGS" ]; then note "Added for Momento: $INSTALLED_PKGS"; fi
     note "Installed for $(id -un): $LAUNCHER, $LIB_DIR"
     if [ "$deps_ok" != 1 ]; then
-        warn "some dependencies are still missing (see the list above) — Momento can't record until they're installed."
+        warn "Some parts are still missing (see the list above). Momento can't record until they're installed."
         note "Check again any time:  $INVOKED_AS --check"
     fi
     echo
@@ -781,8 +782,8 @@ summary() {
         echo "  Start recording (now and at every login):"
         echo "    systemctl --user enable --now momento.service"
     fi
-    echo "  First start: your desktop asks which screen to share. Pick your monitor"
-    echo "               (tick \"remember\" / \"allow restore\" if offered) — it's asked only once."
+    echo "  First start: open the bar with ${B}Super + Shift + G${N} and press play. Your desktop asks"
+    echo "               what to share: pick your game's window."
     echo "  Save a clip: press ${B}Super + Shift + G${N} and pick a length (or: momento save 5m)."
     echo "  Is it running?  momento status"
     echo "  Clips go to ~/Videos/Momento.   Update later:  $LIB_DIR/install.sh --update"
@@ -877,7 +878,7 @@ main() {
     if [ "$ENABLE" = 1 ]; then
         echo
         if [ "$deps_ok" = 1 ]; then do_enable
-        else warn "not starting the recorder until the missing dependencies are installed"; fi
+        else warn "Momento won't start until the missing parts are installed."; fi
     fi
     summary "$deps_ok"
 }
