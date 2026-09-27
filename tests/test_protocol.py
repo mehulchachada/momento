@@ -339,7 +339,7 @@ class DaemonContractTest(_DaemonCase):
         self.assertEqual(r["bitrate_kbps"], 10000)
         self.assertEqual(r["storage"]["required"], self.need(resolution="720p"))
         r = self.check({"cmd": "settings"}, ok=True)
-        self.assertEqual(r["resolution_allowed"], ["720p", "native"])
+        self.assertEqual(r["resolution_allowed"], ["480p", "720p", "native"])
         self.assertEqual((r["values"]["resolution"], r["resolution_effective"]), ("1080p", "native"))
         req = r["storage"]["required"]
         self.assertEqual(req["1080p/high/60"], req["720p/high/60"])
@@ -347,9 +347,18 @@ class DaemonContractTest(_DaemonCase):
         self.assertTrue(validate_reply("status", {**self.call({"cmd": "status"}), "source_size": [0, 1080]}))
 
     def test_resolution_choices_up_to_1080p(self):
-        """v1.0.0 offers 720p, 1080p and native; 1440p/4K are refused (additive: version 1)."""
+        """480p, 720p, 1080p and native are offered; 1440p/4K are refused (additive: version 1)."""
         r = self.check({"cmd": "settings"}, ok=True)
         self.assertEqual(r["choices"]["resolution"], list(protocol.RESOLUTION_CHOICES))
+        self.assertEqual(protocol.RESOLUTION_CHOICES, ("480p", "720p", "1080p", "native"))
+        self.assertLessEqual({f"480p/{q}/{f}" for q in ("standard", "high", "ultra") for f in (60, 120)},
+                             set(r["storage"]["required"]))
+        r = self.check({"cmd": "configure", "changes": {"resolution": "sd"}}, ok=True)   # the alias
+        self.assertEqual(r["changed"], {"resolution": "480p"})
+        r = self.check({"cmd": "status"}, ok=True)
+        self.assertEqual((r["resolution"], r["resolution_effective"], r["bitrate_kbps"]), ("480p", "480p", 5000))
+        self.assertEqual(r["storage"]["label"], "480p High")
+        r = self.check({"cmd": "configure", "changes": {"resolution": "1080p"}}, ok=True)
         before = self.path.read_text()
         for value in ("1440p", "2160p", "4k", "2k"):
             r = self.check({"cmd": "configure", "changes": {"resolution": value}}, ok=False)
@@ -831,7 +840,7 @@ class ValidatorTest(unittest.TestCase):
         for bad in ([1920], [1920, "1080"], [1920, 1080.5], [True, 1080], "1920x1080"):
             self.assertTrue(validate_reply("status", {**status, "source_size": bad}), bad)
         self.assertEqual(validate_reply("settings", {**settings_ok, "source_size": [1920, 1080],
-                                                     "resolution_allowed": ["720p", "1080p", "native"],
+                                                     "resolution_allowed": ["480p", "720p", "1080p", "native"],
                                                      "resolution_effective": "1080p"}), [])
         self.assertTrue(validate_reply("settings", {**settings_ok, "resolution_allowed": "720p"}))
         self.assertTrue(validate_reply("settings", {**settings_ok, "tabs": [["General", "record"]]}))
@@ -875,7 +884,7 @@ class ValidatorTest(unittest.TestCase):
         for name, spec in {**protocol.COMMANDS, **protocol.CLIP_BAR_COMMANDS}.items():
             self.assertEqual(set(spec), {"request", "reply", "error"}, name)
             self.assertIn("ok", spec["reply"], name)
-        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 18)
+        self.assertEqual(len(quality.RESOLUTIONS) * len(quality.QUALITIES) * len(quality.FPS_CHOICES), 24)
         self.assertEqual(protocol.RESOLUTION_TOLERANCE, quality.SOURCE_TOLERANCE)
         self.assertEqual(protocol.RESOLUTION_CHOICES, tuple(quality.RESOLUTIONS))
         self.assertEqual(protocol.MAX_HEIGHT, quality.MAX_HEIGHT)

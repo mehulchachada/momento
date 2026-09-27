@@ -43,7 +43,7 @@ DEFAULTS = {
         "source": "auto",
         # 60 | 120 frames per second (120 needs a 120 Hz display to be useful).
         "fps": 60,
-        # 720p | 1080p | native (screen size, scaled down to at most 1080 lines).
+        # 480p | 720p | 1080p | native (screen size, scaled down to at most 1080 lines).
         # 1440p / 2160p are not offered yet (quality.MAX_HEIGHT); an older config
         # that has them records at 1080p.
         # Other shapes are fitted with black bars, never stretched.

@@ -844,7 +844,7 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     p.restore()
 
 
-RES_LABELS = {"720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
+RES_LABELS = {"480p": "480p", "720p": "720p", "1080p": "1080p", "1440p": "1440p", "2160p": "4K", "native": "Native"}
 ROW_ICONS = {"record": "fullscreen", "resolution": "display", "fps": "gauge", "quality": "sliders",
              "audio_source": "speaker", "mic": "mic", "mic_device": "micdev", "controller": "gamepad",
              "keep_history": "history",

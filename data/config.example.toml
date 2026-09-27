@@ -32,8 +32,10 @@ target = "window"
 fps = 60
 
 # Recording resolution (up to 1080p for now; 1440p and 4K are coming later):
-#   "720p" | "1080p"   scaled to this size; if your screen has a different
-#                      shape you get black bars, never a stretched picture
+#   "480p" | "720p" | "1080p"
+#                      scaled to this size; if your screen has a different
+#                      shape you get black bars, never a stretched picture.
+#                      480p: smallest files, softest picture
 #   "native"           your screen's own size (window mode: the window's size
 #                      when you picked it), scaled down to 1080p if it is bigger
 # Change it from a terminal with:  momento set resolution 720p
@@ -45,9 +47,10 @@ quality = "high"
 
 # Video bitrate in kbit/s. 0 = pick automatically from resolution + quality:
 #                standard   high   ultra      (Mbit/s)
+#     480p           3        5      8
 #     720p           6       10     15
 #     1080p         10       15     25
-#     native     as 720p or 1080p, by the size really recorded
+#     native     as 480p, 720p or 1080p, by the size really recorded
 #   (1440p and 4K are not offered yet; a config that still says "1440p" or
 #   "2160p" records at 1080p)
 #   (at 120 fps the automatic bitrate is 1.5x these)
