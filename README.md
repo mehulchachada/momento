@@ -92,7 +92,7 @@ Momento now records in the background until you stop it or the game closes.
 | Do this | What happens |
 |---|---|
 | **Super + Shift + G** | Opens or closes the bar |
-| Click a length (or **1**–**8**) | Saves that much, ending right now |
+| Click a length (or **1**–**8**) | Saves that much, ending right now. The bar closes right away and a notification tells you when the clip is ready |
 | Camera button | Takes a screenshot |
 | **P** or pause button | Pauses or resumes. What you have can still be saved |
 | Stop button | Stops recording (asks first) |

@@ -564,7 +564,7 @@ class GalleryOffscreen(unittest.TestCase):
         g = self.open(bar)
         QTest.mouseClick(bar.options[0], Qt.LeftButton)               # a save: the gallery folds, then saves
         self.assertEqual(bar.mode, "clip")
-        self.assertTrue(bar.saving)
+        self.assertTrue(bar.done)                                     # and the bar closes at once
         self.assertIsNone(g.player)
         self.wait_for(lambda: d.saves == [bar.options[0].seconds])
 

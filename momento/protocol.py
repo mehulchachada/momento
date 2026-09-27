@@ -108,19 +108,31 @@ Commands (fields are in ``COMMANDS``)
     (``FPS_CHOICES``: ``"auto"``, 60 or 120; older daemons send only 60 or 120)
     and ``fps_effective`` the rate really recorded (see Frame rate below);
     ``refresh_hz`` the recorded screen's refresh rate as its stream announced
-    it, null until known (forgotten like ``source_size``).
-``save`` {seconds}
+    it, null until known (forgotten like ``source_size``). ``saves`` lists recent
+    saves (``SAVE_JOB``, oldest first): the running and waiting ones and the last
+    10 finished, each with its ``state`` (``SAVE_STATES``), and ``path`` /
+    ``seconds`` or ``error`` / ``code`` once finished.
+``save`` {seconds, wait?}
     The newest ``seconds`` (1-3600; an integer, or a string such as ``"90"``,
     ``"15s"``, ``"5m"``, ``"1h"``) of *recorded footage* ending at the request,
     skipping gaps (pause/restart/reboot), as one MP4. If capture is running the
-    daemon first flushes the open segment, so the reply comes after flush +
-    export (allow ~120 s). ``partial`` = more than 1.5 s shorter than
-    ``requested``; ``reason`` explains a known cause (older footage with other
+    daemon first flushes the open segment and pins the footage the clip needs,
+    so a save that waits in the queue still gets exactly the moment it was
+    asked for. Saves run one at a time, in order (at most ``SAVE_QUEUE_MAX``
+    waiting; more are refused with ``code: busy``). By default the reply comes
+    after the export (allow ~120 s, plus the saves ahead of it) and carries the
+    clip's ``path`` and ``job``. With ``"wait": false`` the reply comes at once:
+    ``{"ok": true, "job": <id>, "state": "saving" | "queued"}`` (``SAVE_QUEUED``);
+    the result then shows in ``status.saves`` and in the daemon's desktop
+    notification. ``partial`` = more than 1.5 s shorter than ``requested``;
+    ``reason`` explains a known cause (older footage with other
     width/height/fps/codec/audio is never mixed in). Works in any state while
     footage exists. Errors: ``bad duration: ...``; ``nothing recorded yet``;
-    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB;
-    ``code: too_long`` when ``seconds`` is more than ``max_seconds`` (the
-    replay length; clients should not offer longer lengths).
+    ``code: no_storage`` when the output dir lacks the clip size + 256 MiB
+    (checked when the save's turn comes); ``code: too_long`` when ``seconds`` is
+    more than ``max_seconds`` (the replay length; clients should not offer
+    longer lengths); ``code: busy``; ``code: cancelled`` when the daemon shut
+    down first (a running save gets up to 10 s to finish).
 ``screenshot``
     Save one frame of the recording as a PNG in ``<output dir>/Images``
     (``Momento_<date>_<time>.png``, ``_2``, ``_3``... on collision; never
@@ -275,7 +287,9 @@ Clip bar control socket
 ``$XDG_RUNTIME_DIR/overlay.sock``, owned by the resident clip-bar process (not
 the daemon); same mode, framing and ownership rules, 64 KiB max line (a longer
 one closes the connection). Commands in ``CLIP_BAR_COMMANDS``: ``toggle``,
-``show``, ``hide``, ``quit`` (exit the bar process), ``ping``/``status`` (no-op).
+``show``, ``hide``, ``quit`` (exit the bar process), ``ping``/``status`` (no-op),
+``saved`` {ok, job} (the daemon: a save finished; the bar plays its save or
+error sound, and shows the result on its next open).
 Every success reply is ``{"ok": true, "visible": bool, "pid": int}``.
 
 Files other implementations must stay compatible with
@@ -366,6 +380,19 @@ ERROR_CODES = {
                   "(save, screenshot)",
     "not_recording": "screenshot: capture isn't running (paused, stopped, starting or failed)",
     "too_long": "save: longer than the replay keeps (status max_seconds, the Replay length setting)",
+    "busy": "save: SAVE_QUEUE_MAX saves are already waiting; try again once they are done",
+    "cancelled": "save: the daemon shut down before the clip was written (nothing was saved)",
+}
+
+# Saves waiting behind the running one before `save` answers code "busy".
+SAVE_QUEUE_MAX = 10
+# Values of a save job's `state` (status.saves, and the `wait: false` reply).
+SAVE_STATES = {
+    "queued": "waiting for the saves ahead of it (its footage is already pinned)",
+    "saving": "being exported now",
+    "saved": "done: path and seconds are set",
+    "failed": "not saved: error (and code, when known) say why",
+    "cancelled": "not saved: the daemon shut down first",
 }
 
 
@@ -460,6 +487,27 @@ AUDIO_DEVICE = {
 # Keys `configure.changes` accepts (the user-facing settings of momento/settings.py).
 SETTING_KEYS = tuple(SETTING_VALUES)
 
+# One entry of status.saves.
+SAVE_JOB = {
+    "job": (("integer",), True),               # id, counting up from 1 for each daemon run
+    "kind": (("string",), True),               # "clip" (save) | "hour" (keep_history's span)
+    "state": (("string",), True),              # SAVE_STATES
+    "requested": (("integer",), True),         # seconds asked for
+    "asked_at": (("number",), True),           # wall-clock UNIX seconds
+    "finished_at": (("number", "null"), True),
+    "path": (("string", "null"), True),        # the clip, once saved
+    "seconds": (("number", "null"), True),     # footage saved
+    "error": (("string", "null"), True),       # failed / cancelled
+    "code": (("string", "null"), True),        # ERROR_CODES, when known
+}
+
+# The immediate reply to `save` with "wait": false.
+SAVE_QUEUED = {
+    "ok": (("boolean",), True),
+    "job": (("integer",), True),
+    "state": (("string",), True),              # "saving" (next up) | "queued"
+}
+
 # --- commands -------------------------------------------------------------------
 
 # Fields of every error reply. Commands add their own extras under "error".
@@ -504,6 +552,7 @@ COMMANDS: dict[str, dict] = {
             # why format_effective isn't the format asked for, when a format crashed Momento here
             "format_reason": (("string", "null"), False),
             "storage": ((STORAGE_CHECK,), True),
+            "saves": (("array",), False),           # SAVE_JOB each; the reference daemon always sends it
             "error": (("string",), False),          # with state error / no_storage (/ no_window, older)
             "protocol": (("integer",), False),      # REQUIRED by the spec; see Pending implementation
         },
@@ -516,9 +565,12 @@ COMMANDS: dict[str, dict] = {
             # ignored unless it is within the last hour. The clip bar sends the
             # moment it opened when the desktop can't hide it from capture.
             "until": (("number",), False),
+            # false: reply at once with the job (SAVE_QUEUED); default true: after the export
+            "wait": (("boolean",), False),
         },
         "reply": {
             "ok": (("boolean",), True),
+            "job": (("integer",), False),        # the save's id (status.saves)
             "path": (("string",), True),         # absolute path of the new MP4
             "seconds": (("number",), True),      # footage actually saved
             "requested": (("integer",), True),   # what was asked for, in seconds
@@ -675,7 +727,12 @@ CLIP_BAR_REPLY = {
 
 CLIP_BAR_COMMANDS: dict[str, dict] = {
     name: {"request": {}, "reply": CLIP_BAR_REPLY, "error": {}}
-    for name in ("toggle", "show", "hide", "quit", "ping", "status")
+    for name in ("toggle", "show", "hide", "quit", "ping", "status", "saved")
+}
+# saved: the daemon tells the resident bar a save finished (it plays the sound).
+CLIP_BAR_COMMANDS["saved"]["request"] = {
+    "ok": (("boolean",), True),
+    "job": (("integer",), False),
 }
 
 # --- validation -----------------------------------------------------------------
@@ -777,9 +834,23 @@ def validate_reply(cmd: str, reply, commands: dict | None = None) -> list[str]:
         problems = _check_object("", reply, schema)
     elif spec is None:
         return [f"unknown command {cmd!r} answered ok: true"]
+    elif spec is commands.get("save") and "job" in reply and "path" not in reply:
+        # "wait": false: the job, not the clip
+        problems = _check_object("", reply, SAVE_QUEUED)
+        if isinstance(reply.get("state"), str) and reply["state"] not in ("saving", "queued"):
+            problems.append(f"unknown save state {reply['state']!r}")
+        return problems + [p for p in _check_enums({k: v for k, v in reply.items() if k != "state"})]
     else:
         problems = _check_object("", reply, spec["reply"])
     problems += _check_enums(reply)
+    if spec is commands.get("status") and reply["ok"] and isinstance(reply.get("saves"), list):
+        for i, job in enumerate(reply["saves"]):
+            problems += _check_value(f"saves[{i}]", job, (SAVE_JOB,))
+            if isinstance(job, dict):
+                if isinstance(job.get("state"), str) and job["state"] not in SAVE_STATES:
+                    problems.append(f"saves[{i}]: unknown state {job['state']!r}")
+                if isinstance(job.get("code"), str) and job["code"] not in ERROR_CODES:
+                    problems.append(f"saves[{i}]: unknown error code {job['code']!r}")
     if spec is commands.get("settings") and reply["ok"] and isinstance(reply.get("devices"), dict):
         for side in ("outputs", "inputs"):
             for i, dev in enumerate(reply["devices"].get(side) or []):

@@ -32,10 +32,14 @@ would write ``hev1``). Every clip is MP4 with the video and AAC audio copied.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
+import platform
+import re
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -51,8 +55,27 @@ FFPROBE = "ffprobe"
 MP4_OPTIONS = {"h265": ["-tag:v", "hvc1"]}
 
 
+# ffmpeg runs below the game: CPU niceness 10, and the lowest best-effort I/O
+# priority (class 2, level 7). Not the idle class: the recorder writes all the
+# time, and with BFQ an idle-class reader can starve behind it.
+NICE = 10
+IOPRIO_CLASS_BE, IOPRIO_LEVEL = 2, 7
+_IOPRIO_SET = {"x86_64": 251, "aarch64": 30, "i386": 289, "i686": 289}  # syscall numbers
+# How long a cancelled ffmpeg gets to exit after SIGTERM before SIGKILL.
+KILL_GRACE_S = 2.0
+
+# The files an export writes next to the clip while it runs: a hidden temp MP4
+# (renamed to the clip's name only once complete), the segment list, and the
+# per-session pieces. A crash can leave them behind; see clean_leftovers().
+TEMP_RE = re.compile(r"^\..+\.(?:tmp\.mp4|segments\.txt|part\d+\.mp4)$")
+
+
 class ExportError(RuntimeError):
     pass
+
+
+class ExportCancelled(ExportError):
+    """The export was stopped on request (Momento closing); its temp files are gone."""
 
 
 def output_path(cfg: dict, seconds: float, when: datetime | None = None) -> Path:
@@ -145,7 +168,8 @@ def codec_options(segments) -> list[str]:
     return list(MP4_OPTIONS.get(codec, []))
 
 
-def _cut(segments, offset: float, duration: float, out: Path, fmt: str, list_path: Path) -> None:
+def _cut(segments, offset: float, duration: float, out: Path, fmt: str, list_path: Path,
+         cancel: threading.Event | None = None) -> None:
     """One session's segments -> out (stream copy), starting on the keyframe nearest offset."""
     end = offset + duration
     start = offset
@@ -165,10 +189,10 @@ def _cut(segments, offset: float, duration: float, out: Path, fmt: str, list_pat
     if fmt == "mp4":
         cmd += codec_options(segments) + ["-movflags", "+faststart"]
     cmd += ["-f", fmt, str(out)]
-    _run(cmd, out)
+    _run(cmd, out, cancel)
 
 
-def _join(pieces: list[Path], out: Path, list_path: Path, options=()) -> None:
+def _join(pieces: list[Path], out: Path, list_path: Path, options=(), cancel: threading.Event | None = None) -> None:
     """Concatenate MP4 pieces (each starting at 0) back to back; the gaps between them vanish.
 
     The concat demuxer shifts every piece by the summed durations of the pieces
@@ -188,17 +212,90 @@ def _join(pieces: list[Path], out: Path, list_path: Path, options=()) -> None:
            "-map", "0:v?", "-map", "0:a?", "-dn", "-sn",
            "-c", "copy", "-avoid_negative_ts", "make_zero", *options,
            "-movflags", "+faststart", "-f", "mp4", str(out)]
-    _run(cmd, out)
+    _run(cmd, out, cancel)
 
 
-def _run(cmd: list[str], out: Path) -> None:
-    log.debug("export: %s", " ".join(cmd))
+def lower_priority(pid: int) -> None:
+    """Put a running process below the game: nice NICE, best-effort I/O at IOPRIO_LEVEL.
+
+    Set from outside after the start (no preexec_fn, which is unsafe in a threaded
+    daemon). Silently skipped where the system doesn't allow it.
+    """
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        os.setpriority(os.PRIO_PROCESS, pid, NICE)
+    except (OSError, AttributeError) as e:
+        log.debug("cannot lower the CPU priority of %d: %s", pid, e)
+    nr = _IOPRIO_SET.get(platform.machine())
+    if nr is None:
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        # ioprio_set(IOPRIO_WHO_PROCESS, pid, class << 13 | level)
+        if libc.syscall(nr, 1, pid, (IOPRIO_CLASS_BE << 13) | IOPRIO_LEVEL) != 0:
+            log.debug("cannot lower the I/O priority of %d: errno %d", pid, ctypes.get_errno())
+    except (OSError, AttributeError) as e:
+        log.debug("cannot lower the I/O priority of %d: %s", pid, e)
+
+
+def _run(cmd: list[str], out: Path, cancel: threading.Event | None = None) -> None:
+    """Run one ffmpeg step at low priority; stop it (and raise ExportCancelled) once ``cancel`` is set."""
+    log.debug("export: %s", " ".join(cmd))
+    if cancel is not None and cancel.is_set():
+        raise ExportCancelled("cancelled")
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True)
     except OSError as e:
         raise ExportError(f"cannot run ffmpeg: {e}") from e
+    lower_priority(proc.pid)
+    stderr = ""
+    try:
+        while True:
+            try:
+                _out, stderr = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel is not None and cancel.is_set():
+                    _stop(proc)
+                    raise ExportCancelled("cancelled") from None
+    finally:
+        if proc.poll() is None:   # an unexpected error on our side: never leave ffmpeg running
+            _stop(proc)
     if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
-        raise ExportError(proc.stderr.strip() or f"ffmpeg exited with {proc.returncode}")
+        raise ExportError((stderr or "").strip() or f"ffmpeg exited with {proc.returncode}")
+
+
+def _stop(proc) -> None:
+    """SIGTERM, then SIGKILL after KILL_GRACE_S; reaps the process and closes its pipe."""
+    try:
+        proc.terminate()
+        proc.communicate(timeout=KILL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+    except (OSError, ValueError):
+        pass
+
+
+def clean_leftovers(out_dir) -> list[Path]:
+    """Delete the temp files of an export that never finished (a crash, a kill -9).
+
+    Only hidden files named like an export's own temp files (TEMP_RE), directly in
+    the clips folder. Returns what was removed. Call it only when no export runs.
+    """
+    removed = []
+    try:
+        entries = list(Path(out_dir).expanduser().iterdir())
+    except OSError:
+        return removed
+    for p in entries:
+        if TEMP_RE.match(p.name) and p.is_file() and not p.is_symlink():
+            try:
+                p.unlink()
+                removed.append(p)
+            except OSError as e:
+                log.warning("cannot remove the leftover %s: %s", p, e)
+    return removed
 
 
 def check_compatible(runs) -> None:
@@ -208,8 +305,12 @@ def check_compatible(runs) -> None:
         raise ExportError("selection mixes footage with different video/audio parameters")
 
 
-def export(selection, out_path: Path) -> Path:
+def export(selection, out_path: Path, cancel: threading.Event | None = None) -> Path:
     """Blocking: write selection to out_path (atomic). Raises ExportError.
+
+    ``cancel``: once set, the running ffmpeg is stopped, the temp files are removed
+    and ExportCancelled is raised; out_path never exists half-written (the clip is
+    written to a hidden temp name and renamed when complete).
 
     A selection from one capture session is cut in a single ffmpeg pass. One
     that spans several sessions (pause/resume, restarts) is cut per session and
@@ -229,7 +330,7 @@ def export(selection, out_path: Path) -> Path:
     temps = [tmp, list_path]
     try:
         if len(runs) == 1:
-            _cut(runs[0].segments, runs[0].offset, runs[0].duration, tmp, "mp4", list_path)
+            _cut(runs[0].segments, runs[0].offset, runs[0].duration, tmp, "mp4", list_path, cancel)
         else:
             check_compatible(runs)
             pieces = []
@@ -238,14 +339,16 @@ def export(selection, out_path: Path) -> Path:
                     continue
                 piece = out_path.with_name(f".{out_path.stem}.part{i}.mp4")
                 temps.append(piece)
-                _cut(run.segments, run.offset, run.duration, piece, "mp4", list_path)
+                _cut(run.segments, run.offset, run.duration, piece, "mp4", list_path, cancel)
                 pieces.append(piece)
             if not pieces:
                 raise ExportError("empty selection")
             if len(pieces) == 1:
                 os.replace(pieces[0], tmp)
             else:
-                _join(pieces, tmp, list_path, codec_options(selection.segments))
+                _join(pieces, tmp, list_path, codec_options(selection.segments), cancel)
+        if cancel is not None and cancel.is_set():
+            raise ExportCancelled("cancelled")
         os.replace(tmp, out_path)
         return out_path
     finally:

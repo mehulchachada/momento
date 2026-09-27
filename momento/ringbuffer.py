@@ -150,6 +150,9 @@ class RingBuffer:
         self.max_seconds = max_seconds
         self.margin = margin
         self._segments: list[Segment] = []
+        # Segments a clear() removed from the replay while a save still read them:
+        # no longer footage (not in the index, not saveable), deleted on their last release().
+        self._doomed: list[Segment] = []
         self._lock = threading.Lock()
         self.directory: Path | None = None
         self._loaded = False
@@ -205,8 +208,10 @@ class RingBuffer:
                     log.info("segment %s is missing or empty; dropped from the index", seg.path.name)
                     _unlink(seg.path)
             self._segments = keep
-            known = {s.path.name for s in keep}
-            highest = max([n for n in (_index_of(s.path) for s in keep) if n is not None], default=-1)
+            # a doomed segment is still being read by a save: never delete or reuse it here
+            known = {s.path.name for s in keep + self._doomed}
+            highest = max([n for n in (_index_of(s.path) for s in keep + self._doomed) if n is not None],
+                          default=-1)
             for p in segment_files(self.directory):
                 if p.name in known:
                     continue
@@ -307,20 +312,48 @@ class RingBuffer:
                 log.exception("segment listener failed")
 
     def clear(self) -> None:
-        """Delete all footage and the index (explicit Stop). Pinned segments survive until released."""
+        """Delete all footage and the index (explicit Stop).
+
+        A segment a save still reads (pinned) leaves the replay at once too, but
+        its file stays until the save releases it, so that clip is never cut short.
+        """
         with self._lock:
-            doomed = [s for s in self._segments if not s.pins]
-            self._segments = [s for s in self._segments if s.pins]
-            for seg in doomed:
+            gone = [s for s in self._segments if not s.pins]
+            self._doomed += [s for s in self._segments if s.pins]
+            self._segments = []
+            for seg in gone:
                 _unlink(seg.path)
             if self.directory is not None:
+                held = {s.path for s in self._doomed}
                 for p in segment_files(self.directory):
-                    if p not in {s.path for s in self._segments}:
+                    if p not in held:
                         _unlink(p)
-                if self._segments:
-                    self._write_index()
-                else:
-                    _unlink(self.index_path)
+                _unlink(self.index_path)
+
+    def held_bytes(self) -> int:
+        """Bytes on disk only because a save still needs them.
+
+        Pinned segments older than the replay length (+ margin), which prune would
+        otherwise have deleted, and pinned segments a clear() took out of the
+        replay. Queued saves pin their footage when they are asked for, so this
+        is the extra room the saves in the queue take in the buffer's folder.
+        """
+        limit = self.max_seconds + self.margin
+        with self._lock:
+            held = list(self._doomed)
+            newer = 0.0
+            for seg in reversed(self._segments):
+                if not seg.closed:
+                    continue
+                if newer > limit and seg.pins:
+                    held.append(seg)
+                newer += seg.duration
+        return sum(_size(s.path) for s in held)
+
+    def pinned(self) -> int:
+        """How many segments some save still holds (tests, logs)."""
+        with self._lock:
+            return sum(1 for s in self._segments + self._doomed if s.pins > 0)
 
     # --- queries --------------------------------------------------------------
 
@@ -407,6 +440,11 @@ class RingBuffer:
         with self._lock:
             for seg in selection.segments:
                 seg.pins -= 1
+            done = [s for s in self._doomed if s.pins <= 0]
+            if done:
+                self._doomed = [s for s in self._doomed if s.pins > 0]
+                for seg in done:
+                    _unlink(seg.path)
         self.prune()
 
     # --- retention --------------------------------------------------------------
