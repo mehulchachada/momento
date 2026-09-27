@@ -117,13 +117,21 @@ START_TIMEOUT_S = 10
 START_POLL_S = 0.5
 LOGO_SIZE = 18
 ANIM_MS = 140            # pill fill / text colour transition
+NOTE_FADE_MS = 140       # a note's old text fading into the new one (focus moving along a row)
+NOTE_PX = TAB_PX         # the notes' size: rows, the tab row, the settings footer
+NOTE_GLYPH_W = 14        # the info / warning glyph in front of a note
+NOTE_GLYPH_GAP = 6
+NOTE_GAP = 16            # at least this much between a row's last pill and its note
+# Motion off (reduced motion): note changes land at once instead of crossfading.
+ANIMATE = True
 
 # Palette. The record dot is the only accent colour (the storage hint aside).
 BG = (17, 17, 17, 240)   # #111111 at ~94 %
 BORDER = "#2A2A2A"
 TEXT = "#EDEDED"
-MUTED = "#8A8A8A"
-DIM = "#555555"
+MUTED = "#8A8A8A"        # labels, resting pill text, icons (not sentences: those are NOTE)
+NOTE = "#B4B4B4"         # informative text: row notes, the settings header and footer
+DIM = "#555555"          # disabled things only (a greyed choice); never information
 RED = "#FF4D2E"
 PILL_REST = "#1C1C1C"    # a resting pill: just enough to see the shape
 PILL_ON = "#F2F2F2"      # hover and keyboard focus
@@ -135,6 +143,31 @@ ON_TEXT = "#111111"      # text on a white pill
 RING = "#EDEDED"         # keyboard focus ring around a white pill
 GREEN = "#4CC38A"
 YELLOW = "#F5C542"
+WARN = YELLOW            # warnings: won't fit, can't record a format, footage dropped
+# Informative text must read at WCAG AA (4.5:1) on the bar. The bar is BG over whatever
+# is behind it, so the worst case is BG over white: #1F1F1F (see contrast(), the tests).
+READABLE = 4.5
+NOTE_COLORS = {"info": NOTE, "plain": NOTE, "warn": WARN, "error": RED, "status": TEXT}
+NOTE_GLYPHS = {"info": "info", "warn": "warn", "error": "warn"}
+
+
+def _luminance(color: str) -> float:
+    h = color.lstrip("#")
+    c = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    c = [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in c]
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+
+
+def contrast(fg: str, bg: str) -> float:
+    """WCAG contrast ratio of two '#RRGGBB' colours (1 to 21)."""
+    a, b = sorted((_luminance(fg), _luminance(bg)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
+def bar_background(behind: str = "#FFFFFF") -> str:
+    """The bar's colour as seen over ``behind`` (BG is ~94 % opaque)."""
+    h, a = behind.lstrip("#"), BG[3] / 255
+    return "#" + "".join(f"{round(BG[i] * a + int(h[2 * i:2 * i + 2], 16) * (1 - a)):02X}" for i in range(3))
 
 # Builds the bar's controller hub (momento.gamepad.Gamepads); tests swap in fakes.
 PAD_FACTORY = None
@@ -761,6 +794,20 @@ def _draw_line_glyph(p, kind: str, x: float, y: float, color: str, width: float 
     elif kind == "bolt":
         p.drawPolygon(QPolygonF([P(x + 1.6, y - 7.5), P(x - 4.6, y + 1), P(x - 0.4, y + 1),
                                  P(x - 1.6, y + 7.5), P(x + 4.6, y - 1), P(x + 0.4, y - 1)]))
+    elif kind == "info":
+        # a thin "i" in a circle (~12 px, a note's size): information
+        p.drawEllipse(P(x, y), 5.8, 5.8)
+        p.drawLine(P(x, y - 0.6), P(x, y + 3.0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(P(x, y - 3.0), 0.95, 0.95)
+    elif kind == "warn":
+        # a thin rounded triangle with "!": a warning (~12 px)
+        p.drawPolygon(QPolygonF([P(x, y - 5.8), P(x + 6.3, y + 5.0), P(x - 6.3, y + 5.0)]))
+        p.drawLine(P(x, y - 1.8), P(x, y + 1.2))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(P(x, y + 3.3), 0.9, 0.9)
     elif kind == "gallery":
         # a media library: a photo (a mountain and a sun in a frame) on a stack
         # of them; the back frame shows only where the front one leaves room
@@ -827,7 +874,7 @@ class _PadKey:
 
 
 def _build(argv=None):  # noqa: C901 - one cohesive UI builder
-    from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QRectF, Qt, QTimer,
+    from PySide6.QtCore import (QEasingCurve, QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer,
                                 QVariantAnimation, Signal)
     from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QPainter, QPen
     from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QPushButton,
@@ -1189,10 +1236,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             super().paint_content(p, r, color)
             if not self.property("nofit"):
                 return
-            # a small accent dot after the text: this choice needs more space than is free
+            # a small amber dot after the text: this choice needs more space than is free
             tw = self.fontMetrics().horizontalAdvance(self.text())
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(RED))
+            p.setBrush(QColor(WARN))
             p.drawEllipse(QPointF(r.center().x() + tw / 2 + 5, r.center().y() - 4), 2.25, 2.25)
 
     class TabButton(Pill):
@@ -1302,6 +1349,173 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                        self.label)
             p.end()
 
+    class Note(QWidget):
+        """Informative text in a fixed place: a settings row's end, the tab row's right, the footer.
+
+        ``kind``: "info" (NOTE, an "i" glyph), "warn" (amber, a warning glyph), "error"
+        (red, the warning glyph), "plain" (NOTE, no glyph), "status" (TEXT, no glyph).
+        ``lead``: a bright word before the text ("Saved — recording restarted").
+        Too long for the width: it wraps (up to ``lines`` lines), then ends in "…" with
+        the whole text as its tooltip. It never grows past the width it is given, so
+        nothing next to it moves. A change crossfades (NOTE_FADE_MS; at once with
+        ANIMATE off); ``text()`` is the new text right away.
+        """
+
+        def __init__(self, align=Qt.AlignRight, lines=1, px=NOTE_PX):
+            super().__init__()
+            self.align, self.lines = align, lines
+            f = ui_font()
+            f.setPixelSize(px)
+            self.setFont(f)
+            self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.state = ("", "info", "")        # (text, kind, lead)
+            self.old = None                      # the state fading out
+            self._t = 1.0
+            self.elided = False
+            self.anim = QVariantAnimation(self)
+            self.anim.setDuration(NOTE_FADE_MS)
+            self.anim.setEasingCurve(QEasingCurve.InOutQuad)
+            self.anim.setStartValue(0.0)
+            self.anim.setEndValue(1.0)
+            self.anim.valueChanged.connect(self._tick)
+            self.anim.finished.connect(self.settle)
+
+        def fix_width(self, w):
+            """A fixed room (a row's end, the tab row): the layout keeps exactly this much."""
+            self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+            self.setFixedWidth(max(0, int(w)))
+
+        # --- what the rest of the bar reads
+        def text(self):
+            text, _kind, lead = self.state
+            return f"{lead} — {text}" if lead and text else lead or text
+
+        @property
+        def kind(self):
+            return self.state[1] if self.text() else None
+
+        def set(self, text, kind="info", lead="", animate=True):
+            new = (str(text or ""), kind if kind in NOTE_COLORS else "info", str(lead or ""))
+            if new == self.state:
+                return
+            shown = self.state if self._t >= 1.0 or self.old is None else (self.state if self._t >= 0.5 else self.old)
+            self.state = new
+            self.anim.stop()
+            if animate and ANIMATE and self.isVisible() and (shown[0] or shown[2]):
+                self.old, self._t = shown, 0.0
+                self.anim.start()
+            else:
+                self.old, self._t = None, 1.0
+            self.setAccessibleName(self.text())
+            self._fit()
+            self.update()
+
+        def settle(self):
+            self.anim.stop()
+            self.old, self._t = None, 1.0
+            self.update()
+
+        def _tick(self, v):
+            self._t = float(v)
+            self.update()
+
+        # --- layout
+        def glyph(self, kind):
+            return NOTE_GLYPHS.get(kind)
+
+        def text_room(self, kind, lead=""):
+            room = self.width() - (NOTE_GLYPH_W + NOTE_GLYPH_GAP if self.glyph(kind) else 0)
+            if lead:
+                room -= self.fontMetrics().horizontalAdvance(lead + " ")
+            return max(0, room)
+
+        def layout_lines(self, state):
+            """(lines, elided) for ``state`` in the current width."""
+            text, kind, lead = state
+            fm, room = self.fontMetrics(), self.text_room(kind, lead)
+            if lead and text:
+                text = f"— {text}"
+            if not text:
+                return [], False
+            if fm.horizontalAdvance(text) <= room:
+                return [text], False
+            words, lines = text.split(" "), []
+            while words and len(lines) < self.lines - 1:
+                line = words.pop(0)
+                while words and fm.horizontalAdvance(f"{line} {words[0]}") <= room:
+                    line += " " + words.pop(0)
+                if fm.horizontalAdvance(line) > room:        # one word longer than the room
+                    words.insert(0, line)
+                    break
+                lines.append(line)
+            rest = " ".join(words)
+            if not rest:
+                return lines, False
+            last = fm.elidedText(rest, Qt.ElideRight, room)
+            lines.append(last)
+            return lines, last != rest
+
+        def _fit(self):
+            _lines, self.elided = self.layout_lines(self.state)
+            self.setToolTip(self.text() if self.elided else "")
+
+        def resizeEvent(self, ev):
+            super().resizeEvent(ev)
+            self._fit()
+
+        def sizeHint(self):
+            fm = self.fontMetrics()
+            text, kind, lead = self.state
+            w = fm.horizontalAdvance(self.text()) + (NOTE_GLYPH_W + NOTE_GLYPH_GAP if self.glyph(kind) else 0)
+            return QSize(w, fm.height() * self.lines)
+
+        # --- painting
+        def paintEvent(self, ev):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            if self.old is not None and self._t < 1.0:
+                self.paint_state(p, self.old, 1.0 - self._t)
+                self.paint_state(p, self.state, self._t)
+            else:
+                self.paint_state(p, self.state, 1.0)
+            p.end()
+
+        def paint_state(self, p, state, opacity):
+            text, kind, lead = state
+            lines, _elided = self.layout_lines(state)
+            if not lines and not lead:
+                return
+            p.save()
+            p.setOpacity(opacity)
+            p.setFont(self.font())
+            fm = self.fontMetrics()
+            lh = fm.height()
+            top = (self.height() - lh * max(1, len(lines))) / 2
+            color = QColor(NOTE_COLORS.get(kind, NOTE))
+            glyph = self.glyph(kind)
+            lead_w = fm.horizontalAdvance(lead + " ") if lead else 0
+            first_w = lead_w + (fm.horizontalAdvance(lines[0]) if lines else 0)
+            if self.align & Qt.AlignRight:
+                x0 = self.width() - first_w
+            else:
+                x0 = NOTE_GLYPH_W + NOTE_GLYPH_GAP if glyph else 0
+            if glyph:
+                _draw_line_glyph(p, glyph, x0 - NOTE_GLYPH_GAP - NOTE_GLYPH_W / 2, top + lh / 2,
+                                 color.name(), 1.3)
+            if lead:
+                p.setPen(QColor(TEXT))
+                p.drawText(QRectF(x0, top, lead_w + 2, lh), Qt.AlignVCenter | Qt.AlignLeft, lead)
+            p.setPen(color)
+            for i, line in enumerate(lines):
+                y = top + i * lh
+                if self.align & Qt.AlignRight:
+                    r = QRectF(0, y, self.width(), lh)
+                    p.drawText(r, Qt.AlignVCenter | Qt.AlignRight, line)
+                else:
+                    r = QRectF(x0 + (lead_w if i == 0 else 0), y, self.width(), lh)
+                    p.drawText(r, Qt.AlignVCenter | Qt.AlignLeft, line)
+            p.restore()
+
     class SettingRow(QWidget):
         """A label and a segmented choice. Long lists collapse to ‹ current ›."""
 
@@ -1344,6 +1558,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 lay.addWidget(self.cur)
                 lay.addWidget(self.next)
                 self.buttons = [self.cur]
+                used = self.prev.width() + self.cur.width() + self.next.width()
             else:
                 elide = [len(c) > 2 and c[2] for c in choices]
                 natural = [fm.horizontalAdvance(lbl) + pad for lbl in self.labels]
@@ -1364,14 +1579,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                     b.setEnabled(self.values[i] not in self.disabled)
                     lay.addWidget(b)
                     self.buttons.append(b)
+                used = sum(b.width() for b in self.buttons) + SEG_SPACING * (len(self.buttons) - 1)
             lay.addStretch(1)
-            # A short note at the row's end (Resolution: "Your screen is 1080p").
-            self.note = QLabel("")
-            self.note.setObjectName("muted")
-            nf = ui_font()
-            nf.setPixelSize(TAB_PX)
-            self.note.setFont(nf)
-            self.note.hide()
+            # A short note at the row's end (Resolution: "Your screen is 1080p"), centred
+            # with the pills. It has the room the pills leave (two lines, then "…").
+            self.note = Note(Qt.AlignRight, lines=2)
+            self.note.fix_width(avail - used - NOTE_GAP - 6)
             lay.addWidget(self.note)
             lay.addSpacing(6)                # ends where the tab row's note does
             self.refresh()
@@ -1410,9 +1623,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.icon.kind = icons.get(self.value, ROW_ICONS.get(self.key, "sliders"))
                 self.icon.update()
 
-        def set_note(self, text):
-            self.note.setText(text or "")
-            self.note.setHidden(not text)
+        def set_note(self, text, kind="info"):
+            self.note.set(text, kind)
 
         def enabled(self, i):
             return self.values[i] not in self.disabled
@@ -1484,11 +1696,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             labels = [(f, codecs.label(f)) for f in opts]
             super().__init__(bar, key, title, labels, value, avail, disabled=unavailable)
             self.codecs, self.picked, self.unavailable, self.focused = codecs, picked, unavailable, None
-            # Up to two short lines in the room the pills leave.
-            room = avail - sum(b.minimumWidth() for b in self.buttons) - 8
-            self.note.setWordWrap(True)
-            self.note.setAlignment(Qt.AlignRight | Qt.AlignVCenter)   # at the row's end, like Resolution's
-            self.note.setFixedWidth(max(120, room))
             for b in self.buttons:
                 b.installEventFilter(self)
             self.update_note()
@@ -1506,13 +1713,12 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             return self.codecs.HINTS.get(fmt, "")
 
         def update_note(self):
-            if self.focused is not None:
-                text = self.hint(self.focused)
-            elif self.unavailable:
-                text = self.codecs.unavailable_message(self.unavailable)
-            else:
-                text = self.hint(self.value)
-            self.set_note(text)
+            fmt = self.focused if self.focused is not None else self.value
+            if self.focused is None and self.unavailable:
+                # why a chip is greyed, while the row has no focus
+                self.set_note(self.codecs.unavailable_message(self.unavailable), "warn")
+                return
+            self.set_note(self.hint(fmt), "warn" if fmt in self.unavailable else "info")
 
         def refresh(self):
             super().refresh()
@@ -1602,7 +1808,6 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.setStyleSheet(f"""
                 QWidget {{ color: {TEXT}; background: transparent; }}
                 QLabel#muted {{ color: {MUTED}; }}
-                QLabel#dim {{ color: {DIM}; }}
                 QPushButton {{ border: none; outline: none; }}
             """)
 
@@ -1744,9 +1949,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             frow = QHBoxLayout(foot)
             frow.setContentsMargins(18, 0, 0, 0)
             frow.setSpacing(0)
-            self.foot = QLabel("")
-            self.foot.setTextFormat(Qt.RichText)
-            self.foot.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            # the estimate, a warning, "Applying…", "Saved — …" (NOTE_PX, like the gallery's meta line)
+            self.foot = Note(Qt.AlignLeft, lines=1)
             frow.addWidget(self.foot, 1)
             self.apply_btn = TextButton("Apply", glyph="check")
             self.apply_btn.clicked.connect(self.apply_settings)
@@ -2556,11 +2760,10 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 hl.addWidget(b)
                 self.tab_btns.append(b)
             hl.addStretch(1)
-            self.note = QLabel(self.note_text())
-            self.note.setObjectName("dim")
-            nf = ui_font()
-            nf.setPixelSize(TAB_PX)
-            self.note.setFont(nf)
+            self.note = Note(Qt.AlignRight, lines=1)
+            tabs_w = sum(b.width() for b in self.tab_btns)
+            self.note.fix_width(self.bar_w - 2 - 12 - 18 - tabs_w - NOTE_GAP)
+            self.note.set(*self.header_note(), animate=False)
             hl.addWidget(self.note)
             self.panel_lay.addWidget(header)
 
@@ -2678,18 +2881,23 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             """Settings the daemon applies without restarting the recording."""
             return set(getattr(settings, "LIVE_KEYS", None) or LIVE_KEYS) | set(settings.CONTROLLER_KEYS)
 
-        def note_text(self):
-            """The line next to the tabs: what Apply will do with the changes made so far."""
+        def header_note(self):
+            """(text, kind) for the line next to the tabs: what Apply will do with the
+            changes made so far. Plain (no glyph: a status line, not a note); dropping
+            footage is a warning."""
             data = self.sdata or {}
             if not data.get("online"):
-                return "Momento is off — changes apply when it starts"
+                return "Momento is off — changes apply when it starts", "plain"
             ch = self.changes() if self.rows else {}
             was, now = data.get("values", {}).get("replay_length"), ch.get("replay_length")
             if isinstance(was, int) and isinstance(now, int) and now < was:
-                return f"Keeps the newest {now} min · older footage is dropped"
+                return f"Keeps the newest {now} min · older footage is dropped", "warn"
             if ch and set(ch) <= self.live_keys():
-                return "Applies right away · your replay is kept"
-            return "Applying restarts recording · your replay is kept"
+                return "Applies right away · your replay is kept", "plain"
+            return "Applying restarts recording · your replay is kept", "plain"
+
+        def note_text(self):
+            return self.header_note()[0]
 
         def replay_seconds(self, v=None):
             """The replay length the rows now say, in seconds (the saved max_seconds, exact,
@@ -2771,19 +2979,16 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             v = self.pending()
             if not self.fits(v):
-                self.foot.setText(f"<span style='color:{RED}'>Needs {_gb(self.storage_need(v))} GB"
-                                  f" · {_gb(self.storage_free())} GB free</span>")
+                self.foot.set(f"Needs {_gb(self.storage_need(v))} GB · {_gb(self.storage_free())} GB free", "warn")
             else:
-                self.foot.setText(f"<span style='color:{MUTED}'>{_esc(self.estimate())}</span>")
+                self.foot.set(self.estimate(), "plain")
 
         def on_row_changed(self, row):
             if row.key == "resolution":
                 self.update_res_note()
             elif row.key == "fps":
                 self.update_fps_note()
-            note = self.note_text()
-            if self.note.text() != note:
-                self.note.setText(note)
+            self.note.set(*self.header_note())
             if row.key == "mic" and self.row("mic_device") is not None:
                 # the panel keeps its height (sized for the tallest tab): nothing moves
                 self.row("mic_device").setHidden(row.value != "on")
@@ -2815,7 +3020,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             self.apply_state = "busy"
             self.applied = dict(changes)
             self.idle.stop()
-            self.foot.setText("Applying…")
+            self.foot.set("Applying…", "status")
             online, path = bool(self.sdata.get("online")), self.sdata.get("config")
             gen = self.gen
 
@@ -2845,19 +3050,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 return
             if not r.get("ok"):
                 self.apply_state = "error"
-                fm = self.foot.fontMetrics()
-                err = fm.elidedText(str(r.get("error") or "Could not save"), Qt.ElideRight,
-                                    max(120, self.foot.width()))
-                self.foot.setText(f"<span style='color:{RED}'>{_esc(err)}</span>")
+                self.foot.set(str(r.get("error") or "Could not save"), "error")
                 self.idle.start()
                 return
             self.apply_state = "done"
             if r.get("warning") or r.get("state") == "no_storage":
                 # saved, but even the new settings do not fit yet
-                fm = self.foot.fontMetrics()
                 msg = str(r.get("warning") or "Not enough free space")
-                msg = fm.elidedText(f"Saved · {msg}", Qt.ElideRight, max(120, self.foot.width()))
-                self.foot.setText(f"<span style='color:{RED}'>{_esc(msg)}</span>")
+                self.foot.set(f"Saved · {msg}", "error")
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "no_storage",
                                     "recording": False, "error": r.get("warning")}
                 self.after(APPLY_CLOSE_MS, self.after_apply)
@@ -2878,14 +3078,14 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 tail = None
             else:
                 tail = "recording restarted"
-            self.foot.setText("Saved" if tail is None else f"Saved&nbsp;<span style='color:{MUTED}'>— {tail}</span>")
+            self.foot.set(tail or "", "plain", lead="Saved")
             if r.get("online") and not r.get("paused") and not live:
                 # the recorder restarts; footage already buffered stays saveable
                 self.last_status = {**(self.last_status or {}), "ok": True, "state": "starting",
                                     "recording": False}
                 if (r.get("changed") or {}).get("record") == "window":
                     # the desktop's window picker opens now: get out of its way
-                    self.foot.setText(f"Saved&nbsp;<span style='color:{MUTED}'>— pick a window</span>")
+                    self.foot.set("pick a window", "plain", lead="Saved")
                     self.after(0, self.after_apply)
                     return
             self.after(APPLY_CLOSE_MS, self.after_apply)
@@ -3486,9 +3686,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.gallery.on_focus_visible()
 
         def settle(self):
-            """Jump every running pill transition to its end (screenshots, tests)."""
+            """Jump every running pill transition and note crossfade to its end (screenshots, tests)."""
             for b in self.pills():
                 b.settle()
+            for n in self.findChildren(Note):
+                n.settle()
 
         def eventFilter(self, obj, ev):
             t = ev.type()
