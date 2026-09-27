@@ -14,22 +14,24 @@
 
   <description>
     <p>
-      Momento is instant replay and screenshots for Linux gaming. It records your screen and sound in the background all
-      the time, so you never have to remember to start recording. When something worth
-      keeping happens, press Super+Shift+G, pick how far back to go, and the clip is saved
-      to your Videos folder.
+      Momento is instant replay and screenshots for Linux games. Press play once and it
+      records in the background. When something great happens, press Super+Shift+G (or
+      Home + D-pad Down on a controller), pick how far back to go, and the clip is in your
+      Videos folder a few seconds later.
     </p>
     <ul>
-      <li>Always keeps up to the last 60 minutes, including desktop sound and, optionally, your microphone</li>
-      <li>Eight clip lengths, from 15 seconds to a full hour</li>
-      <li>Clips are cut without re-encoding, so even an hour saves in seconds</li>
-      <li>Hardware H.264 encoding on AMD, Intel and NVIDIA graphics keeps the cost low</li>
-      <li>A slim clip bar that appears over fullscreen games on KDE Plasma, Hyprland and Sway</li>
-      <li>Works in desktop mode and in Steam Game Mode, on desktops, laptops and handhelds</li>
+      <li>Save the last 15 seconds up to 60 minutes, after it happened</li>
+      <li>Clips are ready in seconds, with your game sound and, if you want, your microphone</li>
+      <li>Records just your game window, so chats and notifications stay out of your clips</li>
+      <li>Screenshots with one button</li>
+      <li>A gallery to watch your clips and screenshots</li>
+      <li>Made for controllers and handhelds: no mouse needed</li>
+      <li>The bar shows up over fullscreen games on KDE Plasma, Hyprland and Sway</li>
+      <li>Nothing is uploaded, and there is no account</li>
     </ul>
     <p>
-      The first time it starts, your desktop asks which screen Momento may record. The replay
-      buffer is kept in your cache folder and its size is bounded by the length you choose.
+      The first time, your desktop asks which window Momento may record, like when you
+      share your screen in a call.
     </p>
   </description>
 

@@ -1,6 +1,6 @@
 # Release: push a tag like v0.1.0 and this builds the distro packages, the
-# source tarball and SHA256SUMS, smoke-tests the packages, and publishes a
-# GitHub Release with them attached.
+# source tarball and SHA256SUMS, smoke-tests the packages, and creates a
+# *draft* GitHub Release with them attached. Check it, then press Publish.
 #
 #   git tag -a v0.1.0 -m "Momento 0.1.0" && git push origin v0.1.0
 #
@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      name: ${{ steps.version.outputs.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +35,15 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match __version__ = $code"
             exit 1
           fi
+          # The app store text must describe this release too.
+          if ! grep -q "<release version=\"$tag\"" packaging/flatpak/io.github.mehulchachada.Momento.metainfo.xml; then
+            echo "::error::no <release version=\"$tag\"> in the metainfo"
+            exit 1
+          fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
+          # People-facing name: v1.0.0 -> "1.0", v1.1.0 -> "1.1", v1.0.1 -> "1.0.1".
+          if [[ "$tag" =~ ^([0-9]+\.[0-9]+)\.0$ ]]; then name="${BASH_REMATCH[1]}"; else name="$tag"; fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Check packaged systemd unit is in sync with data/momento.service
         run: |
@@ -120,7 +129,7 @@ jobs:
         run: |
           momento --version
           momento settings
-          python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); import dbus; from PySide6 import QtWidgets; print(Gst.version_string())'
+          python3 -c 'import gi; gi.require_version("Gst", "1.0"); from gi.repository import Gst; Gst.init(None); import dbus; from PySide6 import QtWidgets, QtMultimedia; print(Gst.version_string())'
           test -f /usr/lib/systemd/user/momento.service
 
   release:
@@ -136,44 +145,61 @@ jobs:
       - name: Release notes
         env:
           VERSION: ${{ needs.build.outputs.version }}
+          NAME: ${{ needs.build.outputs.name }}
         run: |
           cat > notes.md <<EOF
+          **Momento ${NAME}**: instant replay for Linux games. Press play once, and when something great happens, save the last 15 seconds to 60 minutes with **Super + Shift + G**, or **Home + D-pad Down** on a controller.
+
           ## Install
 
-          **Any distro, including SteamOS and Bazzite:** Flatpak from Flathub (when available).
+          **Easiest, on any Linux:** paste this in a terminal. It shows what it will install and asks first.
+          \`\`\`
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/v${VERSION}/install.sh | bash
+          \`\`\`
+          On Bazzite, Bluefin, Aurora and Ubuntu 24.04, use this one, not a package below.
 
-          **Fedora 41+** (Fedora's Mesa has no H.264 encoder; AMD users also want \`mesa-va-drivers-freeworld\` from RPM Fusion):
-          \`\`\`
-          sudo dnf install ./momento-${VERSION}-1.noarch.rpm
-          \`\`\`
+          **Or download the package for your system below** and install it from your Downloads folder:
 
-          **Ubuntu 25.04+ / 26.04 LTS, Debian 13+** (Ubuntu 24.04 has no PySide6 packages — use the Flatpak there):
-          \`\`\`
-          sudo apt install ./momento_${VERSION}_all.deb
-          \`\`\`
+          | System | Command |
+          |---|---|
+          | Fedora | \`sudo dnf install ./momento-${VERSION}-1.noarch.rpm\` |
+          | Ubuntu 25.04 or newer, Debian 13 or newer | \`sudo apt install ./momento_${VERSION}_all.deb\` |
+          | Arch, CachyOS, EndeavourOS, Manjaro | \`sudo pacman -U momento-${VERSION}-1-any.pkg.tar.zst\` |
 
-          **Arch, CachyOS, EndeavourOS, Manjaro** (or install \`momento\` from the AUR):
-          \`\`\`
-          sudo pacman -U momento-${VERSION}-1-any.pkg.tar.zst
-          sudo pacman -S --needed gst-plugin-va layer-shell-qt   # recommended
-          \`\`\`
-
-          Then, as your normal user:
+          After a package, run this once so Momento starts when you log in:
           \`\`\`
           systemctl --user enable --now momento.service
           \`\`\`
-          and press **Super+Shift+G** to save a clip.
 
-          Verify downloads with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          Then start your game, press **Super + Shift + G**, press play and pick your game's window.
+
+          ## Good to know
+
+          - **Steam Gaming Mode:** works there too. Turn off Steam's own game recording, or give it a different shortcut.
+          - **Ubuntu 24.04:** everything works except playing clips in the gallery, which needs Ubuntu 25.04 or newer.
+          - **Fedora with AMD graphics:** for the smoothest recording, add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`.
+
+          ## What's next
+
+          - Support for more devices and systems, tested with your help
+          - Any button combo as your controller shortcut
+          - Recording in 1440p and 4K
+          - Your microphone on its own audio track
+          - Flatpak
+
+          ## Tell us how it runs
+
+          Help make Momento great on every PC: [tell us how it runs on yours](https://github.com/${GITHUB_REPOSITORY}/issues/new?template=how-it-runs.yml). It takes 2 minutes.
           EOF
-      - name: Publish GitHub Release
+      - name: Create the draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          NAME: ${{ needs.build.outputs.name }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Momento $VERSION" \
+              --title "Momento $NAME" \
               --notes-file notes.md \
               --generate-notes \
-              --verify-tag
+              --verify-tag \
+              --draft

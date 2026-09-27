@@ -8,7 +8,7 @@
 # Run from the repository root. Paths below are relative to it.
 #
 # Target distros (their package names are used below):
-#   .deb  Ubuntu 24.04+, Debian 13+ (older ones have no PySide6 packages)
+#   .deb  Ubuntu 25.04+, Debian 13+ (Ubuntu 24.04 and older have no PySide6 packages)
 #   .rpm  Fedora 41+ (openSUSE uses different package names — use OBS instead)
 #   .pkg  Arch Linux, CachyOS, EndeavourOS, Manjaro
 name: momento
@@ -21,7 +21,7 @@ section: video
 priority: optional
 maintainer: Mehul Chachada <mehulchachada@users.noreply.github.com>
 # One line on purpose: Arch's pkgdesc takes the whole field.
-description: Instant replay for Linux gaming - always records, saves the last 15 s to 60 min with one hotkey
+description: Instant replay for Linux games - save the last 15 seconds to 60 minutes with one button
 vendor: Momento contributors
 homepage: https://github.com/mehulchachada/momento
 license: MIT
@@ -118,6 +118,7 @@ overrides:
       - python3-pyside6.qtcore
       - python3-pyside6.qtgui
       - python3-pyside6.qtwidgets
+      - python3-pyside6.qtmultimedia
       - gstreamer1.0-plugins-base
       - gstreamer1.0-pipewire
       - gstreamer1.0-plugins-good
@@ -159,6 +160,8 @@ overrides:
       - pipewire-utils
       - python3-evdev
       - xdg-user-dirs
+      # Software H.264 fallback: Fedora's own Mesa can't encode H.264.
+      - gstreamer1-plugin-openh264
   archlinux:
     depends:
       - python>=3.11
@@ -167,16 +170,22 @@ overrides:
       - gst-plugins-base
       - python-dbus
       - pyside6
+      # QtMultimedia (+ its FFmpeg backend): video playback in the gallery.
+      - qt6-multimedia
       - gst-plugin-pipewire
       - gst-plugins-good
       - gst-plugins-bad
       - gst-libav
+      # GPU recording on AMD and Intel.
+      - gst-plugin-va
+      # The bar above fullscreen games on KDE Plasma, Hyprland, Sway.
+      - layer-shell-qt
       - ffmpeg
       - libpulse
       - xdg-desktop-portal
       - hicolor-icon-theme
-    # nfpm cannot write Arch optdepends; the release notes list the optional
-    # packages (gst-plugin-va, layer-shell-qt, gst-plugins-ugly, xdg-user-dirs).
+    # nfpm cannot write Arch optdepends; the rest (gst-plugins-ugly,
+    # python-evdev, xdg-user-dirs) is left to install.sh / the AUR PKGBUILD.
 
 rpm:
   summary: Instant replay for Linux gaming — save the last 15 s to 60 min

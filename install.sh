@@ -17,7 +17,9 @@
 #   --no-deps        skip the system-package step
 #   --deps-only      only install missing system packages, then check (may run as root)
 #   --no-enable      install, but don't start the recorder or add it to login
-#   --update         download the latest Momento (main, or MOMENTO_REF) and reinstall
+#   --update         download the latest Momento release and reinstall
+#   --dev            download and install the newest test version (the main
+#                    branch) instead of the latest release; for testers
 #   --check          only report what's installed and what's missing
 #   --uninstall      remove Momento (keeps settings, replay buffer and clips)
 #   --purge          remove Momento, its settings and its replay buffer
@@ -33,7 +35,7 @@
 #   ~/.config/momento/config.toml    only if it doesn't exist yet
 #
 # Environment: MOMENTO_REF=<branch|tag|commit> (what --update / curl downloads,
-# default main), MOMENTO_PYTHON=/path/to/python3, XDG_DATA_HOME,
+# default the latest release), MOMENTO_PYTHON=/path/to/python3, XDG_DATA_HOME,
 # XDG_CONFIG_HOME, MOMENTO_NO_SYSTEMD=1 (never call systemctl; for testing).
 set -euo pipefail
 
@@ -86,9 +88,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
     if [ -n "$SELF" ] && [ -f "$SELF" ]; then
-        sed -n '2,38p' "$SELF" | sed 's/^# \{0,1\}//'
+        sed -n '2,/^[^#]/{/^#/p;}' "$SELF" | sed 's/^# \{0,1\}//'
     else
-        echo "Momento installer. Options: --yes --no-deps --deps-only --no-enable --update --check --uninstall --purge"
+        echo "Momento installer. Options: --yes --no-deps --deps-only --no-enable --update --dev --check --uninstall --purge"
         echo "Full help: $REPO_URL#install"
     fi
 }
@@ -164,7 +166,7 @@ detect_gpu() {
 
 # ------------------------------------------------ package names per need --
 # Verified in containers: Fedora 44, Ubuntu 24.04, Debian 13, Arch, Tumbleweed.
-# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl evdev
+# Needs: python gi dbus pyside pipewire good bad aac ffmpeg h264 layer pactl evdev media
 pkgs_for() {
     case "$FAMILY:$1" in
         fedora:python)   echo "python3" ;;
@@ -183,11 +185,12 @@ pkgs_for() {
         fedora:layer)    echo "layer-shell-qt" ;;
         fedora:pactl)    echo "pulseaudio-utils" ;;
         fedora:evdev)    echo "python3-evdev" ;;
+        fedora:media)    echo "python3-pyside6" ;;
 
         arch:python)     echo "python" ;;
         arch:gi)         echo "python-gobject gstreamer gst-plugins-base-libs" ;;
         arch:dbus)       echo "python-dbus" ;;
-        arch:pyside)     echo "pyside6" ;;
+        arch:pyside)     echo "pyside6 qt6-multimedia" ;;
         arch:pipewire)   echo "gst-plugin-pipewire" ;;
         arch:good)       echo "gst-plugins-good" ;;
         arch:bad)        echo "gst-plugins-bad" ;;
@@ -198,11 +201,12 @@ pkgs_for() {
         arch:layer)      echo "layer-shell-qt" ;;
         arch:pactl)      echo "libpulse" ;;
         arch:evdev)      echo "python-evdev" ;;
+        arch:media)      echo "qt6-multimedia" ;;
 
         debian:python)   echo "python3" ;;
         debian:gi)       echo "python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-tools" ;;
         debian:dbus)     echo "python3-dbus" ;;
-        debian:pyside)   echo "python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets" ;;
+        debian:pyside)   echo "python3-pyside6.qtcore python3-pyside6.qtgui python3-pyside6.qtwidgets python3-pyside6.qtmultimedia" ;;
         debian:pipewire) echo "gstreamer1.0-pipewire" ;;
         debian:good)     echo "gstreamer1.0-plugins-good gstreamer1.0-pulseaudio" ;;
         debian:bad)      echo "gstreamer1.0-plugins-bad" ;;
@@ -214,6 +218,7 @@ pkgs_for() {
         debian:layer)    echo "layer-shell-qt" ;;
         debian:pactl)    echo "pulseaudio-utils" ;;
         debian:evdev)    echo "python3-evdev" ;;
+        debian:media)    echo "python3-pyside6.qtmultimedia" ;;
         debian:venv)     echo "python3-venv" ;;
 
         suse:python)     echo "python3" ;;
@@ -231,6 +236,7 @@ pkgs_for() {
         suse:layer)      echo "layer-shell-qt6" ;;
         suse:pactl)      echo "pulseaudio-utils" ;;
         suse:evdev)      echo "python3-evdev" ;;
+        suse:media)      echo "python3-pyside6" ;;
 
         *:python)   echo "python3 (3.11 or newer)" ;;
         *:gi)       echo "PyGObject + GStreamer introspection data (Gst, GstVideo)" ;;
@@ -245,6 +251,7 @@ pkgs_for() {
         *:layer)    echo "layer-shell-qt (Qt 6)" ;;
         *:pactl)    echo "pactl (pulseaudio-utils / libpulse)" ;;
         *:evdev)    echo "python-evdev" ;;
+        *:media)    echo "PySide6 QtMultimedia" ;;
         *)          echo "" ;;
     esac
 }
@@ -254,18 +261,19 @@ h264_notes() {
     case "$FAMILY" in
         fedora)
             if [ "$GPU_AMD" = 1 ] && [ "$UBLUE" = 0 ]; then
-                note "AMD on Fedora: Fedora's Mesa has H.264 encoding switched off. For GPU encoding enable"
-                note "RPM Fusion (https://rpmfusion.org/Configuration) and run:"
-                note "  sudo dnf install mesa-va-drivers-freeworld"
+                note "AMD on Fedora: for smooth recording, your graphics card needs an extra driver."
+                note "Add RPM Fusion (https://rpmfusion.org/Configuration), then run:"
+                note "  sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld"
             fi
             if [ "$GPU_NVIDIA" = 1 ] && [ "$UBLUE" = 0 ]; then
-                note "NVIDIA: NVENC needs the proprietary driver (RPM Fusion akmod-nvidia)."
+                note "NVIDIA: install the official NVIDIA driver (RPM Fusion) so your graphics card can record."
             fi ;;
         suse)
-            note "openSUSE: the default repos leave out H.264 GPU encoding. For it, add Packman"
-            note "and run: sudo zypper dup --from packman --allow-vendor-change" ;;
+            note "openSUSE: for smooth recording, add Packman"
+            note "(https://en.opensuse.org/Additional_package_repositories#Packman), then run:"
+            note "  sudo zypper dup --from packman --allow-vendor-change" ;;
         arch|debian)
-            if [ "$GPU_NVIDIA" = 1 ]; then note "NVIDIA: NVENC (nvh264enc) needs the proprietary driver."; fi ;;
+            if [ "$GPU_NVIDIA" = 1 ]; then note "NVIDIA: install the official NVIDIA driver so your graphics card can record."; fi ;;
     esac
 }
 
@@ -341,7 +349,7 @@ PY
 }
 
 need()    { bad "$2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING+=("$1"); }
-optneed() { warn "optional: $2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING_OPT+=("$1"); }
+optneed() { warn "nice to have: $2   ->  $(pkgs_for "$1" | tr '\n' ' ')"; MISSING_OPT+=("$1"); }
 
 check_deps() {
     local found gst_ok=0
@@ -352,7 +360,7 @@ check_deps() {
         : # no Python at all; reported below
     else case "$PYTHON" in
         /usr/bin/*|/bin/*|"$VENV_DIR"/*) ;;
-        *) warn "using a non-system Python ($PYTHON); it usually can't see distro PyGObject/PySide6 — try MOMENTO_PYTHON=/usr/bin/python3" ;;
+        *) warn "using a non-system Python ($PYTHON); it usually can't see distro PyGObject/PySide6 — try MOMENTO_PYTHON=/usr/bin/python3 (if unsure, ignore this)" ;;
     esac; fi
 
     if py_try 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
@@ -367,7 +375,16 @@ check_deps() {
         need gi "PyGObject + GStreamer introspection"
     fi
     if py_try 'import dbus, dbus.mainloop.glib'; then ok "dbus-python"; else need dbus "dbus-python"; fi
-    if py_try 'from PySide6 import QtCore, QtGui, QtWidgets'; then ok "PySide6"; else need pyside "PySide6"; fi
+    if py_try 'from PySide6 import QtCore, QtGui, QtWidgets'; then
+        ok "PySide6"
+        if py_try 'from PySide6 import QtMultimedia'; then ok "PySide6 QtMultimedia (plays clips in the gallery)"
+        elif [[ "$PYTHON" == "$VENV_DIR"/* ]]; then
+            # PySide6 came from PyPI (e.g. Ubuntu 24.04): nothing to install.
+            warn "Everything works, except playing clips in the gallery. That needs a newer system (Ubuntu 25.04 or newer)."
+        else optneed media "PySide6 QtMultimedia (plays clips in the gallery)"; fi
+    else
+        need pyside "PySide6"
+    fi
 
     if have gst-inspect-1.0 || [ "$gst_ok" = 1 ]; then
         if found="$(gst_has_any pipewiresrc)"; then ok "GStreamer: $found"; else need pipewire "GStreamer: pipewiresrc"; fi
@@ -376,10 +393,10 @@ check_deps() {
         if found="$(gst_has_any mpegtsmux)"; then ok "GStreamer: $found"; else need bad "GStreamer: mpegtsmux"; fi
         if found="$(gst_has_any h264parse)"; then ok "GStreamer: $found"; else need bad "GStreamer: h264parse"; fi
         if found="$(gst_has_any vah264enc vah264lpenc vaapih264enc nvh264enc qsvh264enc)"; then
-            HW_ENC=1; ok "GStreamer H.264 encoder: $found (GPU)"
+            HW_ENC=1; ok "Records on your graphics card ($found)"
         elif found="$(gst_has_any x264enc openh264enc)"; then
-            ok "GStreamer H.264 encoder: $found (software)"
-            warn "no GPU H.264 encoder usable — recording works but costs CPU"
+            ok "Records on your processor ($found)"
+            warn "Your graphics card can't record yet, so your processor will. Games may stutter."
             [ "${QUIET:-0}" = 1 ] || h264_notes
         else
             need h264 "GStreamer H.264 encoder"
@@ -445,7 +462,7 @@ plan_packages() {
                 UNAVAILABLE="$UNAVAILABLE $p"; continue
             fi
             case "$k" in
-                layer|pactl|h264) EXTRA="$EXTRA $p" ;;
+                layer|pactl|h264|media) EXTRA="$EXTRA $p" ;;
                 *)                WANT="$WANT $p" ;;
             esac
         done
@@ -476,14 +493,14 @@ install_system_deps() {
         steamos:*) deps_steamos; return 0 ;;
         nixos:*) deps_nixos; return 0 ;;
         unknown:*)
-            warn "unrecognised distro ($OS_NAME): install the packages listed above yourself."
+            warn "Momento doesn't know the packages of $OS_NAME. Install the parts listed above with your package manager."
             return 0 ;;
     esac
 
     plan_packages
-    if [ -n "$UNAVAILABLE" ]; then warn "not in your repos (skipped): $UNAVAILABLE"; fi
+    if [ -n "$UNAVAILABLE" ]; then warn "Not available on $OS_NAME, so skipped: $UNAVAILABLE"; fi
     if [ "$PYSIDE_FROM_PYPI" = 1 ]; then
-        warn "your distro has no PySide6 package — the installer will fetch it from PyPI into Momento's own folder"
+        warn "$OS_NAME has no PySide6 package (the toolkit for Momento's bar). It will be downloaded into Momento's own folder instead."
     fi
     if [ -z "$WANT$EXTRA" ]; then
         ok "nothing to install from the repos"
@@ -527,7 +544,7 @@ install_system_deps() {
     # shellcheck disable=SC2086
     if [ -n "$extra" ]; then
         if $extra; then INSTALLED_PKGS="${INSTALLED_PKGS:+$INSTALLED_PKGS }$EXTRA"; ok "installed: $EXTRA"
-        else warn "optional packages failed to install (Momento still works): $EXTRA"; fi
+        else warn "Some extras couldn't be installed (Momento still works): $EXTRA"; fi
     fi
 }
 
@@ -568,35 +585,70 @@ pyside_venv() {
     py_try 'import gi, sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || return 0
     [ "$FAMILY" != fedora ] || [ "$ATOMIC" = 0 ] || return 0
     echo
-    warn "PySide6 (the Qt toolkit for the clip bar) isn't installed and your distro doesn't package it."
-    if ! ask "Download PySide6-Essentials (~100 MB) from PyPI into $VENV_DIR?"; then return 0; fi
+    warn "Momento's bar needs PySide6, and $OS_NAME doesn't have it as a package."
+    if ! ask "Download it (about 100 MB) into Momento's own folder ($VENV_DIR)?"; then return 0; fi
     local base="$PYTHON"
     case "$base" in "$VENV_DIR"/*) base=/usr/bin/python3 ;; esac
     rm -rf "${VENV_DIR:?}"
     mkdir -p "$LIB_DIR"
     if ! "$base" -m venv --system-site-packages "$VENV_DIR"; then
-        bad "couldn't create a venv (on Debian/Ubuntu: install python3-venv)"; rm -rf "${VENV_DIR:?}"; return 0
+        bad "Couldn't set up Momento's own Python folder. Install python3-venv, then run the installer again."; rm -rf "${VENV_DIR:?}"; return 0
     fi
     if "$VENV_DIR/bin/python3" -m pip install --quiet --disable-pip-version-check PySide6-Essentials; then
         ok "PySide6 -> $VENV_DIR"
         INSTALLED_PKGS="${INSTALLED_PKGS:+$INSTALLED_PKGS }PySide6-Essentials (PyPI, private venv)"
     else
-        bad "pip install PySide6-Essentials failed"; rm -rf "${VENV_DIR:?}"
+        bad "Couldn't download PySide6. Check your internet connection, then run the installer again."; rm -rf "${VENV_DIR:?}"
     fi
 }
 
 # ============================================================ bootstrap ==
+# The tag of the latest published release (drafts don't count), from where
+# github.com/<repo>/releases/latest redirects to. Prints nothing when there is
+# no release yet; fails when GitHub can't be reached.
+latest_release() {
+    local where="" out
+    if have curl; then
+        where="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest")" || return 1
+    elif have wget; then
+        # GNU wget, wget2 and busybox all print the redirect target somewhere.
+        out="$(wget -S --spider "$REPO_URL/releases/latest" 2>&1)" || return 1
+        where="$(printf '%s\n' "$out" | tr -d '\r' | grep -o 'https://[^][ ]*/releases/tag/v[0-9][^][ ]*' | tail -n 1)" || true
+    else
+        return 1
+    fi
+    case "$where" in
+        */releases/tag/v[0-9]*) echo "${where##*/releases/tag/}" ;;
+    esac
+}
+
 # Running without the source tree next to us (curl | bash) or with --update:
 # fetch the source tarball, then hand over to the install.sh inside it.
 bootstrap() {
-    local ref="${MOMENTO_REF:-main}" url tmp
+    local ref="${MOMENTO_REF:-}" url tmp label
+    if [ -z "$ref" ] && [ -z "${MOMENTO_TARBALL_URL:-}" ]; then
+        if [ "$DEV" = 1 ]; then
+            ref=main
+        elif ! ref="$(latest_release)"; then
+            die "couldn't reach GitHub to find the latest Momento. Check your internet connection and try again."
+        elif [ -z "$ref" ]; then
+            warn "No Momento release is out yet, so the newest test version is installed instead."
+            ref=main
+        fi
+    fi
+    ref="${ref:-main}"
     if [ -n "${MOMENTO_TARBALL_URL:-}" ]; then url="$MOMENTO_TARBALL_URL"
     elif [ "$ref" = main ]; then url="$REPO_URL/archive/refs/heads/main.tar.gz"
     else url="$REPO_URL/archive/$ref.tar.gz"
     fi
+    case "$ref" in
+        main) label="the newest test version of Momento" ;;
+        v[0-9]*) label="Momento ${ref#v}" ;;
+        *) label="Momento ($ref)" ;;
+    esac
     have tar || die "tar is required"
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/momento-install.XXXXXX")"
-    say "Downloading Momento ($ref)"
+    say "Downloading $label"
     note "$url"
     if have curl; then
         curl -fsSL "$url" | tar -xz -C "$tmp" --strip-components=1 || { rm -rf "$tmp"; die "download failed: $url"; }
@@ -709,7 +761,7 @@ do_enable() {
         ENABLED=1
         ok "momento.service enabled and started (and starts at every login)"
     else
-        bad "momento.service failed to start — see: journalctl --user -u momento.service -e"
+        bad "Momento didn't start. To see why, run: journalctl --user -u momento.service -e"
     fi
 }
 
@@ -720,7 +772,7 @@ summary() {
     if [ -n "$INSTALLED_PKGS" ]; then note "Added for Momento: $INSTALLED_PKGS"; fi
     note "Installed for $(id -un): $LAUNCHER, $LIB_DIR"
     if [ "$deps_ok" != 1 ]; then
-        warn "some dependencies are still missing (see the list above) — Momento can't record until they're installed."
+        warn "Some parts are still missing (see the list above). Momento can't record until they're installed."
         note "Check again any time:  $INVOKED_AS --check"
     fi
     echo
@@ -730,8 +782,8 @@ summary() {
         echo "  Start recording (now and at every login):"
         echo "    systemctl --user enable --now momento.service"
     fi
-    echo "  First start: your desktop asks which screen to share. Pick your monitor"
-    echo "               (tick \"remember\" / \"allow restore\" if offered) — it's asked only once."
+    echo "  First start: open the bar with ${B}Super + Shift + G${N} and press play. Your desktop asks"
+    echo "               what to share: pick your game's window."
     echo "  Save a clip: press ${B}Super + Shift + G${N} and pick a length (or: momento save 5m)."
     echo "  Is it running?  momento status"
     echo "  Clips go to ~/Videos/Momento.   Update later:  $LIB_DIR/install.sh --update"
@@ -767,7 +819,7 @@ do_uninstall() {
 
 # ================================================================= main ==
 main() {
-    MODE=install; YES=0; DEPS=1; ENABLE=1; UPDATE=0
+    MODE=install; YES=0; DEPS=1; ENABLE=1; UPDATE=0; DEV=0
     local args=() a
     for a in "$@"; do
         case "$a" in
@@ -778,6 +830,7 @@ main() {
             --no-enable)  ENABLE=0 ;;
             --no-check)   ;;  # accepted for compatibility
             --update)     UPDATE=1; continue ;;
+            --dev)        DEV=1; UPDATE=1; continue ;;
             --check)      MODE=check ;;
             --uninstall)  MODE=uninstall ;;
             --purge)      MODE=purge ;;
@@ -825,7 +878,7 @@ main() {
     if [ "$ENABLE" = 1 ]; then
         echo
         if [ "$deps_ok" = 1 ]; then do_enable
-        else warn "not starting the recorder until the missing dependencies are installed"; fi
+        else warn "Momento won't start until the missing parts are installed."; fi
     fi
     summary "$deps_ok"
 }

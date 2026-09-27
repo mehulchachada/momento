@@ -48,12 +48,16 @@ Recommends:     pipewire-utils
 Recommends:     xdg-user-dirs
 Recommends:     mesa-va-drivers
 Recommends:     python3-evdev
+# Software H.264 fallback (fedora-cisco-openh264 repo) where no GPU encoder works.
+Recommends:     gstreamer1-plugin-openh264
 
 %description
-Momento is instant replay and screenshots for Linux gaming. It records the
-screen and sound in the background all the time; one hotkey (Super+Shift+G) saves what just happened, from the last
-15 seconds up to the full hour, to your Videos folder. Encoding is done on
-the GPU through VA-API or NVENC, and clips are cut without re-encoding.
+Momento is instant replay and screenshots for Linux games. Press play once
+and it records in the background. When something great happens, press
+Super+Shift+G (or Home + D-pad Down on a controller), pick how far back to
+go, from 15 seconds to 60 minutes, and the clip is in your Videos folder a
+few seconds later. It also takes screenshots and has a gallery to watch
+your clips.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -77,8 +81,9 @@ install -Dpm0644 packaging/systemd/momento.service %{buildroot}%{_userunitdir}/m
 %check
 desktop-file-validate %{buildroot}%{_datadir}/applications/%{appid}.desktop
 appstreamcli validate --no-net %{buildroot}%{_metainfodir}/%{appid}.metainfo.xml
-# Modules that need GStreamer/Qt at import time are left out of the import check.
-%pyproject_check_import -e momento.pipeline -e momento.overlay -e momento.daemon -e momento.portal -e momento.hotkey -e momento.background
+# Modules that need GStreamer/Qt/D-Bus at import time are left out of the import
+# check (none of them are BuildRequires), and __main__ would run the CLI.
+%pyproject_check_import -e momento.__main__ -e momento.pipeline -e momento.overlay -e momento.gallery -e momento.daemon -e momento.portal -e momento.hotkey -e momento.background
 %{python3} -m unittest tests.test_core
 
 %post

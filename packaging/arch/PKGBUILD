@@ -5,7 +5,7 @@
 pkgname=momento
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Instant replay for Linux gaming - always records, saves the last 15 s to 60 min with one hotkey'
+pkgdesc='Instant replay for Linux games - save the last 15 seconds to 60 minutes with one button'
 arch=('any')
 url='https://github.com/mehulchachada/momento'
 license=('MIT')
@@ -14,22 +14,25 @@ depends=(
   'python-gobject'
   'python-dbus'
   'pyside6'
+  'qt6-multimedia'
   'gstreamer'
   'gst-plugins-base'
   'gst-plugin-pipewire'
   'gst-plugins-good'
   'gst-plugins-bad'
   'gst-libav'
+  # GPU recording on AMD and Intel
+  'gst-plugin-va'
+  # the bar above fullscreen games on KDE Plasma, Hyprland, Sway
+  'layer-shell-qt'
   'ffmpeg'
   'libpulse'
   'xdg-desktop-portal'
   'hicolor-icon-theme'
 )
 optdepends=(
-  'gst-plugin-va: hardware H.264 encoding on AMD and Intel (recommended)'
   'intel-media-driver: VA-API driver for Intel graphics'
   'gst-plugins-ugly: x264enc software encoder fallback'
-  'layer-shell-qt: clip bar above fullscreen games on KDE Plasma and wlroots'
   'python-evdev: open and use the clip bar with a game controller'
   'xdg-user-dirs: save clips to your (localized) Videos folder'
 )
