@@ -117,6 +117,7 @@ class FakePlayer(QObject):
     made = []
     duration_ms = 60_000
     fail = False
+    no_picture = False   # plays, but no frame ever comes (no decoder for the clip's format)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -160,7 +161,7 @@ class FakePlayer(QObject):
         if FakePlayer.fail or not self.src:
             return
         self._set(QMediaPlayer.PlaybackState.PlayingState)
-        if self.sink is not None:
+        if self.sink is not None and not FakePlayer.no_picture:
             self.sink.setVideoFrame(QVideoFrame(clip_image()))
 
     def pause(self):
@@ -791,6 +792,22 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_Right)                                        # a screenshot still shows
         self.settle_items(g)
         self.assertEqual(g.state, "shown")
+
+    def test_clip_without_a_picture(self):
+        """A clip whose video can't be decoded here (an AV1 or H.265 clip without a decoder):
+        a clear message after a few seconds, not a black box."""
+        self.addCleanup(setattr, FakePlayer, "no_picture", False)
+        FakePlayer.no_picture = True
+        bar = self.bar()
+        g = self.open(bar)
+        self.assertEqual(g.state, "playing")
+        self.player.advance(1000)
+        self.assertEqual(g.state, "playing")                          # the first frame may take a moment
+        with self.assertLogs("momento.gallery", "WARNING"):
+            self.player.advance(2500)
+        self.assertEqual(g.state, "error")
+        self.assertEqual(g.message, self.gallery_mod.NO_PICTURE)
+        self.assertTrue(bar.idle.isActive())
 
     def test_idle_off_while_playing(self):
         bar = self.bar()
