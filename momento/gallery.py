@@ -78,6 +78,16 @@ SLIDE_PX = 10            # ...drifting this far in the direction of travel
 XFADE_WAIT_MS = 400      # the old picture waits at most this long for the new one
 SEEK_ANIM_MS = 120       # the scrubber's knob on a jump (±10 s, a click)
 FULL_MS = 180            # into and out of full screen, from / to the stage
+# Opening: the bar's shape grows upward into the gallery (the height, an ease-out), and
+# the content fades in and slides up a little, starting just after the growth. Closing
+# is the reverse and quicker: the content fades out first, then the shape shrinks.
+OPEN_MS = 240
+OPEN_FADE_DELAY_MS = 60
+OPEN_FADE_MS = 180
+CLOSE_FADE_MS = 90
+CLOSE_GROW_DELAY_MS = 50
+CLOSE_GROW_MS = 130      # 180 ms in all
+CONTENT_SLIDE_PX = 12
 CLOCK_MS = 33            # while playing: the scrubber and time follow at ~30 Hz between updates
 TRIM_DELAY_MS = 1_000    # after closing: give the heap back once the player is deleted
 
@@ -313,29 +323,46 @@ class _Tween:
         self.on_value, self.on_done = on_value, on_done
         self.value = 1.0
         self.end = 1.0
+        self.ms = ms
         self.anim = QVariantAnimation(parent)
         self.anim.setDuration(ms)
         self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.anim.valueChanged.connect(self._tick)
         self.anim.finished.connect(self._done)
+        self.delay = QTimer(parent)             # a start held back a moment (run(delay=...))
+        self.delay.setSingleShot(True)
+        self.delay.timeout.connect(self.anim.start)
 
     def running(self):
-        return self.anim.state() == QAbstractAnimation.Running
+        return self.anim.state() == QAbstractAnimation.Running or self.delay.isActive()
 
-    def run(self, start=0.0, end=1.0):
+    def run(self, start=0.0, end=1.0, ms=None, delay=0):
+        """From ``start`` to ``end`` in ``ms`` (default: the tween's own), after ``delay`` ms
+        (the value holds at ``start`` meanwhile)."""
         self.anim.stop()
+        self.delay.stop()
         self.end = float(end)
         if not ANIMATE or start == end:
             self._tick(end)
             self._done()
             return
+        # quietly: a stopped animation re-emits its value when its range changes (it
+        # would jump to the new end for a moment)
+        self.anim.blockSignals(True)
+        self.anim.setDuration(int(ms or self.ms))
         self.anim.setStartValue(float(start))
         self.anim.setEndValue(float(end))
+        self.anim.setCurrentTime(0)
+        self.anim.blockSignals(False)
         self.value = float(start)
-        self.anim.start()
+        if delay > 0:
+            self.delay.start(int(delay))
+        else:
+            self.anim.start()
 
     def stop(self):
         self.anim.stop()
+        self.delay.stop()
 
     def finish(self):
         """Jump to the end now (and call on_done) if it is running."""
@@ -869,7 +896,8 @@ class Gallery(QObject):
         self.panel = _Controls()
         self.fullc = None         # _Controls of the full screen strip
         # motion
-        self.reveal = 0.0         # the panel: 0 folded away .. 1 open (the bar grows with it)
+        self.reveal = 0.0         # the panel's height: 0 folded away .. 1 open (the bar grows with it)
+        self.fade = 0.0           # its content: 0 hidden (CONTENT_SLIDE_PX low) .. 1 shown in place
         self.closing = False      # folding away after Back (the clip view is already live)
         self.out_img = None       # the outgoing picture during a crossfade (one, at the stage's size)
         self.out_dir = 0          # -1 newer / +1 older: which way it drifts
@@ -893,7 +921,8 @@ class Gallery(QObject):
         self.trim_timer.setSingleShot(True)
         self.trim_timer.setInterval(TRIM_DELAY_MS)
         self.trim_timer.timeout.connect(_trim_heap)
-        self.reveal_tween = _Tween(self, FADE_MS, self._reveal_tick, self._reveal_done)
+        self.reveal_tween = _Tween(self, OPEN_MS, self._reveal_tick, self._reveal_done)
+        self.fade_tween = _Tween(self, OPEN_FADE_MS, self._fade_tick, self._fade_done)
         self.xf_tween = _Tween(self, XFADE_MS, self._xf_tick, self._xf_done)
         self.xf_wait = QTimer(self)
         self.xf_wait.setSingleShot(True)
@@ -919,7 +948,7 @@ class Gallery(QObject):
         h = round(w * 9 / 16)
         screen = self.bar.screen() or QGuiApplication.primaryScreen()
         if screen is not None:
-            rest = (ov.BAR_HEIGHT + 2 + ov.GALLERY_GAP + 2          # the bar, the gap, the edges
+            rest = (ov.BAR_HEIGHT + 2 + ov.GALLERY_JOIN             # the bar, the hairline, the edges
                     + ov.PANEL_PAD_T + ov.TABS_H + 4 + ov.ROW_PITCH + 1 + ov.BAR_HEIGHT)
             room = screen.availableGeometry().height() - 2 * ov.BOTTOM_MARGIN - rest
             if room < h:
@@ -940,10 +969,14 @@ class Gallery(QObject):
         return False
 
     def _pin_panel(self):
+        """The panel at its full size, on the bar row (the growing host reveals it from the
+        bottom up, nothing inside is laid out again); a little low while it fades in."""
         host = self.bar.gallery_host
         h = self.panel_height()
-        self.panel_w.setFixedHeight(h)
-        self.panel_w.setGeometry(0, host.height() - h, host.width(), h)
+        slide = round(CONTENT_SLIDE_PX * (1.0 - max(0.0, min(1.0, self.fade))))
+        if self.panel_w.height() != h:
+            self.panel_w.setFixedHeight(h)
+        self.panel_w.setGeometry(0, host.height() - h + slide, host.width(), h)
 
     def _build_panel(self):
         W = self.W
@@ -1154,14 +1187,15 @@ class Gallery(QObject):
         self.stage.setFixedSize(self.stage_size)   # the screen may have changed since
         self.header.select(self.tabs[self.filter], animate=False)
         self._xf_drop()
-        start = self.reveal if self.closing else 0.0   # reopened while folding: from there
+        if not self.closing:                           # reopened while folding: from there
+            self.reveal = self.fade = 0.0
         self.closing = False
         self.reveal_tween.stop()
-        self.reveal = start
+        self.fade_tween.stop()
         bar.enter_gallery()
         self._show(immediate=True)
         self.focus_default()
-        self._unfold(start, 1.0)
+        self._motion(True)
 
     def close(self, fold=False):
         """Tear everything down: player, sink, audio, full screen; forget the listing.
@@ -1206,42 +1240,63 @@ class Gallery(QObject):
         else:
             self.close()
         self.bar.leave_gallery()
-        self._unfold(self.reveal, 0.0)
+        self._motion(False)
 
     # ------------------------------------------------------------------ motion
     def _stop_motion(self):
         """Every transition to its end, no animation left running (the bar hides)."""
-        for tw in (self.reveal_tween, self.xf_tween, self.badge_tween, self.chrome_tween, self.full_tween):
+        for tw in (self.reveal_tween, self.fade_tween, self.xf_tween, self.badge_tween, self.chrome_tween,
+                   self.full_tween):
             tw.stop()
         self.xf_wait.stop()
         self.closing = False
-        self.reveal = 0.0
+        self.reveal = self.fade = 0.0
         self.panel_w.setGraphicsEffect(None)
         self._xf_drop()
         self._finish_leaving()
 
-    def _unfold(self, start, end):
-        """The panel grows up out of the bar row (end 1) or folds back into it (end 0),
-        its content fading with it."""
-        if ANIMATE and start != end:
-            effect = QGraphicsOpacityEffect(self.panel_w)
-            effect.setOpacity(start)
-            self.panel_w.setGraphicsEffect(effect)   # only while it moves (it costs a buffer)
-        self.reveal_tween.run(start, end)
+    def _motion(self, opening):
+        """Open: the shape grows (OPEN_MS) and the content fades in and slides up, just
+        after it starts. Close: the content fades out first, then the shape shrinks. Both
+        run from wherever they are, so a reversal mid-way is smooth. Height (the bar's
+        size) and opacity only: the panel keeps its size and is revealed, not relaid out."""
+        if ANIMATE and (self.fade < 1.0 or not opening):
+            effect = self.panel_w.graphicsEffect()
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(self.panel_w)
+                self.panel_w.setGraphicsEffect(effect)   # only while it moves (it costs a buffer)
+            effect.setOpacity(self.fade)
+        if opening:
+            self.reveal_tween.run(self.reveal, 1.0, OPEN_MS)
+            self.fade_tween.run(self.fade, 1.0, OPEN_FADE_MS, delay=OPEN_FADE_DELAY_MS if self.fade <= 0.0 else 0)
+        else:
+            self.fade_tween.run(self.fade, 0.0, CLOSE_FADE_MS)
+            self.reveal_tween.run(self.reveal, 0.0, CLOSE_GROW_MS,
+                                  delay=CLOSE_GROW_DELAY_MS if self.fade > 0.5 else 0)
+        self._pin_panel()
 
     def _reveal_tick(self, v):
         self.reveal = v
-        effect = self.panel_w.graphicsEffect()
-        if effect is not None:
-            effect.setOpacity(v)
         self.bar.relayout()
 
     def _reveal_done(self):
-        self.panel_w.setGraphicsEffect(None)
         if self.reveal <= 0.0:
             self.closing = False
+            self.panel_w.setGraphicsEffect(None)
             self._xf_drop()
         self.bar.relayout()
+
+    def _fade_tick(self, v):
+        self.fade = v
+        effect = self.panel_w.graphicsEffect()
+        if effect is not None:
+            effect.setOpacity(v)
+        self._pin_panel()
+
+    def _fade_done(self):
+        if self.fade >= 1.0:
+            self.panel_w.setGraphicsEffect(None)
+        self._pin_panel()
 
     def _snapshot(self, widget):
         """What ``widget`` (the stage or the full screen view) shows now, as one image of its

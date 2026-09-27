@@ -29,7 +29,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.pop("QT_WAYLAND_SHELL_INTEGRATION", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6.QtCore import QObject, QPoint, QPointF, QSize, Qt, Signal  # noqa: E402
+from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QRectF, QSize, Qt, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPixmap, QPolygonF  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
@@ -396,8 +396,8 @@ class GalleryOffscreen(unittest.TestCase):
         QTest.mouseClick(bar.gallery_btn, Qt.LeftButton)
         self.wait_for(lambda: bar.mode == "gallery")
         g = bar.gallery
-        self.assertEqual(bar.height(), h0 + g.panel_height() + overlay.GALLERY_GAP + 2)
-        self.assertEqual(bar.height(), 783)                           # panel 719, gap 8, bar 54 (+2 edges)
+        self.assertEqual(bar.height(), h0 + g.panel_height() + overlay.GALLERY_JOIN)
+        self.assertEqual(bar.height(), 774)                           # panel 719, a hairline, the bar 54
         self.assertEqual((g.stage.width(), g.stage.height()), (1006, 566))
         self.assertEqual(bar.y() + bar.height(), bottom)              # grew upward
         self.assertEqual(bar.width(), 1040)                           # the panel is as wide as the bar
@@ -418,7 +418,10 @@ class GalleryOffscreen(unittest.TestCase):
         host, stack = bar.gallery_host, bar.stack
         self.assertEqual(host.geometry().top(), 1)                    # the panel on top...
         self.assertEqual(stack.geometry().top() - host.geometry().bottom() - 1,
-                         overlay.GALLERY_GAP + 2)                      # ...a gap, then the bar
+                         overlay.GALLERY_JOIN)                         # ...a hairline, then the bar
+        join = bar.gallery_join
+        self.assertTrue(join.isVisible())
+        self.assertEqual((join.geometry().top(), join.height()), (host.geometry().bottom() + 1, 1))
         self.assertEqual(bar.height() - stack.geometry().bottom() - 1, 1)
         self.assertEqual(g.footer.window(), bar)                      # the footer is in the panel
         self.assertTrue(host.isAncestorOf(g.footer))
@@ -1044,7 +1047,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_G)
         self.wait_for(lambda: bar.mode == "gallery")
         g = bar.gallery
-        full_h = overlay.BAR_HEIGHT + 2 + g.panel_height() + overlay.GALLERY_GAP + 2
+        full_h = overlay.BAR_HEIGHT + 2 + g.panel_height() + overlay.GALLERY_JOIN
         self.assertLess(bar.height(), full_h)                         # growing, not a jump
         self.assertIsNotNone(g.panel_w.graphicsEffect())              # the content fades in
         self.wait_for(lambda: bar.height() == full_h, timeout=2)
@@ -1062,6 +1065,117 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertFalse(g.closing)
         self.assertIsNone(g.out_img)                                  # ...and released
         self.assertEqual(gm.FADE_MS, overlay.ANIM_MS)
+
+    def test_one_shape_and_the_open_icon(self):
+        """No gap: the panel and the bar are one rounded shape with a hairline between;
+        the gallery button wears the chosen-value look while the gallery is open."""
+        bar = self.bar()
+        rest = bar.gallery_btn.target()
+        g = self.open(bar)
+        pump(self.app, 0.05)
+        img = bar.grab().toImage()
+        y = bar.gallery_host.geometry().bottom() + 1                  # the join
+        self.assertEqual(bar.gallery_join.geometry().top(), y)
+        edge = QColor(img.pixel(3, y + 2)).alpha()                    # the left edge just under the join:
+        self.assertGreater(edge, 200)                                 # surface, not a gap
+        self.assertGreater(QColor(img.pixel(3, y - 3)).alpha(), 200)
+        bar.setFocus()                                                # the icon without keyboard focus
+        bar.gallery_btn.sync(animate=False)
+        state, (fill, text, _ring) = bar.gallery_btn.target()
+        self.assertEqual((state, fill.name(), text.name()),
+                         ("selected", QColor(overlay.PILL_SEL).name(), QColor(overlay.ON_TEXT).name()))
+        self.assertNotEqual(rest[1][0].name(), fill.name())
+        self.shot(bar, "18-one-shape")
+        self.key(Qt.Key_Escape)
+        self.assertIn(bar.gallery_btn.target()[0], ("rest", "focus", "hover"))   # not "selected"
+        del g
+
+    def test_motion_open_and_close_order(self):
+        """Open: the height grows first, the content fades in and slides up a moment later.
+        Close: the content fades out first, the shape shrinks after; quicker than opening."""
+        gm = self.motion()
+        self.assertTrue(220 <= gm.OPEN_MS <= 260)
+        self.assertEqual(gm.CLOSE_GROW_DELAY_MS + gm.CLOSE_GROW_MS, 180)   # closing: quicker
+        self.assertLess(gm.CLOSE_FADE_MS, gm.CLOSE_GROW_DELAY_MS + gm.CLOSE_GROW_MS)
+        bar = self.bar()
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        self.assertTrue(bar.gallery_btn.selected())                   # the highlight comes in at once
+        pump(self.app, 0.035)
+        self.assertGreater(g.reveal, 0.0)                             # growing...
+        self.assertEqual(g.fade, 0.0)                                 # ...the content not yet
+        host_h = bar.gallery_host.height()
+        self.assertEqual(g.panel_w.y(), host_h - g.panel_height() + gm.CONTENT_SLIDE_PX)   # low, ready to slide
+        self.wait_for(lambda: 0.2 < g.fade < 0.9, timeout=1)
+        self.assertGreater(g.panel_w.y() - (bar.gallery_host.height() - g.panel_height()), 0)
+        self.wait_for(lambda: g.fade == 1.0 and g.reveal == 1.0, timeout=1)
+        pump(self.app, 0.02)
+        self.assertEqual(g.panel_w.geometry().bottom(), bar.gallery_host.height() - 1)   # in place
+        self.assertIsNone(g.panel_w.graphicsEffect())
+        stage_size = g.stage.size()
+        self.key(Qt.Key_Escape)                                       # close
+        self.wait_for(lambda: g.fade < 1.0, timeout=0.5)              # the content goes first...
+        self.assertGreater(g.reveal, 0.97)                            # ...the shape still whole
+        self.assertEqual(g.stage.size(), stage_size)                  # never relaid out on the way
+        self.wait_for(lambda: bar.gallery_host.isHidden(), timeout=1)
+
+    def test_motion_reverses_from_where_it_is(self):
+        self.motion()
+        bar = self.bar()
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        self.wait_for(lambda: g.reveal > 0.4, timeout=1)
+        self.key(Qt.Key_Escape)                                       # closing while still opening
+        r0 = g.reveal
+        pump(self.app, 0.03)
+        self.assertLessEqual(g.reveal, r0 + 1e-6)                     # no jump back to open
+        self.assertGreater(g.reveal, 0.0)                             # nor to closed
+        self.assertTrue(g.closing)
+        r1 = g.reveal
+        self.key(Qt.Key_G)                                            # and opening again mid-way
+        self.wait_for(lambda: bar.mode == "gallery", timeout=2)
+        self.assertGreaterEqual(g.reveal, r1 - 0.2)                   # from there, not from 0
+        self.wait_for(lambda: g.reveal == 1.0 and g.fade == 1.0, timeout=2)
+
+    def test_motion_open_frames(self):
+        """A strip of the open animation's frames, for review (gallery-open-frames.png)."""
+        gm = self.motion()
+        self.screen_size()
+        bar = self.bar()
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        for tw in (g.reveal_tween, g.fade_tween):
+            tw.stop()
+        frames, heights = [], []
+        ease = QEasingCurve(QEasingCurve.OutCubic)
+        for ms in (0, 60, 120, 180, 240):
+            g._reveal_tick(ease.valueForProgress(ms / gm.OPEN_MS))
+            f = max(0.0, min(1.0, (ms - gm.OPEN_FADE_DELAY_MS) / gm.OPEN_FADE_MS))
+            if g.panel_w.graphicsEffect() is None:
+                from PySide6.QtWidgets import QGraphicsOpacityEffect
+                g.panel_w.setGraphicsEffect(QGraphicsOpacityEffect(g.panel_w))
+            g._fade_tick(ease.valueForProgress(f))
+            pump(self.app, 0.02)
+            heights.append(bar.height())
+            frames.append(bar.grab())
+        self.assertEqual(heights, sorted(heights))                    # only ever grows
+        g._fade_done()
+        full = max(f.height() for f in frames)
+        scale = 0.5
+        strip = QPixmap(int(sum(f.width() * scale + 16 for f in frames) + 16), int(full * scale + 32))
+        strip.fill(QColor("#4a5563"))
+        p = QPainter(strip)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        x = 16
+        for f in frames:
+            w, h = f.width() * scale, f.height() * scale
+            p.drawPixmap(QRectF(x, 16 + full * scale - h, w, h).toRect(), f)
+            x += w + 16
+        p.end()
+        strip.save(str(SHOT_DIR / "momento-gallery-open-frames.png"))
 
     def test_motion_crossfade_releases_the_outgoing_picture(self):
         self.motion()

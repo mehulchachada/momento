@@ -112,7 +112,7 @@ FPS_NOTE = "120 fps only helps if your game runs above 100 fps"   # Video: at th
 # Full screen: the gallery isn't recorded. In the room of the stopped sentence (dot and
 # time hidden); "Paused while the gallery is open" would need the bar 7 px wider.
 GALLERY_PAUSED = "Paused while in the gallery"
-GALLERY_GAP = 8            # between the gallery's panel and the bar under it
+GALLERY_JOIN = 1           # the hairline between the gallery's panel and the bar row
 START_TIMEOUT_S = 10
 START_POLL_S = 0.5
 LOGO_SIZE = 18
@@ -1100,11 +1100,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 self.on = on
                 self.sync()
 
-        def target(self):
-            state, style = super().target()
-            if state == "selected":   # a quiet fill, like the open settings tab
-                return state, (QColor(TAB_SEL), QColor(TEXT), 0.0)
-            return state, style
+        # "on" (the gallery open) is drawn like a chosen value: the light fill, a dark icon
 
         def set_kind(self, kind):
             if kind != self.kind:
@@ -1519,19 +1515,21 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             outer.setSpacing(0)
 
             # The gallery (momento/gallery.py builds its panel in here on its first open):
-            # a panel of its own above everything else, a GALLERY_GAP under it, then the
-            # bar as it always is. One surface, so the keyboard, the pointer's leave and
-            # the layer-shell anchor stay as they are; it grows upward like settings.
+            # the bar grows upward into it, like settings: one shape, rounded only at its
+            # very top and bottom, the panel and the bar row apart by a hairline like the
+            # bar's other dividers. One surface, so the keyboard, the pointer's leave and
+            # the layer-shell anchor stay as they are.
             self.gallery_host = QWidget()
             gl = QVBoxLayout(self.gallery_host)
             gl.setContentsMargins(0, 0, 0, 0)
             gl.setSpacing(0)
             self.gallery_host.hide()
             outer.addWidget(self.gallery_host)
-            self.gallery_gap = QWidget()      # the panel's bottom edge, the gap, the bar's top edge
-            self.gallery_gap.setFixedHeight(GALLERY_GAP + 2)
-            self.gallery_gap.hide()
-            outer.addWidget(self.gallery_gap)
+            self.gallery_join = QFrame()
+            self.gallery_join.setFixedHeight(GALLERY_JOIN)
+            self.gallery_join.setStyleSheet(f"background: {BORDER}; margin: 0 12px;")
+            self.gallery_join.hide()
+            outer.addWidget(self.gallery_join)
 
             # Above the bar (bottom-anchored, so the bar grows upward):
             # a one-line hint while paused, or the settings rows.
@@ -1763,15 +1761,8 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(QPen(QColor(BORDER), 1))
             p.setBrush(QColor(*BG))
+            # one shape, the gallery's panel (when open) included: it grows with the bar
             r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            if not self.gallery_host.isHidden():
-                # the gallery's panel: a surface of its own, fading in and out with its motion
-                split = self.gallery_host.y() + self.gallery_host.height() + 1
-                g = self.gallery
-                p.setOpacity(max(0.0, min(1.0, g.reveal)) if g is not None else 1.0)
-                p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, split - 1), 10, 10)
-                p.setOpacity(1.0)
-                r.setTop(split + GALLERY_GAP + 0.5)
             p.drawRoundedRect(r, 10, 10)
             p.end()
 
@@ -1809,13 +1800,11 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
                 gh = g.shown_height()                 # grows / folds with the gallery's motion
                 self.gallery_host.setFixedHeight(gh)
                 self.gallery_host.show()
-                self.gallery_gap.show()
-                h += gh + GALLERY_GAP + 2
-                if g.reveal < 1.0 or g.closing:
-                    self.update()                     # the panel's surface fades with it
+                self.gallery_join.setHidden(gh <= 0)
+                h += gh + (GALLERY_JOIN if gh > 0 else 0)
             else:
                 self.gallery_host.hide()
-                self.gallery_gap.hide()
+                self.gallery_join.hide()
             if h == self.height():
                 return
             bottom = self.y() + self.height()
