@@ -866,7 +866,7 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(res.value, "1080p")
         self.assertFalse(bar.apply_btn.isEnabled())
         self.assertIn("Needs 6.8 GB · 6.0 GB free", bar.foot.text())
-        self.assertIn(overlay.RED, bar.foot.text())
+        self.assertEqual(bar.foot.kind, "warn")    # amber, with the warning glyph
         q = bar.row("quality")
         self.assertTrue(any(b.property("nofit") for b in q.buttons))
         self.key(Qt.Key_Return)                   # Enter does not apply
@@ -932,19 +932,20 @@ class OverlayOffscreen(unittest.TestCase):
         """Frame rate 120: a one-line note says when it helps; 60: no note."""
         bar, _res = self.open_video(FakeDaemon(True))
         fps = bar.row("fps")
-        self.assertEqual((fps.value, fps.note.isHidden()), (60, True))
+        self.assertEqual((fps.value, fps.note.text()), (60, ""))
         self.key(Qt.Key_Down)                           # the Frame rate row
         self.key(Qt.Key_Right)                          # 120 fps
         self.assertEqual(fps.value, 120)
-        self.assertEqual((fps.note.text(), fps.note.isHidden()), (overlay.FPS_NOTE, False))
+        self.assertEqual((fps.note.text(), fps.note.kind), (overlay.FPS_NOTE, "info"))
         self.assertEqual(fps.note.text(), "120 fps only helps if your game runs above 100 fps")
-        self.assertEqual(fps.note.objectName(), bar.row("resolution").note.objectName())   # the same style
-        self.assertLessEqual(fps.note.x() + fps.note.fontMetrics().horizontalAdvance(overlay.FPS_NOTE),
-                             fps.width())                # fits the row
+        self.assertIs(type(fps.note), type(bar.row("resolution").note))   # the same style
+        self.assertFalse(fps.note.elided)                                 # fits the row, whole
+        self.assertLessEqual(fps.note.geometry().right(), fps.width())
+        self.assertGreaterEqual(fps.note.x(), fps.buttons[-1].geometry().right() + overlay.NOTE_GAP)
         pump(self.app, 0.05)
         self.shot(bar, "settings-video-120fps", "v7")
         self.key(Qt.Key_Left)                           # back to 60: the note goes
-        self.assertTrue(fps.note.isHidden())
+        self.assertEqual(fps.note.text(), "")
         bar2, _ = self.open_video(FakeDaemon(True, values={"fps": 120}))   # a saved 120: shown at once
         self.assertEqual(bar2.row("fps").note.text(), overlay.FPS_NOTE)
 
@@ -956,7 +957,6 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual([b.isEnabled() for b in res.buttons], [True, False, True])
         self.assertEqual(res.buttons[1].visual_state, "disabled")
         self.assertEqual(res.disabled, {"1080p"})
-        self.assertFalse(res.note.isHidden())
         self.assertEqual(res.note.text(), "Your screen is 720p")
         self.assertTrue(res.buttons[0].hasFocus())     # 720p, the saved value
         self.assertIn("4.5 GB for 60 min", bar.foot.text())
@@ -983,7 +983,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar, res = self.open_video(FakeDaemon(True))
         self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "Native"])
         self.assertTrue(all(b.isEnabled() for b in res.buttons))
-        self.assertTrue(res.note.isHidden())            # nothing capped: no note
+        self.assertEqual(res.note.text(), "")           # nothing capped: no note
         pump(self.app, 0.05)
         self.shot(bar, "resolution-1080p-screen", "rescap")
 
@@ -992,7 +992,7 @@ class OverlayOffscreen(unittest.TestCase):
         bar, res = self.open_video(FakeDaemon(True))
         self.assertEqual([b.text() for b in res.buttons], ["720p", "1080p", "Native"])   # no 1440p / 4K
         self.assertTrue(all(b.isEnabled() for b in res.buttons))
-        self.assertTrue(res.note.isHidden())            # nothing capped: no note
+        self.assertEqual(res.note.text(), "")           # nothing capped: no note
         pump(self.app, 0.05)
         self.shot(bar, "resolution-4k-screen", "rescap")
         self.key(Qt.Key_Right)
@@ -1067,7 +1067,7 @@ class OverlayOffscreen(unittest.TestCase):
         right = res.note.mapTo(bar, res.note.rect().topRight()).x()
         self.assertLessEqual(right, bar.width())
         self.assertGreaterEqual(res.note.x(), res.buttons[-1].x() + res.buttons[-1].width())
-        self.assertEqual(res.note.width(), res.note.sizeHint().width())   # not squeezed
+        self.assertFalse(res.note.elided)                                 # not squeezed
 
     # ---------------------------------------------------------------- video format
 
@@ -1091,16 +1091,19 @@ class OverlayOffscreen(unittest.TestCase):
     def test_format_row_on_a_machine_that_records_everything(self):
         bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1")
         self.assertIsNotNone(fmt)
-        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (AV1)", "H.264", "H.265", "AV1"])
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])   # just "Auto"
         self.assertTrue(all(b.isEnabled() for b in fmt.buttons))
         self.assertEqual(fmt.value, "auto")
-        self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")   # what Auto uses, said plainly
         fmt.buttons[1].setFocus()                                   # moving along the row explains each
         self.assertEqual(fmt.note.text(), "Plays everywhere")
-        fmt.buttons[0].setFocus()
-        self.assertEqual(fmt.note.text(), "Picks the smoothest one your PC handles well")
-        bar.row("resolution").focus()                               # away from the row: the chosen one
+        fmt.buttons[3].setFocus()
         self.assertEqual(fmt.note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        fmt.buttons[0].setFocus()                                   # back on Auto: what it records in
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
+        fmt.buttons[2].setFocus()
+        bar.row("resolution").focus()                               # away from the row: the chosen one (Auto)
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
         pump(self.app, 0.05)
         self.shot(bar, "format-auto-av1", "format")
         right = fmt.note.mapTo(bar, fmt.note.rect().topRight()).x()
@@ -1109,9 +1112,12 @@ class OverlayOffscreen(unittest.TestCase):
 
     def test_format_row_disables_what_the_chip_cant_record(self):
         bar, fmt, daemon = self.open_format(format_allowed=["auto", "h264", "h265"], format_auto="h264")
-        self.assertEqual([b.text() for b in fmt.buttons], ["Auto (H.264)", "H.264", "H.265", "AV1"])
+        self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])
         self.assertEqual([b.isEnabled() for b in fmt.buttons], [True, True, True, False])
-        self.assertEqual(fmt.note.text(), "Your graphics chip can't record AV1")
+        self.assertEqual(fmt.note.text(), "Your graphics chip can't record AV1")   # why AV1 is greyed
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Recording in H.264 on this PC")
+        bar.row("resolution").focus()
         pump(self.app, 0.05)
         self.shot(bar, "format-no-av1", "format")
         QTest.mouseClick(fmt.buttons[3], Qt.LeftButton)              # AV1: nothing happens
@@ -1134,6 +1140,101 @@ class OverlayOffscreen(unittest.TestCase):
         self.assertEqual(fmt.value, "av1")
         self.assertEqual(fmt.buttons[3].visual_state, "capped")    # still shown as chosen, dimmed
         self.assertEqual(fmt.note.text(), "Your graphics chip can't record H.265 or AV1")
+
+    def test_format_auto_says_what_is_really_recorded(self):
+        # Auto saved: the daemon's format_effective (what the recorder really uses) wins
+        bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1",
+                                        format_effective="h265")
+        self.assertEqual(fmt.buttons[0].text(), "Auto")
+        self.assertEqual(fmt.note.text(), "Recording in H.265 on this PC")
+        self.app.removeEventFilter(bar)
+        bar.close()
+        pump(self.app, 0.05)
+        # another format saved: format_effective is that one's, Auto's note keeps format_auto
+        _bar, fmt, _d = self.open_format(values={"format": "h264"}, format_allowed=["auto", "h264", "h265", "av1"],
+                                         format_auto="av1", format_effective="h264")
+        self.assertEqual(fmt.note.text(), "Plays everywhere")
+        fmt.buttons[0].setFocus()
+        self.assertEqual(fmt.note.text(), "Recording in AV1 on this PC")
+
+    # ---------------------------------------------------------------- readable notes
+
+    def test_informative_text_reads_at_wcag_aa(self):
+        self.assertAlmostEqual(overlay.contrast("#FFFFFF", "#000000"), 21.0, places=2)
+        solid = "#{:02X}{:02X}{:02X}".format(*overlay.BG[:3])
+        worst = overlay.bar_background("#FFFFFF")      # the bar over a white game
+        self.assertEqual(worst, "#1F1F1F")
+        for name in ("TEXT", "NOTE", "WARN", "RED", "MUTED"):   # MUTED: labels, the gallery's hints and meta
+            for bg in (solid, worst):
+                self.assertGreaterEqual(overlay.contrast(getattr(overlay, name), bg), overlay.READABLE,
+                                        f"{name} on {bg}")
+        self.assertLess(overlay.contrast(overlay.DIM, solid), overlay.READABLE)   # DIM: disabled only
+        for kind, color in overlay.NOTE_COLORS.items():
+            self.assertNotEqual(color, overlay.DIM, kind)
+        # the note colour sits between the labels and the primary text
+        self.assertLess(overlay.contrast(overlay.MUTED, solid), overlay.contrast(overlay.NOTE, solid))
+        self.assertLess(overlay.contrast(overlay.NOTE, solid), overlay.contrast(overlay.TEXT, solid))
+
+    def test_note_crossfades_without_blocking(self):
+        bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265", "av1"], format_auto="av1")
+        note = fmt.note
+        pump(self.app, 0.3)
+        self.assertIsNone(note.old)
+        t0 = time.monotonic()
+        fmt.buttons[3].setFocus()                                   # AV1: its one-liner
+        self.assertLess(time.monotonic() - t0, 0.05)                # nothing waits for the fade
+        self.assertEqual(note.text(), "Smoothest on newer hardware. Some older devices can't play it")
+        self.assertEqual(note.old[0], "Recording in AV1 on this PC")   # the old text fading out
+        self.assertLess(note._t, 1.0)
+        fmt.buttons[0].setFocus()                                   # a change mid-fade: no queue
+        self.assertEqual(note.text(), "Recording in AV1 on this PC")
+        self.wait_for(lambda: note.old is None, timeout=1)
+        self.assertEqual(note._t, 1.0)
+        self.assertLessEqual(overlay.NOTE_FADE_MS, 150)
+        self.addCleanup(setattr, overlay, "ANIMATE", overlay.ANIMATE)
+        overlay.ANIMATE = False                                     # reduced motion: at once
+        fmt.buttons[1].setFocus()
+        self.assertEqual((note.text(), note.old, note._t), ("Plays everywhere", None, 1.0))
+
+    def test_note_kinds_and_places(self):
+        bar, fmt, _d = self.open_format(format_allowed=["auto", "h264", "h265"], format_auto="h264")
+        self.assertEqual((fmt.note.text(), fmt.note.kind), ("Your graphics chip can't record AV1", "warn"))
+        fmt.buttons[0].setFocus()
+        self.assertEqual((fmt.note.text(), fmt.note.kind), ("Recording in H.264 on this PC", "info"))
+        self.assertEqual((bar.note.kind, bar.foot.kind), ("plain", "plain"))   # status lines: no glyph
+        pump(self.app, 0.3)
+        # every note at its row's end, centred with the pills, clear of them
+        for row in bar.visible_rows():
+            n, last = row.note, row.buttons[-1] if not row.cycle else row.next
+            self.assertGreaterEqual(n.x(), last.geometry().right() + overlay.NOTE_GAP, row.key)
+            self.assertLessEqual(n.geometry().right(), row.width() - 12, row.key)
+            self.assertEqual(n.geometry().center().y(), last.geometry().center().y(), row.key)
+        header_right = bar.note.mapTo(bar, bar.note.rect().topRight()).x()
+        self.assertLessEqual(header_right, bar.width())
+        self.assertGreater(bar.note.x(), bar.tab_btns[-1].geometry().right())
+        # too long for the row: two lines, then an ellipsis and the whole text as a tooltip
+        width = fmt.note.width()
+        long = "This note is far too long for the room at the end of the Format row " * 3
+        fmt.note.set(long.strip(), "info", animate=False)
+        lines, elided = fmt.note.layout_lines(fmt.note.state)
+        self.assertEqual((len(lines), elided), (2, True))
+        self.assertTrue(lines[-1].endswith("…"))
+        self.assertEqual(fmt.note.toolTip(), long.strip())
+        self.assertEqual(fmt.note.width(), width)                   # never wider: the pills stay put
+        fmt.note.set("Plays everywhere", "info", animate=False)
+        self.assertEqual((fmt.note.elided, fmt.note.toolTip()), (False, ""))
+        self.shot(bar, "notes-kinds", "notes")
+
+    def test_shorter_replay_is_a_warning(self):
+        bar = self.make(FakeDaemon(True))
+        self.open_settings(bar)
+        rl = bar.row("replay_length")
+        rl.select(rl.values.index(15))
+        self.assertEqual((bar.note.text(), bar.note.kind),
+                         ("Keeps the newest 15 min · older footage is dropped", "warn"))
+        rl.select(rl.values.index(60))
+        self.assertEqual((bar.note.text(), bar.note.kind),
+                         ("Applying restarts recording · your replay is kept", "plain"))
 
     def test_format_row_from_an_older_daemon(self):
         # no format_* fields: every format offered, Auto without a pick

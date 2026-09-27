@@ -202,7 +202,7 @@ def _sep():
 def meta_html(kind: str, parts) -> str:
     """'<b>Clip</b> · 1:00 · Today 21:04': the kind bright, the rest muted."""
     rest = _sep().join(ov._esc(p) for p in parts if p)
-    tail = f"<span style='color:{ov.MUTED}'>{_sep()}{rest}</span>" if rest else ""
+    tail = f"<span style='color:{ov.NOTE}'>{_sep()}{rest}</span>" if rest else ""
     return f"<span style='color:{ov.TEXT}'>{ov._esc(kind)}</span>{tail}"
 
 
@@ -213,7 +213,7 @@ def dims_html(dims, size, suffix) -> str:
         parts.append(f"<span style='color:{ov.TEXT}'>{dims.width()}×{dims.height()}</span>")
     parts.append(size_label(size))
     parts.append(ov._esc(suffix.lstrip(".").upper() or "Image"))
-    return f"<span style='color:{ov.MUTED}'>{_sep().join(parts)}</span>"
+    return f"<span style='color:{ov.NOTE}'>{_sep().join(parts)}</span>"
 
 
 # --------------------------------------------------------------------------
@@ -305,7 +305,7 @@ def ps_glyph(p, r, sym, color):
     p.restore()
 
 
-def chip_run(p, x, y, tokens, word_color=ov.MUTED):
+def chip_run(p, x, y, tokens, word_color=ov.NOTE):
     """Paint controller hints ([LB][RB] browse   [A] play ...) from (x, centre y);
     returns the width. ``p`` None only measures. ✕ ○ □ △ are drawn (``ps_glyph``)."""
     cf = font(10, weight=QFont.Bold)
@@ -444,7 +444,7 @@ def _fit(iw, ih, r: QRectF) -> QRectF:
     return QRectF(r.x() + (r.width() - w) / 2, r.y() + (r.height() - h) / 2, w, h)
 
 
-def _label(text="", px=META_PX, color=ov.MUTED, tabular=False, width=None,
+def _label(text="", px=META_PX, color=ov.NOTE, tabular=False, width=None,
            align=Qt.AlignVCenter | Qt.AlignLeft):
     lb = QLabel(text)
     lb.setFont(font(px, tabular))
@@ -1131,7 +1131,7 @@ class Gallery(QObject):
         xl = QHBoxLayout(c.shotbox)
         xl.setContentsMargins(6, 0, 0, 0)
         xl.setSpacing(0)
-        c.w["dims"] = _label("", META_PX, ov.MUTED, True)
+        c.w["dims"] = _label("", META_PX, ov.NOTE, True)
         xl.addWidget(c.w["dims"])
         xl.addStretch(1)
         rl.addWidget(c.shotbox, 1)
@@ -1181,7 +1181,7 @@ class Gallery(QObject):
         c.w["scrub"].seek.connect(self.seek_to)
         lay.addWidget(c.w["scrub"], 1)
         lay.addSpacing(8)
-        c.w["total"] = _label("0:00", META_PX, ov.MUTED, True, tw)
+        c.w["total"] = _label("0:00", META_PX, ov.NOTE, True, tw)
         lay.addWidget(c.w["total"])
         lay.addSpacing(6)
 
@@ -1220,7 +1220,7 @@ class Gallery(QObject):
             c.w["shotmeta"] = _label("", META_PX)
             lay.addWidget(c.w["shotmeta"])
             lay.addSpacing(16)
-            c.w["dims"] = _label("", META_PX, ov.MUTED, True)
+            c.w["dims"] = _label("", META_PX, ov.NOTE, True)
             lay.addWidget(c.w["dims"])
             lay.addSpacing(12)
             c.w["shotfull"] = W.MediaIcon("unfull")
@@ -1881,7 +1881,7 @@ class Gallery(QObject):
         p.fillRect(r, QColor("#000000"))
         shown = self._paint_layers(p, r)
         if not shown and self.message:
-            p.setPen(QColor(ov.MUTED))
+            p.setPen(QColor(ov.NOTE))
             p.setFont(font(15))
             p.drawText(r, Qt.AlignCenter, self.message)
         p.restore()
