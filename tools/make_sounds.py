@@ -4,6 +4,8 @@
     python3 tools/make_sounds.py                  # rewrite momento/sounds/
     python3 tools/make_sounds.py --out DIR        # somewhere else
     python3 tools/make_sounds.py --reel reel.wav  # also: every sound in a row, to listen to
+    python3 tools/make_sounds.py --preview /tmp/sfx   # the record/pause/stop candidates, to compare
+    python3 tools/make_sounds.py --use record=A --use pause=A --use stop=A   # make them from candidates
 
 Everything is generated here, from sine partials and seeded noise: no samples,
 nothing recorded. Pure Python (wave + array), deterministic, so running it again
@@ -237,12 +239,185 @@ SOUNDS = {
 LEVELS = {"move": MOVE_DBFS}
 
 
-def render(name: str) -> array.array:
-    """One sound as 16-bit samples, its peak normalised to its level."""
-    buf = SOUNDS[name]()
+# ---------------------------------------------------------------------------
+# candidate record / pause / stop sounds (not the defaults yet: pick with --use)
+#
+# Same family as above: sine partials, raised-cosine attack, exponential decay.
+# Each partial here has its own decay (a multiple of the note's tau), so the upper
+# ones die first and the note rounds off, the way a soft mallet or a felt hammer does.
+# (ratio to the fundamental, level, decay as a multiple of tau)
+
+MALLET = ((1, 1.0, 1.0), (2, 0.10, 0.5), (4, 0.30, 0.16))                 # marimba-like: the 2-octave overtone, fast
+CHIME = ((1, 1.0, 1.0), (2, 0.24, 0.6), (3, 0.08, 0.4), (5.4, 0.05, 0.12))  # a little glassier
+PURE = ((1, 1.0, 1.0), (2, 0.16, 0.7), (3, 0.05, 0.5))                   # SOFT, rounding off
+ROUND = ((1, 1.0, 1.0), (2, 0.34, 0.55), (3, 0.12, 0.35), (4, 0.04, 0.25))  # low notes: WARM, rounding off
+
+
+def note(f: float, dur: float, tau: float, parts=PURE, attack: float = 0.004,
+         settle: tuple[float, float] | None = None) -> list[float]:
+    """One note of ``f`` Hz, each partial decaying at its own rate. ``settle`` =
+    (start ratio, seconds): the pitch starts that far off and eases onto ``f``."""
+    n = _n(dur)
+    na = max(1, _n(attack))
+    out = [0.0] * n
+    phase = 0.0
+    for i in range(n):
+        t = i / RATE
+        fi = f * (1 + (settle[0] - 1) * math.exp(-t / settle[1])) if settle else f
+        phase += 2 * math.pi * fi / RATE
+        td = max(0.0, t - attack)
+        s = 0.0
+        for ratio, level, k in parts:
+            if fi * ratio < RATE / 2 - 2000:
+                s += level * math.sin(ratio * phase) * math.exp(-td / (tau * k))
+        env = 0.5 * (1 - math.cos(math.pi * i / na)) if i < na else 1.0
+        out[i] = s * env
+    return _fade_out(out)
+
+
+def _notes(*parts) -> list[float]:
+    """(at seconds, gain, note samples), ... mixed into one buffer."""
+    buf: list[float] = []
+    for at, gain, samples in parts:
+        _mix(buf, samples, at=at, gain=gain)
+    return _fade_out(buf)
+
+
+C4, E4, F4, G4 = 261.63, 329.63, 349.23, 392.0
+C5, E5, F5, G5, A5 = 523.25, 659.25, 698.46, 783.99, 880.0
+D6 = 1174.66
+
+
+# record / play: a positive "go", rising
+def record_a():
+    return _notes((0.0, 0.85, note(C5, 0.150, 0.045, MALLET)),
+                  (0.075, 1.0, note(F5, 0.245, 0.075, MALLET)))
+
+
+def record_b():
+    return _notes((0.0, 0.70, note(C5, 0.120, 0.040)),
+                  (0.050, 0.80, note(E5, 0.120, 0.040)),
+                  (0.100, 1.0, note(G5, 0.230, 0.075)))
+
+
+def record_c():
+    return _notes((0.0, 0.75, note(G4, 0.130, 0.035, ROUND)),
+                  (0.070, 1.0, note(G5, 0.270, 0.080, CHIME)),
+                  (0.070, 0.18, note(D6, 0.200, 0.050, PURE)))
+
+
+# pause: a gentle "hold", temporary, never lower than stop
+def pause_a():
+    return _notes((0.0, 1.0, note(F5, 0.100, 0.028, MALLET)),
+                  (0.120, 0.80, note(F5, 0.120, 0.032, MALLET)))
+
+
+def pause_b():
+    return _notes((0.0, 1.0, note(G5, 0.140, 0.045)),
+                  (0.100, 0.85, note(E5, 0.170, 0.050)))
+
+
+def pause_c():
+    return _notes((0.0, 1.0, note(A5, 0.100, 0.025, CHIME)),
+                  (0.130, 0.85, note(G5, 0.130, 0.035, CHIME)))
+
+
+# stop: "done / off", lower than pause, rounded, a longer ring; final but not alarming
+def stop_a():
+    return _notes((0.0, 0.80, note(C5, 0.140, 0.045, MALLET)),
+                  (0.100, 1.0, note(F4, 0.245, 0.090, MALLET)))
+
+
+def stop_b():
+    return _notes((0.0, 0.70, note(G4, 0.120, 0.040, ROUND)),
+                  (0.060, 0.80, note(E4, 0.120, 0.040, ROUND)),
+                  (0.120, 1.0, note(C4, 0.225, 0.080, ROUND)))
+
+
+def stop_c():
+    return note(C4, 0.340, 0.120, ROUND, attack=0.010, settle=(1.02, 0.040))
+
+
+# name -> variant -> (sound, what it is)
+VARIANTS = {
+    "record": {
+        "A": (record_a, "soft mallet (marimba-like), a perfect fourth up: C5 then F5"),
+        "B": (record_b, "soft sine, a quick rising major arpeggio: C5 E5 G5, the last one rings"),
+        "C": (record_c, "an octave lift: a warm G4 tap into a glassy G5 chime with a faint D6 sparkle"),
+    },
+    "pause": {
+        "A": (pause_a, "soft mallet, two equal taps on F5 (the note record A lands on), the second softer"),
+        "B": (pause_b, "soft sine, a short falling minor third: G5 then E5"),
+        "C": (pause_c, "glassy chime, a 'tick-tock' a step down: A5 then G5, short and light"),
+    },
+    "stop": {
+        "A": (stop_a, "soft mallet, a falling fifth that lands low: C5 then F4 (mirrors record A)"),
+        "B": (stop_b, "warm, a falling major arpeggio an octave below record B: G4 E4 C4, the last rings"),
+        "C": (stop_c, "one low, warm, rounded C4 with a longer decay, easing onto its pitch"),
+    },
+}
+
+
+def render(name: str, variant: str | None = None) -> array.array:
+    """One sound as 16-bit samples, its peak normalised to its level. ``variant``:
+    one of VARIANTS[name] instead of the default."""
+    buf = VARIANTS[name][variant][0]() if variant else SOUNDS[name]()
     peak = max(abs(v) for v in buf) or 1.0
     scale = 10 ** (LEVELS.get(name, PEAK_DBFS) / 20) * 32767 / peak
     return array.array("h", (int(round(v * scale)) for v in buf))
+
+
+PREVIEW_GAP_S = 0.6       # between the options in the preview
+SEQUENCE_GAP_S = 1.0      # between the steps of a sequence
+MARKER_DBFS = -30.0
+
+
+def _marker(count: int) -> array.array:
+    """``count`` soft ticks, then a breath: the group number, to count along."""
+    tick = click(0.030, seed=77, fc=2400.0, tau=0.004)
+    buf: list[float] = []
+    for k in range(count):
+        _mix(buf, tick, at=0.16 * k)
+    peak = max(abs(v) for v in buf) or 1.0
+    scale = 10 ** (MARKER_DBFS / 20) * 32767 / peak
+    out = array.array("h", (int(round(v * scale)) for v in buf))
+    return out + array.array("h", [0]) * _n(0.55)
+
+
+def preview(prefix: Path) -> list[Path]:
+    """Write ``<prefix>-options.wav`` (record A B C, pause A B C, stop A B C; group
+    1, 2, 3 announced by that many ticks), ``<prefix>-options.txt`` (its legend) and
+    ``<prefix>-sequence-{A,B,C}.wav`` (record, pause, record, stop, 1 s apart)."""
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    silence = array.array("h", [0])
+    reel = silence * _n(0.3)
+    legend = ["Momento bar sounds: record / pause / stop options",
+              f"{prefix.name}-options.wav: each group starts with 1, 2 or 3 soft ticks,",
+              f"then options A, B, C with {PREVIEW_GAP_S:.1f} s between them.", ""]
+    t = 0.3
+    for g, name in enumerate(VARIANTS, 1):
+        reel += _marker(g)
+        t += len(_marker(g)) / RATE
+        legend.append(f"{g} tick{'s' if g > 1 else ''}: {name}")
+        for v, (_, desc) in VARIANTS[name].items():
+            s = render(name, v)
+            legend.append(f"  {t:5.1f} s  {name} {v} ({len(s) / RATE * 1000:.0f} ms): {desc}")
+            reel += s + silence * _n(PREVIEW_GAP_S)
+            t += len(s) / RATE + PREVIEW_GAP_S
+        legend.append("")
+    paths = [prefix.with_name(prefix.name + "-options.wav"), prefix.with_name(prefix.name + "-options.txt")]
+    write_wav(paths[0], reel)
+    legend.append(f"{prefix.name}-sequence-A/B/C.wav: record, pause, record (play again), stop,")
+    legend.append(f"{SEQUENCE_GAP_S:.0f} s apart, with set A (record A, pause A, stop A), B or C.")
+    for v in ("A", "B", "C"):
+        seq = silence * _n(0.3)
+        for step in ("record", "pause", "record", "stop"):
+            seq += render(step, v) + silence * _n(SEQUENCE_GAP_S)
+        path = prefix.with_name(f"{prefix.name}-sequence-{v}.wav")
+        write_wav(path, seq[:len(seq) - _n(SEQUENCE_GAP_S) + _n(0.5)])
+        paths.append(path)
+    paths[1].write_text("\n".join(legend) + "\n")
+    return paths
 
 
 def write_wav(path: Path, samples: array.array) -> None:
@@ -260,12 +435,24 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, default=OUT, help="where the WAVs go (default: momento/sounds)")
     ap.add_argument("--reel", type=Path, help="also write every sound in a row to this WAV")
+    ap.add_argument("--use", action="append", default=[], metavar="NAME=V",
+                    help="make NAME from candidate V instead of the default (e.g. record=B; repeatable)")
+    ap.add_argument("--preview", type=Path, metavar="PREFIX",
+                    help="only write the candidates' preview: PREFIX-options.wav/.txt, PREFIX-sequence-A/B/C.wav")
     args = ap.parse_args(argv)
+    if args.preview:
+        for path in preview(args.preview):
+            print(path)
+        return 0
+    use = dict(u.split("=", 1) for u in args.use)
+    for name, v in use.items():
+        if v not in VARIANTS.get(name, {}):
+            ap.error(f"--use {name}={v}: no such candidate")
     args.out.mkdir(parents=True, exist_ok=True)
     reel = array.array("h")
     gap = array.array("h", [0]) * _n(REEL_GAP_S)
     for name in SOUNDS:
-        s = render(name)
+        s = render(name, use.get(name))
         write_wav(args.out / f"{name}.wav", s)
         peak = max(abs(v) for v in s)
         print(f"{name:14s} {len(s) / RATE * 1000:4.0f} ms  peak {20 * math.log10(peak / 32767):6.1f} dBFS")

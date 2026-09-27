@@ -124,6 +124,37 @@ class GeneratedSounds(unittest.TestCase):
         parts = sum(len(samples(self.out / f"{n}.wav")[0]) for n in sfx.NAMES)
         self.assertEqual(len(data), parts + round(gaps))
 
+    def test_candidates_length_and_level(self):
+        """The record / pause / stop candidates: 120-350 ms, -18 dBFS, clean ends."""
+        self.assertEqual({n: sorted(v) for n, v in make_sounds.VARIANTS.items()},
+                         {n: ["A", "B", "C"] for n in ("record", "pause", "stop")})
+        for name, options in make_sounds.VARIANTS.items():
+            for v in options:
+                data = make_sounds.render(name, v)
+                label = f"{name} {v}"
+                ms = len(data) / 48
+                self.assertTrue(120 <= ms <= 350, f"{label}: {ms:.0f} ms")
+                peak = max(abs(s) for s in data)
+                self.assertAlmostEqual(dbfs(peak), -18.0, delta=0.2, msg=label)
+                self.assertEqual((data[0], data[-1]), (0, 0), label)
+                self.assertLess(max(abs(s) for s in data[:48]), peak * 0.25, label)   # a soft attack, no click
+                self.assertLess(abs(sum(data) / len(data)), 8, label)
+                self.assertEqual(data, make_sounds.render(name, v), label)          # deterministic
+
+    def test_use_a_candidate_and_the_preview(self):
+        out = Path(self._tmp.name) / "use"
+        with mock.patch("sys.stdout"):
+            make_sounds.main(["--out", str(out), "--use", "pause=B"])
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                make_sounds.main(["--out", str(out), "--use", "pause=Z"])
+        self.assertEqual(samples(out / "pause.wav")[0], make_sounds.render("pause", "B"))
+        self.assertEqual(samples(out / "record.wav")[0], make_sounds.render("record"))   # the rest: defaults
+        paths = make_sounds.preview(Path(self._tmp.name) / "pv" / "sfx")
+        self.assertEqual([p.name for p in paths], ["sfx-options.wav", "sfx-options.txt", "sfx-sequence-A.wav",
+                                                   "sfx-sequence-B.wav", "sfx-sequence-C.wav"])
+        self.assertEqual(samples(paths[2])[1], (48_000, 2, 1))
+        self.assertIn("stop C", paths[1].read_text())
+
     def test_read_wav(self):
         pcm = sfx.read_wav(self.out / "move.wav")
         self.assertEqual(len(pcm), len(samples(self.out / "move.wav")[0]) * 2)
