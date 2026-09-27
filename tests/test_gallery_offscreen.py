@@ -36,6 +36,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 from momento import config, gamepad, ipc, overlay  # noqa: E402
+from momento import player as gst_player  # noqa: E402
 
 # The module, not its classes: a TestCase imported by name would run here a second time.
 try:
@@ -200,6 +201,96 @@ class FakePlayer(QObject):
 
     def sources(self):
         return [c[1] for c in self.calls if isinstance(c, tuple) and c[0] == "setSource" and c[1]]
+
+
+class FakeGstPlayer(QObject):
+    """momento.player.GstPlayer's surface: its own enums, QImage frames through frameReady
+    (no video sink), the picture's size and the screen's rate, an audio token."""
+
+    PlaybackState, MediaStatus, Error = gst_player.PlaybackState, gst_player.MediaStatus, gst_player.Error
+    positionChanged = Signal(object)
+    durationChanged = Signal(object)
+    playbackStateChanged = Signal(object)
+    mediaStatusChanged = Signal(object)
+    errorOccurred = Signal(object, str)
+    frameReady = Signal(object)
+
+    made = []
+    COLOR = "#43183F"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.calls, self.sizes, self.rates = [], [], []
+        self.audio = None
+        self.pos = self.dur = 0
+        self.src = ""
+        self.state = gst_player.PlaybackState.StoppedState
+        self.closed = False
+        FakeGstPlayer.made.append(self)
+
+    def setVideoSink(self, sink):
+        self.calls.append(("sink", sink))
+
+    def setAudioOutput(self, audio):
+        self.calls.append(("audio", audio))
+        self.audio = audio
+
+    def audio_output(self, parent=None):
+        return QObject(parent)
+
+    def set_video_size(self, w, h):
+        self.sizes.append((w, h))
+
+    def set_max_rate(self, fps):
+        self.rates.append(fps)
+
+    def picture(self):
+        w, h = self.sizes[-1] if self.sizes else (640, 360)
+        img = QImage(w, h, QImage.Format_RGB32)
+        img.fill(QColor(self.COLOR))
+        return img
+
+    def setSource(self, url):
+        path = url.toLocalFile()
+        self.calls.append(("setSource", path))
+        self.src, self.pos = path, 0
+        if path:
+            self.dur = 60_000
+            self.durationChanged.emit(self.dur)
+            self.mediaStatusChanged.emit(gst_player.MediaStatus.LoadedMedia)
+
+    def _set(self, state):
+        if state != self.state:
+            self.state = state
+            self.playbackStateChanged.emit(state)
+
+    def play(self):
+        self.calls.append("play")
+        if self.src:
+            self._set(gst_player.PlaybackState.PlayingState)
+            self.frameReady.emit(self.picture())
+
+    def pause(self):
+        self._set(gst_player.PlaybackState.PausedState)
+
+    def stop(self):
+        self._set(gst_player.PlaybackState.StoppedState)
+
+    def setPosition(self, ms):
+        self.pos = ms
+        self.positionChanged.emit(ms)
+
+    def position(self):
+        return self.pos
+
+    def duration(self):
+        return self.dur
+
+    def playbackState(self):
+        return self.state
+
+    def close(self):
+        self.closed = True
 
 
 class FakeHub:
@@ -1867,8 +1958,72 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIsNone(g.player)
         self.assertFalse(g.active)
 
+    def test_gstreamer_player_frames_at_the_picture_size(self):
+        """A GStreamer player (GstPlayer's surface) gets no QVideoSink: its QImage frames come at
+        the stage's size in device pixels and are painted as they are; full screen asks for the
+        screen's size and back; the sound on is the player's own token, not a QAudioOutput."""
+        gallery = self.gallery_mod
+        gallery.PLAYER_FACTORY = FakeGstPlayer
+        gallery.AUDIO_FACTORY = None
+        FakeGstPlayer.made = []
+        bar = self.bar()
+        g = self.open(bar)
+        p = FakeGstPlayer.made[-1]
+        self.assertIsNone(g.sink)
+        self.assertEqual([c for c in p.calls if isinstance(c, tuple) and c[0] == "sink"], [])
+        dpr = g.stage.devicePixelRatioF()
+        stage_px = (round(g.stage.width() * dpr), round(g.stage.height() * dpr))
+        self.assertEqual(p.sizes[-1], stage_px)
+        screen = g.stage.screen() or QApplication.primaryScreen()
+        self.assertEqual(p.rates[-1], gst_player.display_rate(screen.refreshRate()))
+        self.assertIsInstance(g.frame, QImage)
+        self.assertEqual(g.state, "playing")
+        img = g.stage.grab().toImage()
+        self.assertEqual(img.pixelColor(img.width() // 2, img.height() // 2).name(), FakeGstPlayer.COLOR.lower())
+        self.key(Qt.Key_M)                                            # sound on: the player's token
+        self.assertFalse(g.muted)
+        self.assertIs(p.audio, g.audio)
+        self.assertEqual(type(g.audio), QObject)
+        self.key(Qt.Key_M)
+        self.assertIsNone(p.audio)
+        self.key(Qt.Key_F)                                            # full screen: the screen's size
+        self.assertIsNotNone(g.full)
+        fdpr = g.full.devicePixelRatioF()
+        self.assertEqual(p.sizes[-1], (round(g.full.width() * fdpr), round(g.full.height() * fdpr)))
+        self.key(Qt.Key_Escape)                                       # back: the stage's size again
+        self.assertIsNone(g.full)
+        self.assertEqual(p.sizes[-1], stage_px)
+        self.key(Qt.Key_Escape)
+        self.assertEqual(bar.mode, "clip")
+        self.assertTrue(p.closed)                                     # its pipeline let go at once
+        self.assertIsNone(g.player)
+
+    def test_frames_repaint_at_most_at_the_screen_rate(self):
+        """A frame that comes sooner than the screen's next refresh waits for it (the newest one
+        is painted then); frames at the screen's rate paint at once."""
+        g = self.open(self.bar())
+        painted = []
+        g._repaint = lambda: painted.append(time.monotonic())
+        g.pacer.rate = 60
+        g.pacer.reset()
+        frame = QImage(clip_image())
+        for _ in range(3):                                            # a burst: 1 now, the rest wait
+            g._on_frame(frame)
+        self.assertEqual(len(painted), 1)
+        self.assertTrue(g.pace_timer.isActive())
+        pump(self.app, 0.05)
+        self.assertEqual(len(painted), 2)                             # the newest, one slot later
+        self.assertGreaterEqual(painted[1] - painted[0], 1 / 60 - 0.002)
+        self.assertFalse(g.pace_timer.isActive())
+        g.pacer.last = time.monotonic() - 1 / 60                      # on time: painted at once
+        g._on_frame(frame)
+        self.assertEqual(len(painted), 3)
+        self.assertFalse(g.pace_timer.isActive())
+        g._release_frame()                                            # a new item starts fresh
+        self.assertIsNone(g.pacer.last)
+
     def test_bar_does_not_load_multimedia(self):
-        """The resident bar's idle memory is unchanged: QtMultimedia loads with the gallery only."""
+        """The resident bar's idle memory is unchanged: QtMultimedia and GStreamer load with the gallery only."""
         code = textwrap.dedent("""
             import sys
             from tests import _sandbox
@@ -1884,13 +2039,99 @@ class GalleryOffscreen(unittest.TestCase):
             app.processEvents()
             bar.grab()
             print("mm" if "PySide6.QtMultimedia" in sys.modules else "-",
+                  "gst" if "gi.repository.Gst" in sys.modules else "-",
                   "gal" if "momento.gallery" in sys.modules else "-")
         """)
         env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
         r = subprocess.run([sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parent.parent),
                            env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.split()[-2:], ["-", "-"])
+        self.assertEqual(r.stdout.split()[-3:], ["-", "-", "-"])
+
+
+class PlaybackUnitTest(unittest.TestCase):
+    """The pieces of smooth playback that need no player: the pacer, the 1:1 blit, the
+    GStreamer player's helpers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication(["test"])
+
+    def paints(self, fps, hz, seconds=1.0, jitter=0.0):
+        """Frames at ``fps`` through a FramePacer at ``hz``, with the gallery's timer: the
+        times something was painted."""
+        from momento import gallery
+
+        pacer = gallery.FramePacer(hz)
+        painted, due = [], None
+        n = int(fps * seconds)
+        for i in range(n):
+            t = i / fps + (jitter if i % 2 else -jitter)
+            if due is not None and due <= t:                          # the timer fired first
+                painted.append(due)
+                pacer.painted(due)
+                due = None
+            wait = pacer.wait(t)
+            if wait <= 0:
+                due = None
+                painted.append(t)
+                pacer.painted(t)
+            elif due is None:
+                due = t + wait
+        return painted
+
+    def test_pacer_halves_a_120_fps_clip_on_a_60_hz_screen(self):
+        painted = self.paints(120, 60)
+        self.assertAlmostEqual(len(painted), 60, delta=1)
+        gaps = [b - a for a, b in zip(painted, painted[1:])]
+        self.assertLess(max(gaps) - min(gaps), 0.001)                 # evenly, no bursts
+
+    def test_pacer_keeps_every_frame_at_the_screen_rate(self):
+        self.assertEqual(len(self.paints(60, 60, jitter=0.0012)), 60)  # 60 fps on 60 Hz, jittery
+        self.assertEqual(len(self.paints(120, 120, jitter=0.0006)), 120)
+        self.assertEqual(len(self.paints(30, 120)), 30)
+
+    def test_display_rate(self):
+        f = gst_player.display_rate
+        self.assertEqual([f(60), f(59.94), f(120.0), f(144), f(240)], [60, 60, 120, 144, 240])
+        self.assertEqual([f(None), f(0), f(-1), f("x"), f(1e6)], [60] * 5)
+
+    def test_video_bin(self):
+        d = gst_player.video_bin_description(True, 1207, 679, 120)
+        self.assertIn("videorate name=rate drop-only=true max-rate=120", d)
+        self.assertIn("vapostproc add-borders=true", d)
+        self.assertIn("format=BGRA,width=1207,height=679,pixel-aspect-ratio=1/1", d)
+        self.assertIn("appsink name=sink sync=true max-buffers=1 drop=true", d)
+        d = gst_player.video_bin_description(False, 3, 2, 60)
+        self.assertIn("videoconvertscale add-borders=true", d)
+        self.assertIn(f"width={gst_player.MIN_SIDE},height={gst_player.MIN_SIDE}", d)
+
+    def test_frame_at_its_device_size_is_blitted(self):
+        """At a fractional scale a frame already at the picture's device size is copied pixel for
+        pixel (a rescale would blur 1 px stripes to grey); any other size is scaled to fit."""
+        from momento import gallery
+
+        src = QImage(121, 68, QImage.Format_RGB32)
+        for x in range(src.width()):
+            for y in range(src.height()):
+                src.setPixelColor(x, y, QColor("#ffffff" if x % 2 else "#000000"))
+        dst = QImage(200, 120, QImage.Format_ARGB32_Premultiplied)
+        dst.setDevicePixelRatio(1.2)
+        dst.fill(0)
+        p = QPainter(dst)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gallery._draw_frame(p, src, QRectF(10, 10, 121 / 1.2, 68 / 1.2))
+        p.end()
+        x0, y0 = 12, 12                                               # 10 logical px at 1.2
+        row = [dst.pixelColor(x0 + x, y0 + 30).name() for x in range(121)]
+        self.assertEqual(row, [src.pixelColor(x, 30).name() for x in range(121)])
+        dst.fill(0)
+        p = QPainter(dst)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        gallery._draw_frame(p, src, QRectF(10, 10, 60, 34))           # smaller: scaled, so blended
+        p.end()
+        greys = {dst.pixelColor(x, 40).name() for x in range(14, 80)} - {"#000000", "#ffffff"}
+        self.assertTrue(greys)
 
 
 @unittest.skipIf(QMediaPlayer is None or not shutil.which("ffmpeg"), "needs ffmpeg and QtMultimedia")
@@ -1948,6 +2189,86 @@ class GalleryLive(unittest.TestCase):
         self.wait_for(lambda: g.state in ("ended", "paused", "playing"), timeout=5)
         self.key(Qt.Key_Escape)
         self.assertIsNone(g.player)
+
+    def open_live(self):
+        bar = self.make(FakeDaemon(True, extra={"output_dir": str(self.out)}))
+        self.addCleanup(bar.close_gallery)
+        self.key(Qt.Key_G)
+        self.wait_for(lambda: bar.mode == "gallery")
+        g = bar.gallery
+        try:
+            self.wait_for(lambda: g.frame is not None or g.state == "error", timeout=10)
+        except AssertionError:
+            self.skipTest("no video frame here")
+        if g.state == "error":
+            self.skipTest("the test clip can't be decoded here")
+        return bar, g
+
+    def test_gstreamer_plays_at_the_picture_size(self):
+        """The real GstPlayer: frames come as QImages at the stage's device size, muted means no
+        audio stream at all, the sound on is a sink that never plays out loud (the sandbox), a
+        seek past the end is clamped, full screen asks for the screen's size, and closing lets
+        go of the whole pipeline."""
+        import gc
+        import weakref
+
+        from momento import gallery
+
+        if not gst_player.available():
+            self.skipTest("no GStreamer playbin / appsink / scaler here")
+        bar, g = self.open_live()
+        self.assertIsInstance(g.player, gst_player.GstPlayer)
+        self.assertIsNone(g.sink)
+        self.assertIsInstance(g.frame, QImage)
+        dpr = g.stage.devicePixelRatioF()
+        want = (max(gst_player.MIN_SIDE, round(g.stage.width() * dpr)),
+                max(gst_player.MIN_SIDE, round(g.stage.height() * dpr)))
+        self.assertEqual((g.frame.width(), g.frame.height()), want)
+        pb = g.player.pipeline
+        self.assertFalse(int(pb.get_property("flags")) & 0x2)          # muted: no audio stream,
+        self.assertEqual(pb.get_property("audio-sink").get_factory().get_name(), "fakesink")  # no sink probed
+        self.wait_for(lambda: g.duration > 0, timeout=5)
+        self.assertAlmostEqual(g.duration, 2.0, delta=0.2)
+        self.key(Qt.Key_M)                                            # sound on: rebuilt with audio
+        self.assertTrue(int(pb.get_property("flags")) & 0x2)
+        self.assertEqual(pb.get_property("audio-sink").get_factory().get_name(), "fakesink")
+        self.key(Qt.Key_M)
+        self.assertFalse(int(pb.get_property("flags")) & 0x2)
+        g.seek(10)                                                    # +10 s on a 2 s clip
+        self.assertLessEqual(g.position, g.duration)
+        self.wait_for(lambda: g.state in ("ended", "paused", "playing"), timeout=5)
+        self.key(Qt.Key_F)                                            # full screen: bigger frames
+        self.assertIsNotNone(g.full)
+        fdpr = g.full.devicePixelRatioF()
+        full = (round(g.full.width() * fdpr), round(g.full.height() * fdpr))
+        self.assertEqual(g.player.video_size, full)
+        if g.state != "playing":
+            g.toggle_play()
+        self.wait_for(lambda: g.frame is not None and (g.frame.width(), g.frame.height()) == full, timeout=5)
+        player = weakref.ref(g.player)
+        pipeline = weakref.ref(pb)
+        del pb
+        self.key(Qt.Key_Escape)
+        self.key(Qt.Key_Escape)
+        self.assertIsNone(g.player)
+        pump(self.app, 0.1)
+        gc.collect()
+        self.assertIsNone(pipeline())                                 # nothing holds the pipeline
+        self.assertTrue(player() is None or player().pipeline is None)
+        self.assertIsNone(gallery.PLAYER_FACTORY)
+
+    def test_qtmultimedia_without_gstreamer(self):
+        """Without GStreamer the gallery plays through QtMultimedia, as before."""
+        from momento import gallery
+
+        with mock.patch.object(gallery.gst_player, "available", return_value=False):
+            bar, g = self.open_live()
+            self.assertIsInstance(g.player, QMediaPlayer)
+            self.assertIsNotNone(g.sink)
+            self.assertIsInstance(g.frame, QVideoFrame)
+            self.assertIsNone(g.audio)
+            self.key(Qt.Key_Escape)
+            self.assertIsNone(g.player)
 
 
 if __name__ == "__main__":

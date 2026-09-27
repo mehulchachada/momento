@@ -22,8 +22,11 @@ Clips play muted. The speaker button, M or X / Square (the west button) turns
 the sound on; that sticks while the gallery is open (the next clip too, full
 screen too) and every open starts muted again.
 
-Playback is a QMediaPlayer feeding a QVideoSink; the frames are painted by the
-stage itself (no QVideoWidget, which would be a separate native surface).
+Playback is GStreamer's playbin3 (``momento.player``): decoded with VA-API where
+there is a decoder and scaled on the GPU to the picture's size, so the stage gets
+small QImages to draw 1:1; without GStreamer, QtMultimedia's QMediaPlayer feeding
+a QVideoSink. Either way the stage paints the frames itself (no QVideoWidget,
+which would be a separate native surface), at most at the screen's refresh rate.
 There is no audio output until the sound is turned on, a clip that ends stays
 on its last frame, and everything (player, sink, audio, full screen view) is
 torn down when the gallery closes or the bar hides: a hidden bar never plays.
@@ -38,17 +41,19 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import math
 import threading
 import time
 
 from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF,
                             QSize, QSizeF, Qt, QTimer, QUrl, QVariantAnimation, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage, QImageReader, QPainter,
-                           QPainterPath, QPen, QPolygonF, QRegion)
+                           QPainterPath, QPen, QPolygonF, QRegion, QTransform)
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
 from . import config, gamepad, media
+from . import player as gst_player
 from . import overlay as ov
 
 log = logging.getLogger(__name__)
@@ -418,6 +423,34 @@ def _lerp_rect(a, b, t):
                   a.width() + (b.width() - a.width()) * t, a.height() + (b.height() - a.height()) * t)
 
 
+class FramePacer:
+    """When the next frame may be painted: at most ``rate`` times a second. A frame
+    that comes a little early (within 10 % of the interval: timing jitter) is painted
+    at once, so a clip at the screen's rate shows every frame; one that comes sooner
+    waits for its slot. A 120 fps clip on a 60 Hz screen paints every other frame."""
+
+    EARLY = 0.1
+
+    def __init__(self, rate=60):
+        self.rate = rate
+        self.last = None
+
+    def wait(self, now) -> float:
+        """Seconds until a frame arriving ``now`` may be painted (0: at once)."""
+        if self.last is None:
+            return 0.0
+        interval = 1.0 / max(1, self.rate)
+        if now - self.last >= interval * (1.0 - self.EARLY):
+            return 0.0
+        return self.last + interval - now
+
+    def painted(self, now):
+        self.last = now
+
+    def reset(self):
+        self.last = None
+
+
 def _no_video_frame():
     from PySide6.QtMultimedia import QVideoFrame
 
@@ -442,6 +475,28 @@ def _fit(iw, ih, r: QRectF) -> QRectF:
     s = min(r.width() / iw, r.height() / ih)
     w, h = iw * s, ih * s
     return QRectF(r.x() + (r.width() - w) / 2, r.y() + (r.height() - h) / 2, w, h)
+
+
+def _draw_frame(p, img, r):
+    """``img`` letterboxed in ``r``. When it already has that size in device pixels (frames
+    from GStreamer come scaled to the picture) it is blitted 1:1 at whole device pixels: at
+    a fractional scale (1.2, 1.5) a plain drawImage would resample it again on the CPU."""
+    target = _fit(img.width(), img.height(), r)
+    dt = p.deviceTransform()
+    if dt.type() in (QTransform.TxNone, QTransform.TxTranslate, QTransform.TxScale):
+        dr = dt.mapRect(target)
+        if abs(dr.width() - img.width()) <= 2 and abs(dr.height() - img.height()) <= 2:
+            inv, ok = dt.inverted()
+            if ok:
+                p.save()
+                p.setWorldTransform(inv * p.worldTransform())      # device pixels, no scaling
+                if p.opacity() >= 1.0 and not img.hasAlphaChannel():
+                    p.setCompositionMode(QPainter.CompositionMode_Source)   # opaque: a copy, no blend
+                p.drawImage(QPoint(round(dr.center().x() - img.width() / 2),
+                                   round(dr.center().y() - img.height() / 2)), img)
+                p.restore()
+                return
+    p.drawImage(target, img)
 
 
 def _label(text="", px=META_PX, color=ov.NOTE, tabular=False, width=None,
@@ -1025,6 +1080,11 @@ class Gallery(QObject):
         self.clock = QTimer(self)             # only while a clip plays
         self.clock.setInterval(CLOCK_MS)
         self.clock.timeout.connect(self._tick_clock)
+        self.pacer = FramePacer()             # new frames repaint at most at the screen's rate
+        self.pace_timer = QTimer(self)
+        self.pace_timer.setSingleShot(True)
+        self.pace_timer.setTimerType(Qt.PreciseTimer)
+        self.pace_timer.timeout.connect(self._pace_due)
         # focus rows (see ROWS) and the focused row's highlight
         self.row = "stage"
         self.foot_btn = "trash"   # the footer button the footer row returns to
@@ -1261,6 +1321,9 @@ class Gallery(QObject):
         gen = self.bar.gen
         st = self.bar.last_status or {}
         out = st.get("output_dir") if st.get("ok") else None
+
+        if PLAYER_FACTORY is None:     # GStreamer's init meanwhile, not on the first play
+            threading.Thread(target=gst_player.warm_up, name="momento-gallery-warm", daemon=True).start()
 
         def work():
             try:
@@ -1522,6 +1585,7 @@ class Gallery(QObject):
         if player is None:
             self._fail(PLAY_ERROR)
             return
+        self._video_target()
         try:
             player.setSource(QUrl.fromLocalFile(str(item.path)))
             player.play()
@@ -1591,25 +1655,44 @@ class Gallery(QObject):
 
     # ------------------------------------------------------------------ playback
     def _ensure_player(self):
+        """The GStreamer player (frames decoded and scaled on the GPU, see momento.player)
+        where it can run, else QtMultimedia's QMediaPlayer into a QVideoSink."""
         if self.player is not None:
             return self.player
+        sink = None
         try:
-            from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
-        except ImportError:
-            log.warning("QtMultimedia is missing: the gallery cannot play clips")
-            return None
-        try:
-            player = PLAYER_FACTORY(self) if PLAYER_FACTORY else QMediaPlayer(self)
-            sink = QVideoSink(self)
-            player.setVideoSink(sink)
+            if PLAYER_FACTORY is not None:
+                player = PLAYER_FACTORY(self)
+            elif gst_player.available():
+                player = gst_player.GstPlayer(self)
+            else:
+                player = None
+            kind = type(player)
+            if player is None or not hasattr(kind, "PlaybackState"):
+                try:
+                    from PySide6.QtMultimedia import QMediaPlayer
+                except ImportError:
+                    log.warning("neither GStreamer nor QtMultimedia can play clips here")
+                    return None
+                player = player or QMediaPlayer(self)
+                kind = QMediaPlayer
+            if not hasattr(player, "frameReady"):
+                from PySide6.QtMultimedia import QVideoSink
+
+                sink = QVideoSink(self)
+                player.setVideoSink(sink)
         except Exception:  # noqa: BLE001
             log.exception("cannot create the media player")
             return None
         self.player, self.sink = player, sink
-        self._States = QMediaPlayer.PlaybackState
-        self._Status = QMediaPlayer.MediaStatus
-        self._NoError = QMediaPlayer.Error.NoError
-        sink.videoFrameChanged.connect(self._on_frame)
+        self._States = kind.PlaybackState
+        self._Status = kind.MediaStatus
+        self._NoError = kind.Error.NoError
+        if sink is not None:
+            sink.videoFrameChanged.connect(self._on_frame)
+        else:
+            player.frameReady.connect(self._on_frame)
+        self._video_target()
         player.positionChanged.connect(self._on_position)
         player.durationChanged.connect(self._on_duration)
         player.playbackStateChanged.connect(self._on_state)
@@ -1627,6 +1710,8 @@ class Gallery(QObject):
                 player.setAudioOutput(None)
                 player.setVideoSink(None)
                 player.setSource(QUrl())
+                if hasattr(player, "close"):
+                    player.close()          # GStreamer: the pipeline and its callbacks go now
             except Exception:  # noqa: BLE001
                 log.debug("player teardown", exc_info=True)
             player.deleteLater()
@@ -1648,6 +1733,8 @@ class Gallery(QObject):
         if self.audio is None:
             if AUDIO_FACTORY is not None:
                 self.audio = AUDIO_FACTORY(self)
+            elif hasattr(player, "audio_output"):
+                self.audio = player.audio_output(self)     # GStreamer: its own sound, no QAudioOutput
             else:
                 from PySide6.QtMultimedia import QAudioOutput
 
@@ -1657,19 +1744,53 @@ class Gallery(QObject):
     def _on_frame(self, frame):
         if not self.active or self.is_shot() or self.state == "error":
             return
-        if frame is None or not frame.isValid():
+        if frame is None or (frame.isNull() if isinstance(frame, QImage) else not frame.isValid()):
             return
-        # Keep the frame itself, no copy: it is converted when (and only if) it is painted,
-        # and Qt caches that conversion in the frame, so at most one picture is alive
-        # (two for the 160 ms of a crossfade).
+        # Keep the frame itself, no copy. From GStreamer it is a QImage already at the picture's
+        # size; a QVideoFrame is converted when (and only if) it is painted, and Qt caches that
+        # conversion in the frame. At most one picture is alive (two for a crossfade).
         self.frame = frame
         if self.xf_waiting:
             self._xf_go()
+            self._paced_repaint(force=True)
+        else:
+            self._paced_repaint()
+
+    def _paced_repaint(self, force=False):
+        """Repaint for a new frame at most at the screen's refresh rate: one that comes too
+        soon waits for the next slot, and a newer one arriving meanwhile takes its place."""
+        now = time.monotonic()
+        wait = 0.0 if force else self.pacer.wait(now)
+        if wait <= 0:
+            self.pace_timer.stop()
+            self.pacer.painted(now)
+            self._repaint()
+        elif not self.pace_timer.isActive():
+            self.pace_timer.start(max(1, math.ceil(wait * 1000)))
+
+    def _pace_due(self):
+        self.pacer.painted(time.monotonic())
         self._repaint()
+
+    def _video_target(self):
+        """Tell a GStreamer player the picture's size in device pixels (the stage's, or the
+        screen's in full screen) and the screen's refresh rate; the pacer follows the rate."""
+        view = self.full if self.full is not None else self.stage
+        screen = view.screen() or QGuiApplication.primaryScreen()
+        hz = gst_player.display_rate(screen.refreshRate() if screen is not None else 60)
+        self.pacer.rate = hz
+        player = self.player
+        if player is None or not hasattr(player, "set_video_size"):
+            return
+        dpr = view.devicePixelRatioF() or 1.0
+        player.set_video_size(round(view.width() * dpr), round(view.height() * dpr))
+        player.set_max_rate(hz)
 
     def _release_frame(self):
         """Let go of the picture on the stage, including the sink's own last video frame."""
         self.frame = None
+        self.pace_timer.stop()
+        self.pacer.reset()
         if self.sink is not None:
             self.sink.setVideoFrame(_no_video_frame())   # an invalid frame: ignored by _on_frame
 
@@ -1888,7 +2009,10 @@ class Gallery(QObject):
         clip.addRoundedRect(r, radius, radius)
         p.save()
         p.setClipPath(clip)
-        p.fillRect(r, QColor("#000000"))
+        cur = self.frame if isinstance(self.frame, QImage) else None
+        if not (cur is not None and self.out_img is None and not cur.hasAlphaChannel()
+                and _fit(cur.width(), cur.height(), r).adjusted(-1, -1, 1, 1).contains(r)):
+            p.fillRect(r, QColor("#000000"))     # (an opaque frame that fills the stage covers it)
         shown = self._paint_layers(p, r)
         if not shown and self.message:
             p.setPen(QColor(ov.NOTE))
@@ -1925,7 +2049,7 @@ class Gallery(QObject):
         out = self.out_img
         if out is None:
             if cur is not None:
-                p.drawImage(_fit(cur.width(), cur.height(), r), cur)
+                _draw_frame(p, cur, r)
             return cur is not None
         t = 0.0 if self.xf_waiting else self.xf
         p.save()
@@ -1933,7 +2057,7 @@ class Gallery(QObject):
         p.drawImage(r.translated(-self.out_dir * SLIDE_PX * t, 0), out)
         if cur is not None and not self.xf_waiting:
             p.setOpacity(t)
-            p.drawImage(_fit(cur.width(), cur.height(), r).translated(self.out_dir * SLIDE_PX * (1.0 - t), 0), cur)
+            _draw_frame(p, cur, r.translated(self.out_dir * SLIDE_PX * (1.0 - t), 0))
         p.restore()
         return True
 
@@ -2364,6 +2488,7 @@ class Gallery(QObject):
             b.sync(animate=False)
         view.setFocus(Qt.OtherFocusReason)
         self.full_tween.run(self.full_t, 1.0)
+        self._video_target()                    # frames at the screen's size from now on
         if self.is_shot():
             self._load_image(self.current())    # sharp at the screen's size
 
@@ -2402,6 +2527,7 @@ class Gallery(QObject):
             return
         self.full = None
         self.fullc = None
+        self._video_target()                    # back to the stage's size
         self.chrome_timer.stop()
         self.chrome_tween.stop()
         for s in view.strips.values():
