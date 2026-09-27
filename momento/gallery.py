@@ -92,6 +92,14 @@ FULL_MS = 180            # into and out of full screen, from / to the stage
 # the content fades in and slides up a little, starting just after the growth. Closing
 # is the reverse and quicker: the content fades out first, then the shape shrinks.
 OPEN_MS = 240
+# The first item loads (the player's pipeline, its preroll and decode; a screenshot's read)
+# this long after the open's growth has ended: the motion gets the GUI thread and the CPU to
+# itself, the stage shows its plain background meanwhile. GStreamer's init (warm_up, in a
+# thread from the moment G is pressed) is waited for without blocking: polled every
+# WARM_POLL_MS, at most WARM_WAIT_MS.
+OPEN_LOAD_DELAY_MS = 60
+WARM_POLL_MS = 30
+WARM_WAIT_MS = 3_000
 OPEN_FADE_DELAY_MS = 60
 OPEN_FADE_MS = 180
 CLOSE_FADE_MS = 90
@@ -1071,6 +1079,9 @@ class Gallery(QObject):
         self.reveal = 0.0         # the panel's height: 0 folded away .. 1 open (the bar grows with it)
         self.fade = 0.0           # its content: 0 hidden (CONTENT_SLIDE_PX low) .. 1 shown in place
         self.closing = False      # folding away after Back (the clip view is already live)
+        self.opening = False      # growing after an open: the first item waits (OPEN_LOAD_DELAY_MS)
+        self.load_pending = False # ...and loads once it has grown
+        self.warm_since = None    # when the first load started waiting for GStreamer's init
         self.out_img = None       # the outgoing picture during a crossfade (one, at the stage's size)
         self.out_dir = 0          # -1 newer / +1 older: which way it drifts
         self.xf = 1.0
@@ -1093,6 +1104,9 @@ class Gallery(QObject):
         self.trim_timer.setSingleShot(True)
         self.trim_timer.setInterval(TRIM_DELAY_MS)
         self.trim_timer.timeout.connect(_trim_heap)
+        self.open_load = QTimer(self)       # the first item, once the open's growth is done
+        self.open_load.setSingleShot(True)
+        self.open_load.timeout.connect(self._load)
         self.reveal_tween = _Tween(self, OPEN_MS, self._reveal_tick, self._reveal_done)
         self.fade_tween = _Tween(self, OPEN_FADE_MS, self._fade_tick, self._fade_done)
         self.xf_tween = _Tween(self, XFADE_MS, self._xf_tick, self._xf_done)
@@ -1406,6 +1420,7 @@ class Gallery(QObject):
         self.closing = False
         self.reveal_tween.stop()
         self.fade_tween.stop()
+        self.opening, self.load_pending = True, False   # nothing heavy while it grows
         bar.enter_gallery()
         self._show(immediate=True)
         self.focus_default()
@@ -1423,6 +1438,9 @@ class Gallery(QObject):
         self.active = False
         self.token += 1
         self.step_timer.stop()
+        self.open_load.stop()
+        self.opening = self.load_pending = False
+        self.warm_since = None
         self.footer.unask()
         self.ask_item = None
         self.glow_tween.stop()
@@ -1470,6 +1488,7 @@ class Gallery(QObject):
             tw.stop()
         self.xf_wait.stop()
         self.closing = False
+        self.opening = False
         self.reveal = self.fade = 0.0
         self.panel_w.setGraphicsEffect(None)
         self._xf_drop()
@@ -1505,6 +1524,14 @@ class Gallery(QObject):
             self.panel_w.setGraphicsEffect(None)
             self._xf_drop()
         self.bar.relayout()
+        if self.opening and self.reveal >= 1.0:
+            self.opening = False
+            if self.load_pending and self.active:
+                self.load_pending = False
+                if ANIMATE:
+                    self.open_load.start(OPEN_LOAD_DELAY_MS)   # after the last frame is on screen
+                else:
+                    self._load()
 
     def _fade_tick(self, v):
         self.fade = v
@@ -1587,6 +1614,7 @@ class Gallery(QObject):
         """Put the current item on the stage (a clip loads STEP_MS after the last step)."""
         self.token += 1
         self.step_timer.stop()
+        self.open_load.stop()
         item = self.current()
         if self.player is not None:
             self.player.stop()      # the old clip stops now, not when the next one loads
@@ -1618,6 +1646,19 @@ class Gallery(QObject):
         item = self.current()
         if item is None or not self.active:
             return
+        if self.opening:
+            self.load_pending = True    # the open is still growing: after it (_reveal_done)
+            return
+        if item.kind == "clip" and self.player is None and PLAYER_FACTORY is None and not gst_player.ready():
+            # GStreamer's init is still running in warm_up: _ensure_player would wait for
+            # it on this thread (its lock). Look again shortly; give up waiting after a while.
+            now = time.monotonic()
+            if self.warm_since is None:
+                self.warm_since = now
+            if now - self.warm_since < WARM_WAIT_MS / 1000:
+                self.open_load.start(WARM_POLL_MS)
+                return
+        self.warm_since = None
         if item.kind != "clip":
             self._load_image(item)
             return

@@ -101,6 +101,11 @@ def _init():
     return Gst
 
 
+def ready() -> bool:
+    """GStreamer's init has finished (or failed): ``available`` won't wait on it."""
+    return _gst is not None
+
+
 def available() -> bool:
     """GStreamer and the elements the player needs are there."""
     return _load() is not None
