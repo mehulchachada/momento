@@ -175,6 +175,7 @@ jobs:
 
           ## Good to know
 
+          - **Steam Gaming Mode:** works there too. Turn off Steam's own game recording, or give it a different shortcut.
           - **Ubuntu 24.04:** everything works except playing clips in the gallery, which needs Ubuntu 25.04 or newer.
           - **Fedora with AMD graphics:** for the smoothest recording, add [RPM Fusion](https://rpmfusion.org/Configuration), then run \`sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld\`.
 
@@ -183,6 +184,7 @@ jobs:
           - Support for more devices and systems, tested with your help
           - Any button combo as your controller shortcut
           - Recording in 1440p and 4K
+          - Your microphone on its own audio track
           - Flatpak
 
           ## Tell us how it runs
