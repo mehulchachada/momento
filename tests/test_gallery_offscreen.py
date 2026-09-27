@@ -30,7 +30,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.pop("QT_WAYLAND_SHELL_INTEGRATION", None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QRectF, QSize, Qt, Signal  # noqa: E402
+from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QRectF, QSize, QSizeF, Qt, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPixmap, QPolygonF  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
@@ -431,7 +431,9 @@ class GalleryOffscreen(unittest.TestCase):
         if not margin:
             img.save(str(SHOT_DIR / f"momento-gallery-{name}.png"))
             return
-        canvas = QPixmap(img.width() + 80, img.height() + 40)
+        dpr = img.devicePixelRatio()                  # at 1.2 (QT_SCALE_FACTOR) the picture stays 1.2
+        canvas = QPixmap(round(img.width() + 80 * dpr), round(img.height() + 40 * dpr))
+        canvas.setDevicePixelRatio(dpr)
         canvas.fill(QColor("#4a5563"))
         p = QPainter(canvas)
         p.drawPixmap(QPoint(40, 20), img)
@@ -491,7 +493,7 @@ class GalleryOffscreen(unittest.TestCase):
         g = bar.gallery
         self.assertEqual(bar.height(), h0 + g.panel_height() + overlay.GALLERY_JOIN)
         self.assertEqual(bar.height(), 774)                           # panel 719, a hairline, the bar 54
-        self.assertEqual((g.stage.width(), g.stage.height()), (1006, 566))
+        self.assertEqual((g.stage.width(), g.stage.height()), (934, 525))   # the rows' room came out of it
         self.assertEqual(bar.y() + bar.height(), bottom)              # grew upward
         self.assertEqual(bar.width(), 1040)                           # the panel is as wide as the bar
         self.assertFalse(bar.gallery_host.isHidden())
@@ -518,7 +520,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(bar.height() - stack.geometry().bottom() - 1, 1)
         self.assertEqual(g.footer.window(), bar)                      # the footer is in the panel
         self.assertTrue(host.isAncestorOf(g.footer))
-        self.assertTrue(g.stage.hasFocus())                           # the stage row first
+        self.assertTrue(g.stage.hasFocus())                           # the media row first
         st = dict(bar.last_status, buffered_live=754.0)               # the bar row stays live
         bar.apply_status(st)
         self.assertEqual(bar.time.text(), "12:34")
@@ -575,7 +577,7 @@ class GalleryOffscreen(unittest.TestCase):
         g = self.open(bar)
         self.assertLessEqual(bar.height() + 2 * overlay.BOTTOM_MARGIN, 720)
         self.assertEqual(round(g.stage.width() * 9 / 16), g.stage.height())
-        self.assertLess(g.stage.width(), 1006)
+        self.assertLess(g.stage.width(), 934)
         self.assertEqual(bar.width(), 1040)                           # the bar itself keeps its width
         self.shot(bar, "12-short-screen")
 
@@ -600,7 +602,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertIsNotNone(g.frame)
         self.assertEqual(g.panel.w["play"].kind, "pause")
         self.assertEqual(g.panel.w["mute"].kind, "muted")
-        self.assertTrue(g.stage.hasFocus())                           # left / right browse at once
+        self.assertTrue(g.stage.hasFocus())                           # the media row: ← → seek, A plays
         self.assertEqual(g.panel.w["counter"].text(), "1 / 5")
         self.assertTrue(g.tabs["all"].selected())
         self.assertIn("Clip", g.footer.meta.text())
@@ -628,12 +630,12 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(g.state, "playing")
 
     # ------------------------------------------------------------ browsing
-    def test_browse_left_right_and_bumpers(self):
+    def test_browse_with_bumpers_and_page_keys(self):
         bar = self.bar()
         g = self.open(bar)
-        self.key(Qt.Key_Right)                                        # older: shot0
+        self.key(Qt.Key_PageDown)                                     # older: shot0
         self.assertEqual(g.current().path, self.shot0)
-        self.assertTrue(g.stage.hasFocus())                           # the focus stays on the stage
+        self.assertTrue(g.stage.hasFocus())                           # the focus stays on the media
         self.settle_items(g)
         self.assertEqual(g.state, "shown")
         self.assertIsNotNone(g.frame)
@@ -652,11 +654,13 @@ class GalleryOffscreen(unittest.TestCase):
         self.settle_items(g)
         self.assertEqual(self.player.sources()[n:], [str(self.clip1)])  # ...then the last one only
         self.assertEqual(g.state, "playing")
-        bar.on_pad_action("left")                                     # D-pad too
+        bar.on_pad_action("left")                                     # the D-pad on a clip seeks, never browses
+        self.assertEqual(g.current().path, self.clip1)
+        self.key(Qt.Key_PageUp)
         self.assertEqual(g.current().path, self.shot0)
         self.key(Qt.Key_End)
         self.assertEqual(g.current().path, self.clip2)
-        self.key(Qt.Key_Right)                                        # no wrap
+        self.key(Qt.Key_PageDown)                                     # no wrap
         self.assertEqual(g.current().path, self.clip2)
         self.key(Qt.Key_Home)
         self.assertEqual(g.current().path, self.clip0)
@@ -779,7 +783,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(bar.pad_connected())
         g = self.open(bar)
         self.assertEqual(g.footer.hint, gm.CLIP_HINT)
-        self.assertIn((["←", "→"], "browse"), gm.CLIP_HINT)          # the D-pad / stick on the stage
+        self.assertEqual(gm.CLIP_HINT, [(["◀", "▶"], "10 s"), (["A"], "play"), (["LB", "RB"], "browse")])
         self.key(Qt.Key_M)                                            # sound on: the speaker shows it
         self.player.advance(21_000)
         g.panel.w["play"].setFocus()
@@ -791,7 +795,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_F)
         bar.pads.remove_device(made[-1].path)                         # unplugged: the keys, at once
         self.assertFalse(bar.pad_connected())
-        self.assertEqual(g.footer.hint, gm.PLAYER_KEYS)               # (the player row has the focus)
+        self.assertEqual(g.footer.hint, gm.CLIP_KEYS)                 # (the media row has the focus)
         self.key(Qt.Key_PageDown)                                     # a screenshot
         self.settle_items(g)
         self.assertEqual(g.footer.hint, gm.SHOT_KEYS)
@@ -841,8 +845,7 @@ class GalleryOffscreen(unittest.TestCase):
         bar, made = self.two_pad_bar(("ps",))
         self.assertEqual(bar.pad_symbols(), "playstation")           # the only pad: in use already
         g = self.open(bar)
-        self.assertEqual(g.footer.hint, [(["←", "→"], "browse"), (["✕"], "play"),
-                                         (["L2", "R2"], "10 s"), (["□"], "sound"), (["△"], "full screen")])
+        self.assertEqual(g.footer.hint, [(["◀", "▶"], "10 s"), (["✕"], "play"), (["L1", "R1"], "browse")])
         self.player.advance(21_000)
         g.panel.w["play"].setFocus()
         pump(self.app, 0.05)
@@ -853,10 +856,11 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_PageDown)                                     # a screenshot
         self.settle_items(g)
         self.assertEqual(g.footer.hint, gm.pad_hint(gm.PAD_SHOT, "playstation"))
-        self.assertEqual(g.footer.hint[-1], (["△"], "full screen"))
+        self.assertEqual(g.footer.hint, [(["L1", "R1"], "browse"), (["✕"], "full screen")])
         # the symbols are drawn: each chip is a round 18 px one with a light glyph in its middle
         self.assertEqual(gm.chip_run(None, 0, 0, [(["✕"], "")]), gm.chip_run(None, 0, 0, [(["A"], "")]))
-        for sym in gm.PS_GLYPHS:
+        self.assertEqual(gm.chip_run(None, 0, 0, [(["◀"], "")]), gm.chip_run(None, 0, 0, [(["A"], "")]))
+        for sym in gm.PS_GLYPHS + gm.DPAD_GLYPHS:
             img = QImage(24, 24, QImage.Format_ARGB32)
             img.fill(QColor("#000000"))
             p = QPainter(img)
@@ -1130,7 +1134,7 @@ class GalleryOffscreen(unittest.TestCase):
         calls = self.trash_mock()
         g = self.open(bar)
         for _ in range(2):
-            bar.on_pad_action("down")                                 # stage -> player -> footer
+            bar.on_pad_action("down")                                 # media -> footer, no further
         self.assertEqual(g.row, "footer")
         self.assertTrue(g.footer.trash.hasFocus())
         bar.on_pad_action("accept")                                   # A on the bin: the question
@@ -1168,12 +1172,14 @@ class GalleryOffscreen(unittest.TestCase):
         g = self.open(bar)
         self.assertEqual(heard, ["gallery_open"])                     # once it opens, not at the press
         del heard[:]
-        self.key(Qt.Key_Right)                                        # the next item
-        self.key(Qt.Key_Down)                                         # stage -> player
+        self.key(Qt.Key_End)                                          # the oldest item (a screenshot)
+        self.settle_items(g)
+        self.key(Qt.Key_Right)                                        # a screenshot has no -10 / +10 s
+        self.key(Qt.Key_Home)                                         # the newest again (a clip)
         self.key(Qt.Key_Return)                                       # play / pause
-        self.key(Qt.Key_Home)                                         # the newest again
+        self.key(Qt.Key_Down)                                         # media -> footer
         bar.on_pad_action("up")                                       # the controller: the same
-        self.assertEqual(heard, ["move", "move", "select", "move", "move"])
+        self.assertEqual(heard, ["move", "error", "move", "select", "move", "move"])
         del heard[:]
         self.key(Qt.Key_Delete)                                       # the question
         self.key(Qt.Key_Escape)                                       # Cancel
@@ -1203,51 +1209,68 @@ class GalleryOffscreen(unittest.TestCase):
 
     # ------------------------------------------------------------ focus rows
     def test_rows_up_and_down(self):
+        """Three rows: the filters, the media (the picture and its controls), the footer."""
         bar = self.bar()
         g = self.open(bar)
-        self.assertEqual(g.row, "stage")                              # browsing at once
+        self.assertEqual(g.rows(), ("filter", "media", "footer"))
+        self.assertEqual(g.row, "media")                              # the clip's controls at once
         self.assertTrue(g.stage.hasFocus())
         self.key(Qt.Key_Up)
         self.assertEqual(g.row, "filter")
         self.assertTrue(g.tabs["all"].hasFocus())
         self.key(Qt.Key_Up)                                           # nothing above
         self.assertEqual(g.row, "filter")
-        for want in ("stage", "player", "footer", "footer"):          # never down into the bar row
+        for want in ("media", "footer", "footer"):                    # never down into the bar row
             self.key(Qt.Key_Down)
             self.assertEqual(g.row, want)
         self.assertTrue(g.footer.trash.hasFocus())
         self.assertEqual(bar.mode, "gallery")
         self.key(Qt.Key_Up)
-        self.assertTrue(g.panel.w["play"].hasFocus())                 # the player row: its play button
-        self.key(Qt.Key_PageDown)                                     # a screenshot: no player row
+        self.assertTrue(g.stage.hasFocus())                           # the media row: the picture holds the keys
+        self.key(Qt.Key_PageDown)                                     # a screenshot: the same three rows
         self.settle_items(g)
-        self.assertEqual(g.rows(), ("filter", "stage", "footer"))
-        self.assertEqual(g.row, "stage")
+        self.assertEqual(g.rows(), ("filter", "media", "footer"))
+        self.assertEqual(g.row, "media")
         self.assertTrue(g.stage.hasFocus())
+        bar.on_pad_action("down")                                     # the controller moves the same way
+        self.assertEqual(g.row, "footer")
+        bar.on_pad_action("up")
+        bar.on_pad_action("up")
+        self.assertEqual(g.row, "filter")
 
     def test_left_right_in_each_row(self):
         bar = self.bar()
         g = self.open(bar)
-        self.key(Qt.Key_Right)                                        # stage: the next item
-        self.assertEqual(g.index, 1)
-        self.key(Qt.Key_Left)
-        self.settle_items(g)
-        self.assertEqual(g.index, 0)
-        self.key(Qt.Key_Down)                                         # player: -10 / +10 s
-        self.key(Qt.Key_Right)
+        self.key(Qt.Key_Right)                                        # media, a clip: +10 s, never browse
         self.assertEqual(self.player.calls[-1], ("setPosition", 10_000))
         self.key(Qt.Key_Left)
         self.assertEqual(self.player.calls[-1], ("setPosition", 0))
-        self.assertTrue(g.panel.w["play"].hasFocus())                 # the ring stays on play
+        bar.on_pad_action("right")                                    # the D-pad the same
+        self.assertEqual(self.player.calls[-1], ("setPosition", 10_000))
         self.assertEqual(g.index, 0)
+        self.assertTrue(g.stage.hasFocus())                           # the ring stays on the media row
         self.key(Qt.Key_Return)                                       # A / Enter: play / pause
         self.assertEqual(self.player.calls[-1], "pause")
-        self.key(Qt.Key_Up)
+        bar.on_pad_action("accept")
+        self.assertEqual(self.player.calls[-1], "play")
+        self.assertIsNone(g.full)
+        self.key(Qt.Key_PageDown)                                     # media, a screenshot: nothing to seek
+        self.settle_items(g)
+        calls = list(self.player.calls)
+        self.key(Qt.Key_Right)
+        bar.on_pad_action("left")
+        self.assertEqual((g.index, self.player.calls), (1, calls))
+        self.assertTrue(g.stage.hasFocus())
+        bar.on_pad_action("accept")                                   # A on a screenshot: full screen
+        self.assertIsNotNone(g.full)
+        bar.on_pad_action("accept")
+        self.assertIsNone(g.full)
         self.key(Qt.Key_Up)                                           # filter: left / right switch it
         self.key(Qt.Key_Right)
         self.assertEqual(g.filter, "clip")
         self.assertTrue(g.tabs["clip"].hasFocus())
-        self.key(Qt.Key_Down)
+        bar.on_pad_action("left")
+        self.assertEqual(g.filter, "all")
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Down)                                         # footer: the bin <-> Back
         self.assertTrue(g.footer.trash.hasFocus())
@@ -1255,74 +1278,169 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(g.footer.back.hasFocus())
         self.key(Qt.Key_Right)                                        # the last one: stays
         self.assertTrue(g.footer.back.hasFocus())
+        bar.on_pad_action("left")
+        self.assertTrue(g.footer.trash.hasFocus())
+        bar.on_pad_action("right")
         self.key(Qt.Key_Return)                                       # A on Back: the gallery closes
         self.assertEqual(bar.mode, "clip")
 
     def test_bumpers_and_triggers_from_any_row(self):
+        """LB / RB (and PgUp / PgDn) browse from every row, the focus staying in its row."""
         bar = self.bar()
         g = self.open(bar)
         self.settle_items(g)
-        for _ in range(2):
-            bar.on_pad_action("down")                                 # the footer
-        bar.on_pad_action("right_trigger")                            # RT: +10 s from here
+        for row in ("filter", "media", "footer"):
+            g.jump(0)
+            self.settle_items(g)
+            g.set_row(row)
+            focused = QApplication.focusWidget()
+            bar.on_pad_action("next_section")                         # RB: the next item...
+            self.assertEqual(g.index, 1, row)
+            self.assertEqual(g.row, row)                              # ...the focus stays in its row
+            self.assertIs(QApplication.focusWidget(), focused, row)
+            bar.on_pad_action("prev_section")                         # LB: back
+            self.assertEqual(g.index, 0, row)
+            self.key(Qt.Key_PageDown)                                 # the keys the same
+            self.assertEqual(g.index, 1, row)
+            self.key(Qt.Key_PageUp)
+            self.assertEqual((g.index, g.row), (0, row))
+        self.settle_items(g)
+        bar.on_pad_action("right_trigger")                            # RT: +10 s from here (the footer)
         self.assertEqual(self.player.calls[-1], ("setPosition", 10_000))
-        bar.on_pad_action("next_section")                             # RB: the next item...
-        self.assertEqual(g.index, 1)
-        self.assertEqual(g.row, "footer")                             # ...the focus stays in its row
-        self.assertTrue(g.footer.trash.hasFocus())
-        bar.on_pad_action("up")                                       # a screenshot: stage, no player
-        self.assertEqual(g.row, "stage")
-        bar.on_pad_action("prev_section")
-        self.assertEqual(g.index, 0)
+        self.assertEqual(g.row, "footer")
 
     def test_hints_follow_the_focus(self):
         gm = self.gallery_mod
         bar = self.bar()
         g = self.open(bar)
-        self.assertEqual(g.footer.hint, gm.CLIP_KEYS)
-        self.assertEqual(g.footer.hint[0], (["←", "→"], "browse"))
-        self.key(Qt.Key_Down)
-        self.assertEqual(g.footer.hint, gm.PLAYER_KEYS)
-        self.assertEqual(g.footer.hint[0], (["←", "→"], "10 s"))
-        pump(self.app, 0.25)
-        self.shot(bar, "20-focus-player")
-        self.key(Qt.Key_Up)
+        self.assertEqual(g.footer.hint, gm.CLIP_KEYS)                 # media, a clip
+        self.assertEqual(gm.CLIP_KEYS, [(["←", "→"], "10 s"), (["Space"], "play"), (["PgUp", "PgDn"], "browse")])
         self.key(Qt.Key_Up)
         self.assertEqual(g.footer.hint, gm.FILTER_KEYS)
-        self.key(Qt.Key_Down)
+        self.assertEqual(gm.FILTER_KEYS, [(["←", "→"], "filter")])
         self.key(Qt.Key_Down)
         self.key(Qt.Key_Down)
         self.assertEqual(g.footer.hint, gm.FOOTER_KEYS)
+        self.assertEqual(gm.FOOTER_KEYS, [(["←", "→"], "move")])
+        self.key(Qt.Key_Up)
+        self.key(Qt.Key_PageDown)                                     # media, a screenshot
+        self.settle_items(g)
+        self.assertEqual(g.footer.hint, gm.SHOT_KEYS)
+        self.assertEqual(gm.SHOT_KEYS, [(["PgUp", "PgDn"], "browse"), (["Enter"], "full screen")])
+
+    def test_hints_follow_the_focus_with_a_pad(self):
+        """The pad's own symbols, per row: Xbox, then a DualSense."""
+        gm = self.gallery_mod
+        bar, made = self.pad_bar()
+        g = self.open(bar)
+        want = {"media": [(["◀", "▶"], "10 s"), (["A"], "play"), (["LB", "RB"], "browse")],
+                "filter": [(["◀", "▶"], "filter")], "footer": [(["◀", "▶"], "move")]}
+        for row in ("media", "filter", "footer"):
+            g.set_row(row)
+            self.assertEqual(g.footer.hint, want[row], row)
+        g.set_row("media")
+        bar.on_pad_action("next_section")                             # a screenshot
+        self.settle_items(g)
+        self.assertEqual(g.footer.hint, [(["LB", "RB"], "browse"), (["A"], "full screen")])
 
     def test_hints_follow_the_focus_with_a_ps_pad(self):
         gm = self.gallery_mod
         self.screen_size()
         bar, made = self.two_pad_bar(("ps",))
         g = self.open(bar)
-        self.assertEqual(g.footer.hint[0], (["←", "→"], "browse"))
-        bar.on_pad_action("down")
-        self.assertEqual(g.footer.hint, gm.pad_hint(gm.PAD_PLAYER, "playstation"))
-        self.assertIn((["L1", "R1"], "browse"), g.footer.hint)
-        self.assertIn((["✕"], "play"), g.footer.hint)
+        self.assertEqual(g.footer.hint, [(["◀", "▶"], "10 s"), (["✕"], "play"), (["L1", "R1"], "browse")])
         self.player.advance(21_000)
         pump(self.app, 0.25)
-        self.shot(bar, "21-focus-player-playstation")
-        bar.on_pad_action("up")
+        self.shot(bar, "21-focus-media-playstation")
         bar.on_pad_action("up")
         self.assertEqual(g.footer.hint, gm.pad_hint(gm.PAD_FILTER, "playstation"))
+        self.assertEqual(g.footer.hint, [(["◀", "▶"], "filter")])
+        bar.on_pad_action("down")
+        bar.on_pad_action("down")
+        self.assertEqual(g.footer.hint, [(["◀", "▶"], "move")])
 
     def test_ring_and_highlight_only_for_keys_and_controllers(self):
         bar = self.bar()
         g = self.open(bar)
         self.assertTrue(bar.focus_visible)
-        self.assertEqual(g.glow["stage"], 1.0)                        # the focused row glows
+        self.assertEqual(g.glow["media"], 1.0)                        # the focused row: ring and glow
         self.key(Qt.Key_Down)
-        self.assertEqual((g.glow["stage"], g.glow["player"]), (0.0, 1.0))
+        self.assertEqual((g.glow["media"], g.glow["footer"]), (0.0, 1.0))
         QTest.mouseClick(g.panel.w["mute"], Qt.LeftButton)            # the mouse: no ring, no glow
         self.assertFalse(bar.focus_visible)
         self.assertEqual(max(g.glow.values()), 0.0)
-        self.key(Qt.Key_Up)                                           # a key: back
-        self.assertEqual(g.glow["stage"], 1.0)
+        self.key(Qt.Key_Up)                                           # a key: back (the click chose the media)
+        self.assertEqual(g.glow["filter"], 1.0)
+
+    def ring_rows(self, g):
+        """Each row's ring in the panel (outer edge, the soft glow included), row by row."""
+        gm = self.gallery_mod
+        out = {}
+        for row in gm.ROWS:
+            g.set_row(row)
+            self.assertEqual(g.glow[row], 1.0, row)
+            out[row] = g.row_rect(row).adjusted(-gm.RING_W / 2 - 2, -gm.RING_W / 2 - 2,
+                                                gm.RING_W / 2 + 2, gm.RING_W / 2 + 2)
+        return out
+
+    def test_white_ring_inside_the_panel_on_every_row(self):
+        """The white ring goes around the focused row, fully inside the panel (clear of its
+        edges and the bar's rounded corners), with room between the rows; it is painted."""
+        gm = self.gallery_mod
+        self.screen_size()
+        bar = self.bar()
+        g = self.open(bar)
+        self.player.advance(21_000)
+        panel = QRectF(g.panel_w.rect())
+        rings = self.ring_rows(g)
+        for row, r in rings.items():
+            self.assertTrue(panel.adjusted(5, 5, -5, -5).contains(r), (row, r, panel))
+        self.assertGreaterEqual(rings["filter"].top(), gm.EDGE_GAP - 3)              # the panel's top edge
+        self.assertGreaterEqual(panel.bottom() - rings["footer"].bottom(), gm.EDGE_GAP - 3)
+        for above, below in (("filter", "media"), ("media", "footer")):             # a hairline between
+            self.assertGreaterEqual(rings[below].top() - rings[above].bottom(), 2 * (gm.ZONE_GAP - 3) + 1)
+        stage = QRectF(QPointF(g.stage.mapTo(g.panel_w, QPoint(0, 0))), QSizeF(g.stage.size()))
+        ctrl = QRectF(QPointF(g.player_row.mapTo(g.panel_w, QPoint(0, 0))), QSizeF(g.player_row.size()))
+        media = g.row_rect("media")                                   # one ring around the picture and its controls
+        self.assertTrue(media.contains(stage) and media.contains(ctrl))
+        self.assertEqual(round(stage.width() * 9 / 16), round(stage.height()))
+        # painted: white on the ring's edge (in the middle of its top and bottom), dark inside
+        dpr = g.panel_w.devicePixelRatioF()
+        for row in gm.ROWS:
+            g.set_row(row)
+            for b in bar.findChildren(QPushButton):
+                if hasattr(b, "settle"):
+                    b.settle()
+            img = g.panel_w.grab().toImage()
+            r = g.row_rect(row)
+            x = r.center().x() * 0.3 + r.left() * 0.7                # left of the hints / the picture's badge
+            def lightest(x, y):               # across the pen's width, in device pixels
+                return max(QColor(img.pixel(round(x * dpr), round(y * dpr) + d)).lightness() for d in (-1, 0, 1))
+            for y in (r.top(), r.bottom()):
+                self.assertGreater(lightest(x, y), 200, (row, y, dpr))
+            for other in set(gm.ROWS) - {row}:                        # the other rows have no ring
+                o = g.row_rect(other)
+                self.assertLess(lightest(o.center().x() * 0.3 + o.left() * 0.7, o.top()), 90, (row, other))
+
+    def test_review_focus_rows(self):
+        """Review pictures of each focused row (run with QT_SCALE_FACTOR=1.2 for the Ally)."""
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        self.screen_size(round(1920 / dpr), round(1080 / dpr))
+        bar = self.bar()
+        g = self.open(bar)
+        self.player.advance(21_000)
+        pump(self.app, 0.1)
+        g.set_row("filter")
+        self.shot(bar, "30-focus-filter")
+        g.set_row("media")
+        self.shot(bar, "31-focus-media-clip")
+        g.set_row("footer")
+        self.shot(bar, "33-focus-footer")
+        g.set_row("media")
+        self.key(Qt.Key_PageDown)
+        self.settle_items(g)
+        self.shot(bar, "32-focus-media-screenshot")
+        self.assertTrue(g.is_shot())
 
     def test_highlight_eases_between_rows(self):
         self.motion()
@@ -1330,34 +1448,43 @@ class GalleryOffscreen(unittest.TestCase):
         g = self.open(bar)
         self.settle_motion(g)
         self.key(Qt.Key_Down)
-        self.wait_for(lambda: 0.3 < g.glow["player"] < 0.8, timeout=1)
-        self.assertGreater(g.glow["stage"], 0.0)                      # the row left fades meanwhile
-        self.assertLess(g.glow["stage"], 1.0)
+        self.wait_for(lambda: 0.3 < g.glow["footer"] < 0.8, timeout=1)
+        self.assertGreater(g.glow["media"], 0.0)                      # the row left fades meanwhile
+        self.assertLess(g.glow["media"], 1.0)
         g.glow_tween.anim.pause()                                     # a still of the middle, for review
         self.shot(bar, "22-focus-glow-mid")
         g.glow_tween.anim.resume()
         pump(self.app, 0.25)
-        self.assertEqual((g.glow["stage"], g.glow["player"]), (0.0, 1.0))
+        self.assertEqual((g.glow["media"], g.glow["footer"]), (0.0, 1.0))
         self.assertEqual(g.stage.size(), g.stage_size)                # nothing relaid out
 
     def test_full_screen_rows(self):
+        """Full screen is the media row alone: ← → seek, A plays, LB / RB browse."""
         bar = self.bar()
         g = self.open(bar)
         self.key(Qt.Key_F)
         self.assertIsNotNone(g.full)
-        self.assertEqual(g.rows(), ("stage", "player"))
-        self.assertEqual(g.row, "stage")
-        self.key(Qt.Key_Down)                                         # the strip's player
-        self.assertEqual(g.row, "player")
-        self.assertTrue(g.fullc.w["play"].hasFocus())
+        self.assertEqual(g.rows(), ("media",))
+        self.assertEqual(g.row, "media")
+        self.assertTrue(g.full.hasFocus())
+        self.key(Qt.Key_Down)                                         # nowhere else to go
+        self.assertEqual(g.row, "media")
+        self.assertTrue(g.full.hasFocus())
         self.key(Qt.Key_Right)
         self.assertEqual(self.player.calls[-1], ("setPosition", 10_000))
-        self.key(Qt.Key_Up)
-        self.assertEqual(g.row, "stage")
-        self.key(Qt.Key_Right)                                        # the stage: browse
+        bar.on_pad_action("left")
+        self.assertEqual(self.player.calls[-1], ("setPosition", 0))
+        bar.on_pad_action("accept")                                   # A: pause
+        self.assertEqual(self.player.calls[-1], "pause")
+        self.assertIsNotNone(g.full)
+        self.assertEqual(g.index, 0)
+        bar.on_pad_action("next_section")                             # RB: browse
         self.assertEqual(g.index, 1)
-        self.key(Qt.Key_Escape)
+        self.settle_items(g)
+        bar.on_pad_action("accept")                                   # A on a screenshot: leave full screen
         self.assertIsNone(g.full)
+        self.assertEqual(g.row, "media")
+        self.assertTrue(g.stage.hasFocus())
 
     def test_keyboard_hints_without_a_controller(self):
         """No controller (the sandbox opens none): the keys, for a clip and a screenshot."""
@@ -1367,11 +1494,11 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertFalse(bar.pad_connected())
         g = self.open(bar)
         self.assertEqual(g.footer.hint, gm.CLIP_KEYS)
-        self.assertIn((["M"], "sound"), gm.CLIP_KEYS)
+        self.assertIn((["PgUp", "PgDn"], "browse"), gm.CLIP_KEYS)
         self.player.advance(21_000)
         pump(self.app, 0.05)
         self.shot(bar, "15-above-clip-keyboard")
-        self.key(Qt.Key_Right)                                        # a screenshot, selected
+        self.key(Qt.Key_PageDown)                                     # a screenshot, selected
         self.settle_items(g)
         self.assertEqual(g.footer.hint, gm.SHOT_KEYS)
         pump(self.app, 0.05)
@@ -1433,7 +1560,6 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertEqual(f["mute"].kind, "sound")
         self.key(Qt.Key_Escape)
         self.assertEqual(w["mute"].kind, "sound")                     # the panel shows it too
-        self.assertIn((["X"], "sound"), self.gallery_mod.CLIP_HINT)
 
     def test_end_stays_on_last_frame_and_replays(self):
         bar = self.bar()
@@ -1461,7 +1587,9 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_L)
         self.assertTrue(bar.idle.isActive())
         self.shot(bar, "11-clip-error")
-        self.key(Qt.Key_Right)                                        # a screenshot still shows
+        self.key(Qt.Key_Right)                                        # no seek on a clip that can't play
+        self.assertEqual(g.index, 0)
+        self.key(Qt.Key_PageDown)                                     # a screenshot still shows
         self.settle_items(g)
         self.assertEqual(g.state, "shown")
 
@@ -1486,8 +1614,8 @@ class GalleryOffscreen(unittest.TestCase):
         g = self.open(bar)
         self.assertEqual(g.state, "playing")
         self.assertFalse(bar.idle.isActive())                         # never hides mid-clip
-        self.key(Qt.Key_Right)                                        # input doesn't restart it
-        self.key(Qt.Key_Left)
+        self.key(Qt.Key_PageDown)                                     # input doesn't restart it
+        self.key(Qt.Key_PageUp)
         self.settle_items(g)
         self.assertEqual(g.state, "playing")
         self.assertFalse(bar.idle.isActive())
@@ -1663,17 +1791,19 @@ class GalleryOffscreen(unittest.TestCase):
         bar = self.bar()
         g = self.open(bar)
         self.settle_motion(g)
-        self.key(Qt.Key_Right)                                        # to a screenshot
+        self.key(Qt.Key_PageDown)                                     # to a screenshot
         self.assertIsNotNone(g.out_img)                               # the clip's last picture holds...
         self.assertTrue(g.xf_waiting)
         self.assertEqual(g.out_dir, 1)
-        self.assertEqual((g.out_img.width(), g.out_img.height()), (g.stage.width(), g.stage.height()))
+        dpr = g.stage.devicePixelRatioF()                             # (device pixels at 1.2)
+        self.assertEqual((g.out_img.width(), g.out_img.height()), (int(g.stage.width() * dpr),
+                                                                   int(g.stage.height() * dpr)))
         self.wait_for(lambda: g.state == "shown", timeout=3)          # ...until the new one is read
         self.assertFalse(g.xf_waiting)
         self.wait_for(lambda: g.out_img is None, timeout=2)           # then fades out and is let go
         self.assertEqual(g.xf, 1.0)
         for _ in range(4):                                            # rapid browsing: never a queue
-            self.key(Qt.Key_Right)
+            self.key(Qt.Key_PageDown)
             pump(self.app, 0.03)
             self.assertLessEqual(sum(x is not None for x in (g.out_img,)), 1)
         self.assertEqual(g.current().path, self.clip2)
@@ -1771,23 +1901,23 @@ class GalleryOffscreen(unittest.TestCase):
         self.assertTrue(view.isFullScreen())                          # the window fallback offscreen
         self.assertTrue(view.strips["clip"].isVisible())
         self.assertFalse(view.strips["shot"].isVisible())
-        self.assertTrue(view.hasFocus())                              # the stage row; ↓ for the player
+        self.assertTrue(view.hasFocus())                              # the media row, the only one
         self.assertEqual(g.fullc.w["full"].kind, "unfull")
         strip = view.strips["clip"]
         self.assertEqual(strip.width(), view.width() - 64)
         self.assertEqual(view.height() - strip.geometry().bottom() - 1, 32)
         self.full_shot(view, "07-fullscreen-clip")
-        self.key(Qt.Key_Right)                                        # browsing works full screen
+        self.key(Qt.Key_PageDown)                                     # browsing works full screen
         self.settle_items(g)
         self.assertTrue(g.is_shot())
         self.assertTrue(view.strips["shot"].isVisible())
-        self.assertTrue(view.hasFocus())                              # browsing: the stage row
+        self.assertTrue(view.hasFocus())                              # browsing: the media row
         g.fullc.w["shotfull"].setFocus()
         pump(self.app, 0.05)
         g._load_image(g.current(), QSize(1920, 1080))               # as sharp as on a real screen
         self.settle_items(g)
         self.full_shot(view, "08-fullscreen-screenshot")
-        self.key(Qt.Key_Left)
+        self.key(Qt.Key_PageUp)
         g.chrome_timer.timeout.emit()                                 # 2.5 s without input
         self.assertFalse(g.chrome)
         self.assertFalse(view.strips["clip"].isVisible())
@@ -1797,7 +1927,7 @@ class GalleryOffscreen(unittest.TestCase):
         pump(self.app, 0.05)
         self.assertIsNone(g.full)
         self.assertEqual(bar.mode, "gallery")
-        self.assertTrue(g.stage.hasFocus())                           # back on the stage row
+        self.assertTrue(g.stage.hasFocus())                           # back on the media row
         self.key(Qt.Key_F)                                            # F: full screen again
         self.assertIsNotNone(g.full)
         self.key(Qt.Key_F)
@@ -1814,12 +1944,13 @@ class GalleryOffscreen(unittest.TestCase):
         g.set_filter("shot")
         self.settle_items(g)
         self.assertTrue(g.tabs["shot"].hasFocus())
-        bar.on_pad_action("accept")                                   # A on the filter row: the stage
-        self.assertEqual(g.row, "stage")
+        bar.on_pad_action("accept")                                   # A on the filter row: the media
+        self.assertEqual(g.row, "media")
         bar.on_pad_action("accept")                                   # A on a screenshot
         self.assertIsNotNone(g.full)
         self.settle_items(g)
-        self.assertEqual(g.frame.width(), min(1920, g.full.width()))  # read again at the screen's size
+        self.assertEqual(g.frame.width(),                             # read again at the screen's size
+                         min(1920, int(g.full.width() * g.full.devicePixelRatioF())))
         bar.on_pad_action("accept")
         self.assertIsNone(g.full)
 
@@ -1920,7 +2051,7 @@ class GalleryOffscreen(unittest.TestCase):
         self.key(Qt.Key_M)                                            # an audio output exists
         self.key(Qt.Key_F)                                            # and a full screen view
         objs = {"player": g.player, "sink": g.sink, "audio": g.audio, "full": g.full}
-        self.key(Qt.Key_Right)                                        # a screenshot, read in a worker
+        self.key(Qt.Key_PageDown)                                     # a screenshot, read in a worker
         self.settle_items(g)
         self.assertEqual(g.state, "shown")
         FakePlayer.made.clear()                                       # the test's own strong references
