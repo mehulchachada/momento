@@ -489,7 +489,7 @@ class DaemonContractTest(_DaemonCase):
         with mock.patch.object(codecs.DETECTOR, "ready", return_value=amd), \
                 mock.patch.object(codecs.DETECTOR, "wait", return_value=amd):
             r = self.check({"cmd": "settings"}, ok=True)
-            self.assertEqual((r["format_allowed"], r["format_auto"]), (["auto", "h264", "av1"], "av1"))
+            self.assertEqual((r["format_allowed"], r["format_auto"]), (["auto", "h264", "av1"], "h264"))
             before = self.d.recorder
             r = self.check({"cmd": "configure", "changes": {"format": "hevc"}}, ok=True)
             self.assertEqual((r["changed"], r["restarted"]), ({"format": "h265"}, True))   # restarts, like resolution

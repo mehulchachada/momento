@@ -56,12 +56,25 @@ def _gst_has(element: str) -> bool:
 
 
 class AutoRuleTest(unittest.TestCase):
-    def test_amd_vcn4_records_av1(self):
-        self.assertEqual(AMD_VCN4.auto(), "av1")
+    def test_amd_vcn4_records_h264_for_now(self):
+        # AMD -> AV1 is off since the 2026-09-27 VCN hang: H.264 works in hardware here.
+        self.assertEqual(AMD_VCN4.auto(), "h264")
+        self.assertEqual(codecs.plan("auto", AMD_VCN4), ["h264"])
+        self.assertEqual(codecs.allowed(AMD_VCN4), ["auto", "h264", "h265", "av1"])  # still manual choices
 
     def test_everything_else_records_h264(self):
         for det in (AMD_VCN3, INTEL_ARC, NVIDIA_RTX40, codecs.UNKNOWN):
             self.assertEqual(det.auto(), "h264", det)
+
+    def test_the_amd_av1_rule_is_there_but_off(self):
+        self.assertEqual(codecs.AUTO_RULES, ())
+        source = Path(codecs.__file__).read_text()
+        self.assertIn('# ("amd", "vaav1enc", "av1"),', source)   # ready to turn back on
+
+    def test_a_rule_still_works_when_turned_on(self):
+        with mock.patch.object(codecs, "AUTO_RULES", (("amd", "vaav1enc", "av1"),)):
+            self.assertEqual(AMD_VCN4.auto(), "av1")
+            self.assertEqual(AMD_VCN3.auto(), "h264")
 
     def test_amd_av1_needs_the_va_encoder_to_work(self):
         # an AV1 encoder that exists but fails its test encode (VCN 3) is no reason
@@ -93,7 +106,7 @@ class PlanTest(unittest.TestCase):
     def test_fallback_order(self):
         self.assertEqual(codecs.FALLBACK, ("av1", "h265", "h264"))
         self.assertEqual(codecs.plan("av1", AMD_VCN4), ["av1", "h265", "h264"])
-        self.assertEqual(codecs.plan("auto", AMD_VCN4), ["av1", "h265", "h264"])
+        self.assertEqual(codecs.plan("auto", AMD_VCN4), ["h264"])
         self.assertEqual(codecs.plan("h265", AMD_VCN4), ["h265", "h264"])   # never up the list
         self.assertEqual(codecs.plan("h264", AMD_VCN4), ["h264"])
         self.assertEqual(codecs.plan("auto", AMD_VCN3), ["h264"])
@@ -105,14 +118,15 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(codecs.plan("av1", FEDORA_RDNA3), ["av1", "h264"])
 
     def test_failed_formats_are_skipped(self):
-        self.assertEqual(codecs.plan("auto", AMD_VCN4, failed={"av1"}), ["h265", "h264"])
-        self.assertEqual(codecs.plan("auto", AMD_VCN4, failed={"av1", "h265"}), ["h264"])
+        self.assertEqual(codecs.plan("av1", AMD_VCN4, failed={"av1"}), ["h265", "h264"])
+        self.assertEqual(codecs.plan("av1", AMD_VCN4, failed={"av1", "h265"}), ["h264"])
+        self.assertEqual(codecs.plan("auto", FEDORA_RDNA3, failed={"av1"}), ["h264"])
         self.assertEqual(codecs.plan("h264", AMD_VCN4, failed={"h264"}), ["h264"])   # always last
 
     def test_unknown_detection_tries_everything(self):
         self.assertEqual(codecs.plan("av1", None), ["av1", "h265", "h264"])
         self.assertEqual(codecs.plan("auto", None), ["h264"])
-        self.assertEqual(codecs.plan("bogus", AMD_VCN4), ["av1", "h265", "h264"])   # read as auto
+        self.assertEqual(codecs.plan("bogus", AMD_VCN4), ["h264"])   # read as auto
 
     def test_allowed(self):
         self.assertEqual(codecs.allowed(AMD_VCN4), ["auto", "h264", "h265", "av1"])
@@ -175,7 +189,7 @@ class DetectorTest(unittest.TestCase):
     def test_first_run_probes_and_caches(self):
         det = self.run_detection(self.detector())
         self.assertEqual(self.probes, [("vah264enc", "vaav1enc")])
-        self.assertEqual((det.vendor, det.auto()), ("amd", "av1"))
+        self.assertEqual((det.vendor, det.auto()), ("amd", "h264"))
         data = json.loads(self.path.read_text())
         self.assertEqual((data["key"], data["works"]), (self.key, {"vah264enc": True, "vaav1enc": True}))
 
@@ -184,7 +198,7 @@ class DetectorTest(unittest.TestCase):
         self.probes.clear()
         det = self.run_detection(self.detector(works={}))
         self.assertEqual(self.probes, [])                 # no test encode
-        self.assertEqual(det.auto(), "av1")
+        self.assertEqual(det.works, {"vah264enc": True, "vaav1enc": True})
 
     def test_new_key_probes_again(self):
         self.run_detection(self.detector())
@@ -192,7 +206,7 @@ class DetectorTest(unittest.TestCase):
         det = self.run_detection(self.detector(works={"vah264enc": True, "vaav1enc": False},
                                                key={**self.key, "driver": "Mesa 26.3.0"}))
         self.assertEqual(len(self.probes), 1)
-        self.assertEqual(det.auto(), "h264")
+        self.assertFalse(det.hardware("av1"))
 
     def test_broken_cache_probes_again(self):
         self.path.write_text("{not json")
@@ -226,7 +240,7 @@ class DetectorTest(unittest.TestCase):
     def test_cached_reads_without_the_key(self):
         self.run_detection(self.detector())
         with mock.patch.object(codecs, "cache_path", return_value=self.path):
-            self.assertEqual(codecs.cached().auto(), "av1")
+            self.assertTrue(codecs.cached().hardware("av1"))
         self.assertIsNone(codecs.load_cache(self.path / "missing"))
 
     def test_gpus_and_vendor(self):
@@ -319,7 +333,7 @@ class FormatSettingTest(unittest.TestCase):
         d = settings.describe(cfg, devices={"outputs": [], "inputs": []}, formats=AMD_VCN3)
         self.assertEqual(d["format_effective"], "h265")      # can't record AV1: the fallback
         d = settings.describe(cfg, devices={"outputs": [], "inputs": []}, formats=AMD_VCN4, failed={"av1"})
-        self.assertEqual((d["format_auto"], d["format_effective"]), ("h265", "h265"))
+        self.assertEqual((d["format_auto"], d["format_effective"]), ("h264", "h265"))
 
     def test_describe_without_a_detection(self):
         with mock.patch.object(codecs, "cached", return_value=None):
@@ -429,9 +443,16 @@ class RecorderFormatTest(unittest.TestCase):
     def encoders(self, rec):
         return [(v.encoder, v.zero_copy) for v in rec._variants]
 
-    def test_auto_on_amd_vcn4(self):
+    def test_auto_on_amd_vcn4_is_h264(self):
         self.detector._result = AMD_VCN4
         rec = self.recorder()
+        rec.start()
+        self.assertEqual(rec._formats, ["h264"])
+        self.assertEqual(self.encoders(rec)[0], ("vah264enc", True))
+
+    def test_av1_on_amd_vcn4(self):
+        self.detector._result = AMD_VCN4
+        rec = self.recorder(format="av1")
         rec.start()
         self.assertEqual(rec._formats, ["av1", "h265", "h264"])
         names = [e for e, _z in self.encoders(rec)]
@@ -458,7 +479,7 @@ class RecorderFormatTest(unittest.TestCase):
         started = threading.Event()
         callbacks = []
         self.detector.ensure = lambda cb=None: (callbacks.append(cb), started.set())
-        rec = self.recorder()                              # auto: needs to know
+        rec = self.recorder(format="av1")                  # needs to know (so does auto)
         with mock.patch.object(self.p.GLib, "idle_add", side_effect=lambda fn, *a: fn(*a)):
             rec.start()
             self.assertTrue(started.is_set())
@@ -486,7 +507,7 @@ class RecorderFormatTest(unittest.TestCase):
 
     def test_failed_format_falls_back_once(self):
         self.detector._result = AMD_VCN4
-        rec = self.recorder()
+        rec = self.recorder(format="av1")
         rec.start()
         with mock.patch.object(self.p.GLib, "idle_add") as idle, \
                 self.assertLogs("momento.pipeline", "WARNING") as logs:
@@ -499,14 +520,14 @@ class RecorderFormatTest(unittest.TestCase):
         self.assertEqual(self.detector.failed, {"av1"})
         self.assertIn("AV1 didn't start", "\n".join(logs.output))
         # The next start skips AV1 straight away (no second fallback to report).
-        rec2 = self.recorder()
+        rec2 = self.recorder(format="av1")
         rec2.start()
         self.assertEqual(rec2._formats, ["h265", "h264"])
         self.assertIsNone(rec2.format_fallback)
 
     def test_a_source_failure_never_changes_the_format(self):
         self.detector._result = AMD_VCN4
-        rec = self.recorder()
+        rec = self.recorder(format="av1")
         rec.start()
         rec._variant_idx = 1                                       # the last AV1 variant
         with mock.patch.object(rec, "_error_and_retry") as retry:

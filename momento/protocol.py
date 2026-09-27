@@ -223,9 +223,9 @@ Video formats: ``FORMAT_CHOICES`` (auto, h264, h265, av1; default auto).
 Clips are MP4 in every format. The daemon test-encodes a few frames with each
 hardware encoder once per GPU + driver (cached); formats with no working
 hardware encoder are left out of ``format_allowed`` (H.264 is always allowed:
-software is its last resort). Auto records in AV1 on AMD GPUs whose AV1 test
-encode works (VCN 4 and newer), else H.264 (else the first of AV1, H.265 with
-working hardware). A format that fails to start falls back to the next one
+software is its last resort). Auto records in H.264 when a hardware H.264
+encoder works, else the first of AV1, H.265 with working hardware (the AMD ->
+AV1 rule is off for now: ``codecs.AUTO_RULES``). A format that fails to start falls back to the next one
 that works in the order AV1 -> H.265 -> H.264 (``format_effective`` says which;
 the daemon sends one desktop notification). A ``format`` this machine can't
 record is saved as asked and records in that fallback. Changing ``format``

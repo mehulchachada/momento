@@ -26,7 +26,7 @@ KEYS = {
     "resolution": ", ".join(quality.RESOLUTIONS),
     "quality": ", ".join(quality.QUALITIES),
     "fps": ", ".join(map(str, quality.FPS_CHOICES)),
-    "format": "auto, h264, h265, av1 (auto picks the smoothest one your PC handles well; "
+    "format": "auto, h264, h265, av1 (auto picks a format your PC records well, H.264 on most PCs; "
               "h264 plays everywhere; h265 and av1 some older devices can't play)",
     "bitrate": "video kbps; 0 = automatic",
     "audio_source": "default, off, or an output's monitor source name",

@@ -1241,7 +1241,7 @@ class OverlayOffscreen(unittest.TestCase):
         _bar, fmt, _d = self.open_format()
         self.assertEqual([b.text() for b in fmt.buttons], ["Auto", "H.264", "H.265", "AV1"])
         self.assertTrue(all(b.isEnabled() for b in fmt.buttons))
-        self.assertEqual(fmt.note.text(), "Picks the smoothest one your PC handles well")
+        self.assertEqual(fmt.note.text(), "Picks a format your PC records well")
 
     # ---------------------------------------------------------------- pills / focus / hints
 

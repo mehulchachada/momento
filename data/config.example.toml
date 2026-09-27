@@ -56,8 +56,8 @@ quality = "high"
 bitrate_kbps = 0
 
 # Video format. Clips are MP4 either way:
-#   "auto"   the smoothest one your graphics chip records well: AV1 on AMD chips
-#            that can record it (RX 7000, Ryzen 7040 and newer, ROG Ally), else H.264
+#   "auto"   one your graphics chip records well: H.264 when it can record it,
+#            else the first of AV1 / H.265 it can
 #   "h264"   plays everywhere
 #   "h265"   smaller files; some older devices can't play it
 #   "av1"    smoothest on newer hardware; some older devices can't play it

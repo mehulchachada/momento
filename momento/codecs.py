@@ -98,23 +98,28 @@ PCI_VENDORS = {"0x1002": "amd", "0x8086": "intel", "0x10de": "nvidia"}
 # Auto picks, first match wins:
 #   1. AUTO_RULES: (GPU vendor, encoder whose test encode passed, format). Add rows
 #      here from tester reports (a format measured smoother than H.264 in real games
-#      on that hardware).
-#   2. H.264, when a hardware H.264 encoder works (plays everywhere).
+#      on that hardware, and stable there).
+#   2. H.264, when a hardware H.264 encoder works (plays everywhere). With the table
+#      empty, this is what Auto records in on every PC that has one.
 #   3. Otherwise the first format of FALLBACK with a working hardware encoder (stock
 #      Fedora Mesa: no H.264/H.265 VA encode, but AV1 is royalty-free and works).
 #   4. H.264 (software, the last resort; nothing else can record at all).
 #
-# AMD + vaav1enc -> AV1. Only VCN 4.0 and newer encode AV1: RDNA3 dGPUs (RX 7000),
-# and the Phoenix / Hawk Point / Strix APUs (Ryzen 7040/8040/AI 300, Z1 / Z2 in the
-# ROG Ally and Legion Go). VCN 3 (RDNA2, the Steam Deck's Van Gogh, Rembrandt)
-# decodes AV1 but has no AV1 encoder, and Mesa then doesn't expose an AV1 encode
-# entry point, so vaav1enc's test encode fails there. A working test encode on an
-# AMD GPU is therefore itself the "VCN 4 or newer" check, without a list of PCI
-# ids that goes stale with every new chip. Why AV1 there: in real-game A/B runs on
-# the ROG Ally (Z1 Extreme, 1080p60), AV1 had fewer frame-time spikes than H.264
-# in all three runs, with H.265 in between.
+# AMD + vaav1enc -> AV1 is switched off for now. On 2026-09-27 a ROG Ally (Z1
+# Extreme, Mesa 26.2.1 radeonsi, VCN 4) recording Full screen 1080p60 at Ultra
+# (25 Mbps) in AV1 hung the video engine ("ring vcn_unified_0 timeout") 3-5 s after
+# every start, and radeonsi then called abort(): the service crashed four times in
+# a row. Earlier AV1 runs at Standard (10 Mbps) on the same machine were fine.
+# Put the row back once AV1 is proven stable there (see START_GUARD for the crash
+# guard that catches a format killing the process).
+#
+# Why the row existed: only VCN 4.0 and newer encode AV1 (RDNA3 dGPUs, the Phoenix /
+# Hawk Point / Strix APUs, Z1 / Z2 in the ROG Ally and Legion Go); VCN 3 has no AV1
+# encoder, so vaav1enc's test encode fails there and a passing one is itself the
+# "VCN 4 or newer" check. In real-game A/B runs on the ROG Ally (1080p60, 10 Mbps),
+# AV1 had fewer frame-time spikes than H.264 in all three runs.
 AUTO_RULES = (
-    ("amd", "vaav1enc", "av1"),
+    # ("amd", "vaav1enc", "av1"),   # off since the 2026-09-27 VCN hang, see above
 )
 
 PROBE_FRAMES = 10

@@ -52,8 +52,8 @@ DEFAULTS = {
         "quality": "high",
         # 0 = derive from resolution + quality; any number overrides (kbps).
         "bitrate_kbps": 0,
-        # auto | h264 | h265 | av1: the video format. Auto picks the smoothest one this
-        # PC's graphics chip records well (AV1 on AMD chips that can, else H.264).
+        # auto | h264 | h265 | av1: the video format. Auto picks one this PC's graphics
+        # chip records well (H.264 when it can in hardware; see codecs.AUTO_RULES).
         # Clips are MP4 either way.
         "format": "auto",
         # auto (follows format) | one element, e.g. vah264enc | vah265enc | vaav1enc |

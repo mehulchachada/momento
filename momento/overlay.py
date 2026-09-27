@@ -1675,7 +1675,7 @@ def _build(argv=None):  # noqa: C901 - one cohesive UI builder
         selected one means (Auto: the same "Recording in" line).
         """
 
-        AUTO_HINT = "Picks the smoothest one your PC handles well"   # Auto's pick not known
+        AUTO_HINT = "Picks a format your PC records well"   # Auto's pick not known
 
         def __init__(self, bar, key, title, data, avail):
             from . import codecs
