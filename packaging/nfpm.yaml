@@ -8,7 +8,7 @@
 # Run from the repository root. Paths below are relative to it.
 #
 # Target distros (their package names are used below):
-#   .deb  Ubuntu 24.04+, Debian 13+ (older ones have no PySide6 packages)
+#   .deb  Ubuntu 25.04+, Debian 13+ (Ubuntu 24.04 and older have no PySide6 packages)
 #   .rpm  Fedora 41+ (openSUSE uses different package names — use OBS instead)
 #   .pkg  Arch Linux, CachyOS, EndeavourOS, Manjaro
 name: momento
