@@ -824,7 +824,7 @@ class ExporterCommandTest(unittest.TestCase):
 
         cmds = []
 
-        def fake_run(cmd, out):
+        def fake_run(cmd, out, cancel=None):
             cmds.append(cmd)
             Path(out).write_bytes(b"mp4")
         tmp = Path(tempfile.mkdtemp(prefix="momento-cmd-"))
